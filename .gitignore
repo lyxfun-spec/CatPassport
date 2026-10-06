@@ -1,0 +1,17 @@
+work/
+outputs/
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/managed_components/
+android/.gradle/
+android/**/build/
+android/local.properties
+*.jks
+*.keystore
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+

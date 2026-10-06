@@ -1,242 +1,395 @@
-// main/main.c —— FoloToy AI Passport BSP 驱动参考示例:初始化 + 菜单 + 按键分发。
-//
-// 按键语义(全局统一):
-//   上/下 短按   菜单中=移动选中项;演示页中=该页自定义
-//   确定  短按   菜单中=进入选中项;演示页中=该页自定义
-//   确定  长按   演示页中=返回菜单(由本文件统一拦截)
-#include "bsp_i2c.h"
-#include "bsp_display.h"
-#include "bsp_button.h"
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
 #include "bsp_audio.h"
 #include "bsp_battery.h"
-#include "bsp_pins.h"      // 错误日志里要打印 BSP_LCD_* 引脚号
-#include "demo.h"
-#include "demo_navigation.h"
-#include "ui_pixel.h"
-#include "lvgl.h"
+#include "bsp_button.h"
+#include "bsp_display.h"
+#include "bsp_i2c.h"
+#include "cat_adpcm.h"
+#include "cat_ble.h"
+#include "cat_protocol.h"
+#include "cat_state.h"
+#include "cat_ui.h"
 #include "esp_log.h"
-#include "esp_sleep.h"
+#include "esp_timer.h"
+#include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
-static const char *TAG = "main";
+#define APP_QUEUE_DEPTH 10
+#define AUDIO_SAMPLES 320U
+#define AUDIO_PAYLOAD_BYTES 160U
+#define AUDIO_PACKET_BYTES (CAT_AUDIO_HEADER_SIZE + AUDIO_PAYLOAD_BYTES)
+#define AUDIO_MAX_FRAMES 1500U
+#define BATTERY_REFRESH_MS 10000ULL
 
-static const demo_entry_t DEMOS[] = {
-    { .name = "Display", .enter = demo_display_enter, .exit = demo_display_exit,
-      .key = demo_display_key },
-    { .name = "Button", .enter = demo_button_enter, .exit = demo_button_exit,
-      .key = demo_button_key },
-    { .name = "Audio", .enter = demo_audio_enter, .exit = demo_audio_exit,
-      .key = demo_audio_key, .start = demo_audio_start, .stop = demo_audio_stop },
-    { .name = "Battery", .enter = demo_battery_enter, .exit = demo_battery_exit,
-      .key = demo_battery_key },
-    { .name = "Wi-Fi", .enter = demo_wifi_enter, .exit = demo_wifi_exit,
-      .key = demo_wifi_key, .start = demo_wifi_start, .stop = demo_wifi_stop },
-    { .name = "BLE", .enter = demo_ble_enter, .exit = demo_ble_exit,
-      .key = demo_ble_key, .start = demo_ble_start, .stop = demo_ble_stop },
-    { .name = "Low Power", .enter = demo_low_power_enter, .exit = demo_low_power_exit,
-      .key = demo_low_power_key, .start = demo_low_power_start, .stop = demo_low_power_stop },
-};
-#define DEMO_COUNT (sizeof(DEMOS) / sizeof(DEMOS[0]))
-#define INPUT_QUEUE_DEPTH 8
+typedef enum {
+    INPUT_BUTTON, INPUT_BLE_READY, INPUT_BLE_DISCONNECTED,
+    INPUT_BLE_FRAGMENT, INPUT_AUDIO_FINISHED,
+} input_type_t;
 
 typedef struct {
-    bsp_btn_t btn;
-    bsp_btn_ev_t event;
-} input_event_t;
+    input_type_t type;
+    union {
+        struct { bsp_btn_t button; bsp_btn_ev_t event; } key;
+        struct { uint16_t length; uint8_t bytes[244]; } fragment;
+        struct { uint16_t recording_id; uint16_t frames; bool canceled; bool failed; bool limit; } audio;
+    } data;
+} input_t;
 
-// 各外设初始化结果:失败的项在菜单里标 [FAIL] 且不允许进入。
-static bool s_ok[DEMO_COUNT];
+static const char *TAG = "cat_app";
+static QueueHandle_t s_queue;
+static TaskHandle_t s_audio_task;
+static cat_app_model_t s_model;
+static cat_protocol_reassembler_t s_reassembler;
+static uint8_t s_rx_buffer[CAT_ANSWER_MAX];
+static char s_text[CAT_ANSWER_MAX + 1U];
+static size_t s_text_length;
+static atomic_bool s_recording;
+static atomic_bool s_cancel_recording;
+static uint16_t s_message_id;
+static uint64_t s_last_battery_ms;
+static int s_battery = -1;
 
-static lv_obj_t *s_menu_scr;
-static lv_obj_t *s_cards[DEMO_COUNT];
-static lv_obj_t *s_rows[DEMO_COUNT];
-static lv_obj_t *s_mascot;
-static demo_navigation_t s_navigation;
-static QueueHandle_t s_input_queue;
-static TaskHandle_t s_input_task;
-static volatile bool s_input_ready;
-
-static void menu_refresh(void) {
-    for (size_t i = 0; i < DEMO_COUNT; i++) {
-        lv_label_set_text_fmt(s_rows[i], "%s%s",
-                              DEMOS[i].name,
-                              s_ok[i] ? "" : "  [FAIL]");
-        ui_pixel_set_selected(s_cards[i], i == s_navigation.selected, s_ok[i]);
-        lv_obj_set_style_text_color(s_rows[i],
-            s_ok[i] ? lv_color_hex(UI_INK) : lv_color_hex(0x7A2020), 0);
-    }
+static void write_le16(uint8_t *data, uint16_t value)
+{
+    data[0] = (uint8_t)value;
+    data[1] = (uint8_t)(value >> 8);
 }
 
-static void menu_build(void) {
-    s_menu_scr = ui_pixel_screen_create("FoloToy");
-
-    for (size_t i = 0; i < DEMO_COUNT; i++) {
-        int x = 11 + (int)(i % 2) * 112;
-        int y = 52 + (int)(i / 2) * 47;
-        s_cards[i] = ui_pixel_panel_create(s_menu_scr, x, y, 102, 40, UI_PAPER);
-        s_rows[i] = lv_label_create(s_cards[i]);
-        lv_obj_set_style_text_font(s_rows[i], &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_align(s_rows[i], LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_center(s_rows[i]);
-    }
-
-    s_mascot = ui_pixel_mascot_create(s_menu_scr, 101, 242);
-
-    menu_refresh();
-    lv_screen_load(s_menu_scr);
+static void write_le32(uint8_t *data, uint32_t value)
+{
+    data[0] = (uint8_t)value;
+    data[1] = (uint8_t)(value >> 8);
+    data[2] = (uint8_t)(value >> 16);
+    data[3] = (uint8_t)(value >> 24);
 }
 
-static void enter_menu(void) {
-    menu_build();
+static uint16_t next_message_id(void)
+{
+    if (++s_message_id == 0) ++s_message_id;
+    return s_message_id;
 }
 
-static demo_nav_input_t navigation_input(bsp_btn_t btn, bsp_btn_ev_t event) {
-    if (event == BSP_BTN_LONG && btn == BSP_BTN_OK) return DEMO_NAV_INPUT_OK_LONG;
-    if (event != BSP_BTN_CLICK) return DEMO_NAV_INPUT_OTHER;
-    if (btn == BSP_BTN_UP) return DEMO_NAV_INPUT_UP_CLICK;
-    if (btn == BSP_BTN_DOWN) return DEMO_NAV_INPUT_DOWN_CLICK;
-    if (btn == BSP_BTN_OK) return DEMO_NAV_INPUT_OK_CLICK;
-    return DEMO_NAV_INPUT_OTHER;
-}
-
-static void process_input(const input_event_t *input) {
-    demo_nav_input_t nav_input = navigation_input(input->btn, input->event);
-
-    if (s_navigation.active >= 0) {
-        demo_nav_result_t result = demo_navigation_handle(&s_navigation, nav_input, true);
-        const demo_entry_t *demo = &DEMOS[result.index];
-        if (result.action == DEMO_NAV_ACTION_EXIT) {
-            esp_err_t e = demo->stop ? demo->stop() : ESP_OK;
-            if (e != ESP_OK) {
-                ESP_LOGE(TAG, "%s 页面停止失败: %s", demo->name, esp_err_to_name(e));
-                return;
-            }
-            if (!bsp_lvgl_lock(500)) return;
-            demo->exit();
-            demo_navigation_complete_exit(&s_navigation);
-            enter_menu();
-            bsp_lvgl_unlock();
-        } else if (result.action == DEMO_NAV_ACTION_FORWARD) {
-            demo->key(input->btn, input->event);
-        }
-        return;
-    }
-
-    if (nav_input == DEMO_NAV_INPUT_OTHER || nav_input == DEMO_NAV_INPUT_OK_LONG) return;
-    if (!bsp_lvgl_lock(500)) return;
-    demo_nav_result_t result = demo_navigation_handle(
-        &s_navigation, nav_input, s_ok[s_navigation.selected]);
-    if (result.action == DEMO_NAV_ACTION_REFRESH) {
-        menu_refresh();
-        ui_pixel_mascot_jump(s_mascot);
-    } else if (result.action == DEMO_NAV_ACTION_ENTER) {
-        const demo_entry_t *demo = &DEMOS[result.index];
-        ui_pixel_mascot_jump(s_mascot);
-        lv_obj_delete(s_menu_scr);
-        s_menu_scr = NULL;
-        s_mascot = NULL;
-        demo->enter();
-        bsp_lvgl_unlock();
-
-        esp_err_t e = demo->start ? demo->start() : ESP_OK;
-        if (e != ESP_OK) {
-            ESP_LOGE(TAG, "%s 页面启动失败: %s", demo->name, esp_err_to_name(e));
-        }
-        return;
-    }
+static void render(void)
+{
+    if (!bsp_lvgl_lock(200)) return;
+    cat_ui_render(&s_model, s_text, s_text_length, s_battery);
     bsp_lvgl_unlock();
 }
 
-static void input_task(void *arg) {
-    (void)arg;
-    input_event_t input;
+static void set_text(const uint8_t *text, size_t length)
+{
+    const size_t safe = cat_protocol_utf8_prefix(text, length, CAT_ANSWER_MAX);
+    if (safe == 0 && length != 0) return;
+    if (safe != 0) memcpy(s_text, text, safe);
+    s_text[safe] = '\0';
+    s_text_length = safe;
+}
+
+static void append_text(const uint8_t *text, size_t length)
+{
+    if (!cat_protocol_utf8_valid(text, length)) return;
+    const size_t safe = cat_protocol_utf8_prefix(text, length, CAT_ANSWER_MAX - s_text_length);
+    if (safe != 0) memcpy(s_text + s_text_length, text, safe);
+    s_text_length += safe;
+    s_text[s_text_length] = '\0';
+}
+
+static void queue_input(const input_t *input)
+{
+    if (s_queue != NULL) (void)xQueueSend(s_queue, input, 0);
+}
+
+static void on_button(bsp_btn_t button, bsp_btn_ev_t event, void *context)
+{
+    (void)context;
+    const input_t input = {.type = INPUT_BUTTON,
+                           .data.key = {.button = button, .event = event}};
+    queue_input(&input);
+}
+
+static void on_ble(const cat_ble_event_t *event, void *context)
+{
+    (void)context;
+    input_t input = {0};
+    if (event->type == CAT_BLE_EVENT_READY) input.type = INPUT_BLE_READY;
+    else if (event->type == CAT_BLE_EVENT_DISCONNECTED) input.type = INPUT_BLE_DISCONNECTED;
+    else {
+        if (event->length > sizeof(input.data.fragment.bytes)) return;
+        input.type = INPUT_BLE_FRAGMENT;
+        input.data.fragment.length = (uint16_t)event->length;
+        memcpy(input.data.fragment.bytes, event->data, event->length);
+    }
+    queue_input(&input);
+}
+
+static void fill_audio_header(uint8_t *packet, uint8_t flags, uint16_t recording_id,
+                              uint16_t sequence, int16_t predictor, uint8_t step_index)
+{
+    write_le16(packet, CAT_AUDIO_MAGIC);
+    packet[2] = CAT_PROTOCOL_VERSION;
+    packet[3] = flags;
+    write_le16(packet + 4, recording_id);
+    write_le16(packet + 6, sequence);
+    write_le16(packet + 8, AUDIO_SAMPLES);
+    write_le16(packet + 10, (uint16_t)predictor);
+    packet[12] = step_index;
+    packet[13] = 0;
+}
+
+static void audio_task(void *context)
+{
+    (void)context;
+    int16_t pcm[AUDIO_SAMPLES];
+    uint8_t pending[AUDIO_PACKET_BYTES];
+    uint8_t current[AUDIO_PACKET_BYTES];
     for (;;) {
-        if (xQueueReceive(s_input_queue, &input, portMAX_DELAY) == pdTRUE) {
-            process_input(&input);
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        const uint16_t recording_id = s_model.recording_id;
+        cat_adpcm_state_t adpcm = {0};
+        uint16_t frames = 0;
+        bool have_pending = false;
+        bool failed = false;
+
+        while (atomic_load_explicit(&s_recording, memory_order_acquire) &&
+               frames < AUDIO_MAX_FRAMES) {
+            if (bsp_audio_read(pcm, sizeof(pcm)) != ESP_OK) { failed = true; break; }
+            int16_t predictor;
+            uint8_t step_index;
+            const size_t encoded = cat_adpcm_encode(
+                pcm, AUDIO_SAMPLES, &adpcm, &predictor, &step_index,
+                current + CAT_AUDIO_HEADER_SIZE, AUDIO_PAYLOAD_BYTES);
+            if (encoded != AUDIO_PAYLOAD_BYTES) { failed = true; break; }
+            fill_audio_header(current, frames == 0 ? 0x01 : 0x00,
+                              recording_id, frames, predictor, step_index);
+            if (have_pending && cat_ble_send_audio(pending, sizeof(pending)) != ESP_OK) {
+                failed = true;
+                break;
+            }
+            memcpy(pending, current, sizeof(pending));
+            have_pending = true;
+            ++frames;
+        }
+        atomic_store_explicit(&s_recording, false, memory_order_release);
+        if (!failed && have_pending) {
+            pending[3] |= 0x02;
+            if (cat_ble_send_audio(pending, sizeof(pending)) != ESP_OK) failed = true;
+        }
+        const input_t done = {
+            .type = INPUT_AUDIO_FINISHED,
+            .data.audio = {
+                .recording_id = recording_id,
+                .frames = frames,
+                .canceled = atomic_load_explicit(&s_cancel_recording, memory_order_acquire),
+                .failed = failed,
+                .limit = frames >= AUDIO_MAX_FRAMES,
+            },
+        };
+        queue_input(&done);
+    }
+}
+
+static void send_record_start(void)
+{
+    uint8_t payload[9];
+    write_le16(payload, s_model.recording_id);
+    write_le32(payload + 2, 16000);
+    write_le16(payload + 6, AUDIO_SAMPLES);
+    payload[8] = 1; /* frame-independent IMA-ADPCM */
+    if (cat_ble_send_control(CAT_MSG_RECORD_START, next_message_id(), payload,
+                             sizeof(payload)) != ESP_OK) {
+        (void)cat_state_apply(&s_model, CAT_EVENT_BLE_DISCONNECTED);
+        return;
+    }
+    atomic_store_explicit(&s_cancel_recording, false, memory_order_release);
+    atomic_store_explicit(&s_recording, true, memory_order_release);
+    xTaskNotifyGive(s_audio_task);
+}
+
+static void execute(uint32_t actions)
+{
+    if (actions & CAT_ACTION_CLEAR_TEXT) set_text(NULL, 0);
+    if (actions & CAT_ACTION_START_RECORDING) send_record_start();
+    if (actions & CAT_ACTION_STOP_RECORDING) {
+        atomic_store_explicit(&s_recording, false, memory_order_release);
+    }
+    if (actions & CAT_ACTION_CANCEL_RECORDING) {
+        atomic_store_explicit(&s_cancel_recording, true, memory_order_release);
+        atomic_store_explicit(&s_recording, false, memory_order_release);
+    }
+    uint8_t recording[2];
+    write_le16(recording, s_model.recording_id);
+    if (actions & CAT_ACTION_CONFIRM_TRANSCRIPT)
+        (void)cat_ble_send_control(CAT_MSG_TRANSCRIPT_CONFIRM, next_message_id(), recording, 2);
+    if (actions & CAT_ACTION_REQUEST_RERECORD)
+        (void)cat_ble_send_control(CAT_MSG_TRANSCRIPT_RETRY, next_message_id(), recording, 2);
+    if (actions & CAT_ACTION_CANCEL_TURN)
+        (void)cat_ble_send_control(CAT_MSG_CANCEL_TURN, next_message_id(), recording, 2);
+    if (actions & CAT_ACTION_NEW_CONVERSATION) {
+        uint8_t token[4];
+        write_le32(token, (uint32_t)(esp_timer_get_time() / 1000));
+        (void)cat_ble_send_control(CAT_MSG_NEW_CONVERSATION, next_message_id(), token, 4);
+    }
+    if (actions & CAT_ACTION_REFRESH_UI) render();
+}
+
+static void apply(cat_app_event_t event)
+{
+    execute(cat_state_apply(&s_model, event));
+}
+
+static void handle_message(const cat_protocol_message_t *message)
+{
+    switch (message->type) {
+    case CAT_MSG_APP_READY:
+        apply(CAT_EVENT_BLE_CONNECTED);
+        break;
+    case CAT_MSG_ASR_RESULT:
+        if (message->payload_length <= CAT_TRANSCRIPT_MAX &&
+            cat_protocol_utf8_valid(message->payload, message->payload_length)) {
+            set_text(message->payload, message->payload_length);
+            apply(CAT_EVENT_ASR_RESULT);
+        }
+        break;
+    case CAT_MSG_ASR_ERROR:
+        set_text(message->payload, message->payload_length);
+        apply(CAT_EVENT_ASR_ERROR);
+        break;
+    case CAT_MSG_CHAT_STARTED:
+        set_text(NULL, 0);
+        apply(CAT_EVENT_CHAT_STARTED);
+        break;
+    case CAT_MSG_CHAT_DELTA:
+        append_text(message->payload, message->payload_length);
+        apply(CAT_EVENT_CHAT_DELTA);
+        break;
+    case CAT_MSG_CHAT_DONE:
+        apply(CAT_EVENT_CHAT_DONE);
+        break;
+    case CAT_MSG_CHAT_ERROR:
+        if (s_text_length == 0) set_text(message->payload, message->payload_length);
+        apply(CAT_EVENT_CHAT_ERROR);
+        break;
+    case CAT_MSG_SESSION_RESET:
+        set_text(NULL, 0);
+        apply(CAT_EVENT_SESSION_RESET);
+        break;
+    case CAT_MSG_PING:
+        (void)cat_ble_send_control(CAT_MSG_PONG, next_message_id(),
+                                   message->payload, message->payload_length);
+        break;
+    default:
+        break;
+    }
+}
+
+static void handle_button(bsp_btn_t button, bsp_btn_ev_t event)
+{
+    if (button == BSP_BTN_OK && event == BSP_BTN_PRESS) apply(CAT_EVENT_OK_DOWN);
+    else if (button == BSP_BTN_OK && event == BSP_BTN_RELEASE) apply(CAT_EVENT_OK_UP);
+    else if (button == BSP_BTN_UP && event == BSP_BTN_CLICK) apply(CAT_EVENT_UP_CLICK);
+    else if (button == BSP_BTN_DOWN && event == BSP_BTN_CLICK) apply(CAT_EVENT_DOWN_CLICK);
+    else if (button == BSP_BTN_UP && event == BSP_BTN_LONG) apply(CAT_EVENT_NEW_CONVERSATION);
+}
+
+static void handle_audio_finished(const input_t *input)
+{
+    if (input->data.audio.limit && s_model.state == CAT_STATE_RECORDING)
+        apply(CAT_EVENT_RECORD_LIMIT);
+    uint8_t payload[8];
+    write_le16(payload, input->data.audio.recording_id);
+    write_le32(payload + 2, (uint32_t)input->data.audio.frames * 20U);
+    write_le16(payload + 6, input->data.audio.frames);
+    const uint8_t type = (input->data.audio.canceled || input->data.audio.failed)
+                             ? CAT_MSG_RECORD_CANCEL : CAT_MSG_RECORD_END;
+    (void)cat_ble_send_control(type, next_message_id(), payload, sizeof(payload));
+    if (input->data.audio.failed && s_model.state != CAT_STATE_DISCONNECTED) {
+        static const char error[] = "录音中断，请重试。";
+        set_text((const uint8_t *)error, strlen(error));
+        apply(CAT_EVENT_ASR_ERROR);
+    }
+}
+
+static void app_task(void *context)
+{
+    (void)context;
+    input_t input;
+    for (;;) {
+        if (xQueueReceive(s_queue, &input, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            switch (input.type) {
+            case INPUT_BUTTON:
+                handle_button(input.data.key.button, input.data.key.event);
+                break;
+            case INPUT_BLE_READY: {
+                static const char hello[] =
+                    "{\"name\":\"小猫助手\",\"protocol\":1,\"audio\":\"ima-adpcm-16k-mono\",\"max_record_ms\":30000}";
+                (void)cat_ble_send_control(CAT_MSG_HELLO, next_message_id(),
+                                           (const uint8_t *)hello, strlen(hello));
+                break;
+            }
+            case INPUT_BLE_DISCONNECTED:
+                atomic_store_explicit(&s_cancel_recording, true, memory_order_release);
+                atomic_store_explicit(&s_recording, false, memory_order_release);
+                apply(CAT_EVENT_BLE_DISCONNECTED);
+                break;
+            case INPUT_BLE_FRAGMENT: {
+                cat_protocol_message_t message;
+                if (cat_protocol_receive(&s_reassembler, input.data.fragment.bytes,
+                                         input.data.fragment.length, &message) == CAT_PROTOCOL_COMPLETE)
+                    handle_message(&message);
+                break;
+            }
+            case INPUT_AUDIO_FINISHED:
+                handle_audio_finished(&input);
+                break;
+            }
+        }
+        const uint64_t now = (uint64_t)esp_timer_get_time() / 1000ULL;
+        if (now - s_last_battery_ms >= BATTERY_REFRESH_MS) {
+            s_last_battery_ms = now;
+            s_battery = bsp_battery_soc();
+            render();
         }
     }
 }
 
-static esp_err_t input_dispatch_init(void) {
-    s_input_queue = xQueueCreate(INPUT_QUEUE_DEPTH, sizeof(input_event_t));
-    if (!s_input_queue) return ESP_ERR_NO_MEM;
-    if (xTaskCreate(input_task, "demo_input", 4096, NULL, 5, &s_input_task) != pdPASS) {
-        vQueueDelete(s_input_queue);
-        s_input_queue = NULL;
-        return ESP_ERR_NO_MEM;
-    }
-    return ESP_OK;
-}
-
-static void input_dispatch_deinit(void) {
-    s_input_ready = false;
-    if (s_input_task) {
-        vTaskDelete(s_input_task);
-        s_input_task = NULL;
-    }
-    if (s_input_queue) {
-        vQueueDelete(s_input_queue);
-        s_input_queue = NULL;
-    }
-}
-
-// button callbacks run on the shared esp_timer task; enqueue only and return immediately.
-static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user) {
-    (void)user;
-    if (!s_input_ready || !s_input_queue) return;
-    const input_event_t input = { .btn = btn, .event = ev };
-    (void)xQueueSend(s_input_queue, &input, 0);
-}
-
-void app_main(void) {
-    ESP_LOGI(TAG, "FoloToy AI Passport BSP demo 启动");
-    esp_sleep_wakeup_cause_t wakeup = esp_sleep_get_wakeup_cause();
-    if (wakeup != ESP_SLEEP_WAKEUP_UNDEFINED) {
-        ESP_LOGI(TAG, "休眠唤醒原因: %d", wakeup);
-    }
-
-    bsp_i2c_init();
-    bsp_i2c_scan();
-
-    // 屏幕是本 demo 的 UI 载体,失败就没有菜单可言 —— 打清楚日志后退出,
-    // 不做"串口菜单"降级(那会让本文件复杂一倍,违背参考示例的初衷)。
-    if (bsp_display_init() != ESP_OK || !bsp_lvgl_init()) {
-        ESP_LOGE(TAG, "显示/LVGL 初始化失败,demo 无法继续。"
-                      "检查 SPI 接线(MOSI=%d SCLK=%d CS=%d DC=%d BL=%d)",
-                 BSP_LCD_MOSI, BSP_LCD_SCLK, BSP_LCD_CS, BSP_LCD_DC, BSP_LCD_BL);
+void app_main(void)
+{
+    ESP_LOGI(TAG, "小猫助手启动");
+    const esp_err_t nvs_result = nvs_flash_init();
+    if (nvs_result != ESP_OK) {
+        ESP_LOGE(TAG, "NVS 初始化失败，不会自动擦除已有数据: %s",
+                 esp_err_to_name(nvs_result));
         return;
     }
-    bsp_display_backlight(100);
-
-    demo_navigation_init(&s_navigation, DEMO_COUNT);
-
-    // 其余外设单项失败不阻塞:菜单里标 [FAIL],其他项照常可测。
-    s_ok[0] = true;                                   // Display 已确认可用
-    esp_err_t input_err = input_dispatch_init();
-    esp_err_t button_err = input_err == ESP_OK
-                         ? bsp_button_init(on_key, NULL)
-                         : ESP_ERR_INVALID_STATE;
-    s_ok[1] = input_err == ESP_OK && button_err == ESP_OK;
-    if (input_err != ESP_OK) {
-        ESP_LOGE(TAG, "按键事件任务创建失败: %s", esp_err_to_name(input_err));
-    } else if (button_err != ESP_OK) {
-        ESP_LOGE(TAG, "按键初始化失败: %s", esp_err_to_name(button_err));
-        input_dispatch_deinit();
+    if (bsp_i2c_init() != ESP_OK || bsp_display_init() != ESP_OK || bsp_lvgl_init() == NULL) {
+        ESP_LOGE(TAG, "基础硬件初始化失败");
+        return;
     }
-    s_ok[2] = (bsp_audio_init() == ESP_OK);
-    s_ok[3] = (bsp_battery_init() == ESP_OK);
-    s_ok[4] = true;                                    // 页面内按需初始化并显示错误
-    s_ok[5] = true;
-    s_ok[6] = true;
-
+    bsp_display_backlight(80);
+    cat_state_init(&s_model);
+    cat_protocol_reassembler_init(&s_reassembler, s_rx_buffer, sizeof(s_rx_buffer));
+    (void)bsp_battery_init();
+    s_battery = bsp_battery_soc();
     if (bsp_lvgl_lock(1000)) {
-        enter_menu();
+        cat_ui_init();
+        cat_ui_render(&s_model, NULL, 0, s_battery);
         bsp_lvgl_unlock();
-        s_input_ready = true;
     }
 
-    ESP_LOGI(TAG, "就绪:Display=%d Button=%d Audio=%d Battery=%d",
-             s_ok[0], s_ok[1], s_ok[2], s_ok[3]);
+    s_queue = xQueueCreate(APP_QUEUE_DEPTH, sizeof(input_t));
+    if (s_queue == NULL || bsp_audio_init() != ESP_OK ||
+        bsp_audio_set_format(16000, 16, 1) != ESP_OK ||
+        xTaskCreate(audio_task, "cat_audio", 4096, NULL, 6, &s_audio_task) != pdPASS ||
+        xTaskCreate(app_task, "cat_app", 6144, NULL, 5, NULL) != pdPASS ||
+        bsp_button_init(on_button, NULL) != ESP_OK ||
+        cat_ble_init(on_ble, NULL) != ESP_OK) {
+        ESP_LOGE(TAG, "小猫助手服务初始化失败");
+    }
 }

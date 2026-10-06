@@ -1,0 +1,95 @@
+#include <assert.h>
+#include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "cat_adpcm.h"
+#include "cat_protocol.h"
+#include "cat_state.h"
+
+static void test_protocol(void)
+{
+    static const uint8_t text[] = "\xe5\xb0\x8f\xe7\x8c\xab assistant";
+    uint8_t storage[64];
+    uint8_t packet[24];
+    cat_protocol_reassembler_t state;
+    cat_protocol_message_t message = {0};
+    cat_protocol_reassembler_init(&state, storage, sizeof(storage));
+
+    size_t first = cat_protocol_write_fragment(packet, sizeof(packet), CAT_MSG_ASR_RESULT,
+                                               7, 0, text, 8, sizeof(text) - 1);
+    assert(first == CAT_CONTROL_HEADER_SIZE + 8);
+    assert(cat_protocol_receive(&state, packet, first, &message) == CAT_PROTOCOL_INCOMPLETE);
+    size_t second = cat_protocol_write_fragment(packet, sizeof(packet), CAT_MSG_ASR_RESULT,
+                                                7, 8, text, sizeof(text) - 1 - 8,
+                                                sizeof(text) - 1);
+    assert(cat_protocol_receive(&state, packet, second, &message) == CAT_PROTOCOL_COMPLETE);
+    assert(message.type == CAT_MSG_ASR_RESULT && message.message_id == 7);
+    assert(message.payload_length == sizeof(text) - 1);
+    assert(memcmp(message.payload, text, sizeof(text) - 1) == 0);
+    assert(cat_protocol_utf8_valid(text, sizeof(text) - 1));
+    assert(cat_protocol_utf8_prefix(text, sizeof(text) - 1, 4) == 3);
+
+    packet[6] = 9;
+    assert(cat_protocol_receive(&state, packet, second, &message) == CAT_PROTOCOL_ERROR);
+    static const uint8_t invalid[] = {0xe4, 0xb8};
+    assert(!cat_protocol_utf8_valid(invalid, sizeof(invalid)));
+}
+
+static void test_adpcm(void)
+{
+    enum { SAMPLES = 320 };
+    int16_t input[SAMPLES];
+    int16_t decoded[SAMPLES];
+    uint8_t encoded[160];
+    for (int i = 0; i < SAMPLES; ++i) {
+        input[i] = (int16_t)(sin((double)i * 0.11) * 12000.0);
+    }
+    cat_adpcm_state_t state = {0};
+    int16_t predictor;
+    uint8_t index;
+    size_t bytes = cat_adpcm_encode(input, SAMPLES, &state, &predictor, &index,
+                                    encoded, sizeof(encoded));
+    assert(bytes == 160);
+    assert(cat_adpcm_decode(predictor, index, encoded, bytes, decoded, SAMPLES) == SAMPLES);
+    long long absolute_error = 0;
+    for (int i = 0; i < SAMPLES; ++i) absolute_error += llabs((long long)input[i] - decoded[i]);
+    assert(absolute_error / SAMPLES < 1600);
+}
+
+static void test_state(void)
+{
+    cat_app_model_t model;
+    cat_state_init(&model);
+    assert(model.state == CAT_STATE_DISCONNECTED);
+    assert(cat_state_apply(&model, CAT_EVENT_OK_DOWN) == CAT_ACTION_NONE);
+    cat_state_apply(&model, CAT_EVENT_BLE_CONNECTED);
+    assert(model.state == CAT_STATE_IDLE);
+    uint32_t actions = cat_state_apply(&model, CAT_EVENT_OK_DOWN);
+    assert(model.state == CAT_STATE_RECORDING && (actions & CAT_ACTION_START_RECORDING));
+    actions = cat_state_apply(&model, CAT_EVENT_OK_UP);
+    assert(model.state == CAT_STATE_TRANSCRIBING && (actions & CAT_ACTION_STOP_RECORDING));
+    cat_state_apply(&model, CAT_EVENT_ASR_RESULT);
+    assert(model.state == CAT_STATE_TRANSCRIPT_REVIEW && model.has_transcript);
+    actions = cat_state_apply(&model, CAT_EVENT_OK_DOWN);
+    assert(model.state == CAT_STATE_AI_WAITING && (actions & CAT_ACTION_CONFIRM_TRANSCRIPT));
+    cat_state_apply(&model, CAT_EVENT_CHAT_DELTA);
+    assert(model.state == CAT_STATE_AI_STREAMING && model.has_answer);
+    cat_state_apply(&model, CAT_EVENT_CHAT_DONE);
+    assert(model.state == CAT_STATE_ANSWER_READY);
+    actions = cat_state_apply(&model, CAT_EVENT_SESSION_RESET);
+    assert(model.state == CAT_STATE_IDLE && (actions & CAT_ACTION_CLEAR_TEXT));
+    cat_state_apply(&model, CAT_EVENT_BLE_DISCONNECTED);
+    assert(model.state == CAT_STATE_DISCONNECTED && !model.has_answer);
+}
+
+int main(void)
+{
+    test_protocol();
+    test_adpcm();
+    test_state();
+    puts("Cat assistant core tests: PASS");
+    return 0;
+}
