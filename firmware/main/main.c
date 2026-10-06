@@ -11,6 +11,7 @@
 #include "bsp_i2c.h"
 #include "cat_adpcm.h"
 #include "cat_ble.h"
+#include "cat_clock.h"
 #include "cat_protocol.h"
 #include "cat_state.h"
 #include "cat_ui.h"
@@ -27,6 +28,7 @@
 #define AUDIO_PACKET_BYTES (CAT_AUDIO_HEADER_SIZE + AUDIO_PAYLOAD_BYTES)
 #define AUDIO_MAX_FRAMES 1500U
 #define BATTERY_REFRESH_MS 10000ULL
+#define NOTICE_DURATION_MS 1500ULL
 
 typedef enum {
     INPUT_BUTTON, INPUT_BLE_READY, INPUT_BLE_DISCONNECTED,
@@ -55,6 +57,9 @@ static atomic_bool s_cancel_recording;
 static uint16_t s_message_id;
 static uint64_t s_last_battery_ms;
 static int s_battery = -1;
+static cat_clock_t s_clock;
+static int s_clock_minute = -1;
+static uint64_t s_notice_until_ms;
 
 static void write_le16(uint8_t *data, uint16_t value)
 {
@@ -70,6 +75,17 @@ static void write_le32(uint8_t *data, uint32_t value)
     data[3] = (uint8_t)(value >> 24);
 }
 
+static uint32_t read_le32(const uint8_t *data)
+{
+    return (uint32_t)data[0] | ((uint32_t)data[1] << 8) |
+           ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
+}
+
+static uint64_t monotonic_ms(void)
+{
+    return (uint64_t)esp_timer_get_time() / 1000ULL;
+}
+
 static uint16_t next_message_id(void)
 {
     if (++s_message_id == 0) ++s_message_id;
@@ -79,7 +95,15 @@ static uint16_t next_message_id(void)
 static void render(void)
 {
     if (!bsp_lvgl_lock(200)) return;
-    cat_ui_render(&s_model, s_text, s_text_length, s_battery);
+    cat_ui_render(&s_model, s_text, s_text_length, s_battery,
+                  cat_clock_minute_of_day(&s_clock, monotonic_ms()));
+    bsp_lvgl_unlock();
+}
+
+static void scroll_text(int direction)
+{
+    if (!bsp_lvgl_lock(100)) return;
+    cat_ui_scroll_text(direction);
     bsp_lvgl_unlock();
 }
 
@@ -241,7 +265,16 @@ static void execute(uint32_t actions)
 
 static void apply(cat_app_event_t event)
 {
-    execute(cat_state_apply(&s_model, event));
+    const cat_app_state_t previous = s_model.state;
+    const uint32_t actions = cat_state_apply(&s_model, event);
+    const bool notice = s_model.state == CAT_STATE_RECORD_TOO_SHORT ||
+                        s_model.state == CAT_STATE_NEW_CONVERSATION;
+    if (notice && s_model.state != previous) {
+        s_notice_until_ms = monotonic_ms() + NOTICE_DURATION_MS;
+    } else if (!notice) {
+        s_notice_until_ms = 0;
+    }
+    execute(actions);
 }
 
 static void handle_message(const cat_protocol_message_t *message)
@@ -280,6 +313,13 @@ static void handle_message(const cat_protocol_message_t *message)
         set_text(NULL, 0);
         apply(CAT_EVENT_SESSION_RESET);
         break;
+    case CAT_MSG_TIME_SYNC:
+        if (message->payload_length == 4 &&
+            cat_clock_sync(&s_clock, read_le32(message->payload), monotonic_ms())) {
+            s_clock_minute = -1;
+            render();
+        }
+        break;
     case CAT_MSG_PING:
         (void)cat_ble_send_control(CAT_MSG_PONG, next_message_id(),
                                    message->payload, message->payload_length);
@@ -291,11 +331,21 @@ static void handle_message(const cat_protocol_message_t *message)
 
 static void handle_button(bsp_btn_t button, bsp_btn_ev_t event)
 {
+    const bool scrollable = s_model.state == CAT_STATE_TRANSCRIPT_REVIEW ||
+                            s_model.state == CAT_STATE_AI_STREAMING ||
+                            s_model.state == CAT_STATE_ANSWER_READY;
+    if (scrollable && button == BSP_BTN_UP && event == BSP_BTN_CLICK) {
+        scroll_text(-1);
+        return;
+    }
+    if (scrollable && button == BSP_BTN_DOWN && event == BSP_BTN_CLICK) {
+        scroll_text(1);
+        return;
+    }
     if (button == BSP_BTN_OK && event == BSP_BTN_PRESS) apply(CAT_EVENT_OK_DOWN);
     else if (button == BSP_BTN_OK && event == BSP_BTN_RELEASE) apply(CAT_EVENT_OK_UP);
-    else if (button == BSP_BTN_UP && event == BSP_BTN_CLICK) apply(CAT_EVENT_UP_CLICK);
-    else if (button == BSP_BTN_DOWN && event == BSP_BTN_CLICK) apply(CAT_EVENT_DOWN_CLICK);
-    else if (button == BSP_BTN_UP && event == BSP_BTN_LONG) apply(CAT_EVENT_NEW_CONVERSATION);
+    else if (button == BSP_BTN_UP && event == BSP_BTN_LONG) apply(CAT_EVENT_UP_LONG);
+    else if (button == BSP_BTN_DOWN && event == BSP_BTN_LONG) apply(CAT_EVENT_DOWN_LONG);
 }
 
 static void handle_audio_finished(const input_t *input)
@@ -306,10 +356,14 @@ static void handle_audio_finished(const input_t *input)
     write_le16(payload, input->data.audio.recording_id);
     write_le32(payload + 2, (uint32_t)input->data.audio.frames * 20U);
     write_le16(payload + 6, input->data.audio.frames);
-    const uint8_t type = (input->data.audio.canceled || input->data.audio.failed)
+    const bool too_short = !input->data.audio.canceled && !input->data.audio.failed &&
+                           cat_recording_is_too_short(input->data.audio.frames);
+    const uint8_t type = (input->data.audio.canceled || input->data.audio.failed || too_short)
                              ? CAT_MSG_RECORD_CANCEL : CAT_MSG_RECORD_END;
     (void)cat_ble_send_control(type, next_message_id(), payload, sizeof(payload));
-    if (input->data.audio.failed && s_model.state != CAT_STATE_DISCONNECTED) {
+    if (too_short && s_model.state == CAT_STATE_TRANSCRIBING) {
+        apply(CAT_EVENT_RECORD_TOO_SHORT);
+    } else if (input->data.audio.failed && s_model.state != CAT_STATE_DISCONNECTED) {
         static const char error[] = "录音中断，请重试。";
         set_text((const uint8_t *)error, strlen(error));
         apply(CAT_EVENT_ASR_ERROR);
@@ -321,7 +375,7 @@ static void app_task(void *context)
     (void)context;
     input_t input;
     for (;;) {
-        if (xQueueReceive(s_queue, &input, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        if (xQueueReceive(s_queue, &input, pdMS_TO_TICKS(250)) == pdTRUE) {
             switch (input.type) {
             case INPUT_BUTTON:
                 handle_button(input.data.key.button, input.data.key.event);
@@ -350,10 +404,19 @@ static void app_task(void *context)
                 break;
             }
         }
-        const uint64_t now = (uint64_t)esp_timer_get_time() / 1000ULL;
+        const uint64_t now = monotonic_ms();
+        if (s_notice_until_ms != 0 && now >= s_notice_until_ms) {
+            s_notice_until_ms = 0;
+            apply(CAT_EVENT_NOTICE_DONE);
+        }
         if (now - s_last_battery_ms >= BATTERY_REFRESH_MS) {
             s_last_battery_ms = now;
             s_battery = bsp_battery_soc();
+            render();
+        }
+        const int minute = cat_clock_minute_of_day(&s_clock, now);
+        if (minute != s_clock_minute) {
+            s_clock_minute = minute;
             render();
         }
     }
@@ -374,12 +437,13 @@ void app_main(void)
     }
     bsp_display_backlight(80);
     cat_state_init(&s_model);
+    cat_clock_init(&s_clock);
     cat_protocol_reassembler_init(&s_reassembler, s_rx_buffer, sizeof(s_rx_buffer));
     (void)bsp_battery_init();
     s_battery = bsp_battery_soc();
     if (bsp_lvgl_lock(1000)) {
         cat_ui_init();
-        cat_ui_render(&s_model, NULL, 0, s_battery);
+        cat_ui_render(&s_model, NULL, 0, s_battery, -1);
         bsp_lvgl_unlock();
     }
 

@@ -33,6 +33,7 @@ typedef enum {
     CAT_MSG_CHAT_ERROR = 0x88,
     CAT_MSG_SESSION_RESET = 0x89,
     CAT_MSG_APP_STATUS = 0x8a,
+    CAT_MSG_TIME_SYNC = 0x8b,
     CAT_MSG_PONG = 0xfe,
 } cat_message_type_t;
 
@@ -74,4 +75,3 @@ size_t cat_protocol_write_fragment(uint8_t *output, size_t output_size,
                                    size_t payload_length, size_t total_length);
 bool cat_protocol_utf8_valid(const uint8_t *text, size_t length);
 size_t cat_protocol_utf8_prefix(const uint8_t *text, size_t length, size_t limit);
-

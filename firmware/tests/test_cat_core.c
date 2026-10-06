@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "cat_adpcm.h"
+#include "cat_clock.h"
 #include "cat_protocol.h"
 #include "cat_state.h"
 
@@ -36,6 +37,18 @@ static void test_protocol(void)
     assert(cat_protocol_receive(&state, packet, second, &message) == CAT_PROTOCOL_ERROR);
     static const uint8_t invalid[] = {0xe4, 0xb8};
     assert(!cat_protocol_utf8_valid(invalid, sizeof(invalid)));
+}
+
+static void test_clock(void)
+{
+    cat_clock_t clock;
+    cat_clock_init(&clock);
+    assert(cat_clock_minute_of_day(&clock, 1000) == -1);
+    assert(!cat_clock_sync(&clock, 86400, 1000));
+    assert(cat_clock_sync(&clock, 23 * 3600 + 59 * 60 + 30, 2000));
+    assert(cat_clock_minute_of_day(&clock, 2000) == 23 * 60 + 59);
+    assert(cat_clock_minute_of_day(&clock, 32000) == 0);
+    assert(cat_clock_minute_of_day(&clock, 92000) == 1);
 }
 
 static void test_adpcm(void)
@@ -85,11 +98,52 @@ static void test_state(void)
     assert(model.state == CAT_STATE_DISCONNECTED && !model.has_answer);
 }
 
+static void test_button_interactions(void)
+{
+    assert(cat_recording_is_too_short(0));
+    assert(cat_recording_is_too_short(14));
+    assert(!cat_recording_is_too_short(15));
+
+    cat_app_model_t model;
+    cat_state_init(&model);
+    cat_state_apply(&model, CAT_EVENT_BLE_CONNECTED);
+
+    uint32_t actions = cat_state_apply(&model, CAT_EVENT_UP_LONG);
+    assert(model.state == CAT_STATE_NEW_CONVERSATION);
+    assert(actions & CAT_ACTION_NEW_CONVERSATION);
+    cat_state_apply(&model, CAT_EVENT_SESSION_RESET);
+    assert(model.state == CAT_STATE_NEW_CONVERSATION);
+    cat_state_apply(&model, CAT_EVENT_NOTICE_DONE);
+    assert(model.state == CAT_STATE_IDLE);
+
+    cat_state_apply(&model, CAT_EVENT_OK_DOWN);
+    cat_state_apply(&model, CAT_EVENT_OK_UP);
+    cat_state_apply(&model, CAT_EVENT_RECORD_TOO_SHORT);
+    assert(model.state == CAT_STATE_RECORD_TOO_SHORT);
+    actions = cat_state_apply(&model, CAT_EVENT_OK_DOWN);
+    assert(model.state == CAT_STATE_RECORDING && (actions & CAT_ACTION_START_RECORDING));
+
+    cat_state_apply(&model, CAT_EVENT_OK_UP);
+    cat_state_apply(&model, CAT_EVENT_ASR_RESULT);
+    actions = cat_state_apply(&model, CAT_EVENT_UP_LONG);
+    assert(model.state == CAT_STATE_IDLE && (actions & CAT_ACTION_REQUEST_RERECORD));
+
+    cat_state_apply(&model, CAT_EVENT_OK_DOWN);
+    cat_state_apply(&model, CAT_EVENT_OK_UP);
+    cat_state_apply(&model, CAT_EVENT_ASR_RESULT);
+    cat_state_apply(&model, CAT_EVENT_OK_DOWN);
+    cat_state_apply(&model, CAT_EVENT_CHAT_DELTA);
+    actions = cat_state_apply(&model, CAT_EVENT_DOWN_LONG);
+    assert(model.state == CAT_STATE_ANSWER_READY && (actions & CAT_ACTION_CANCEL_TURN));
+}
+
 int main(void)
 {
     test_protocol();
+    test_clock();
     test_adpcm();
     test_state();
+    test_button_interactions();
     puts("Cat assistant core tests: PASS");
     return 0;
 }

@@ -64,6 +64,7 @@ App 发送：
 | `0x88` | CHAT_ERROR | 用户可读 UTF-8 错误 |
 | `0x89` | SESSION_RESET | 新会话代号 |
 | `0x8A` | APP_STATUS | 网络/API 状态 JSON |
+| `0x8B` | TIME_SYNC | 手机当地午夜后的秒数 `u32` |
 | `0xFE` | PONG | 原样返回 PING 负载 |
 
 ## 类型专用负载
@@ -75,6 +76,11 @@ App 发送：
 - `RECORD_CANCEL`：与 `RECORD_END` 相同的 8 字节结构，帧数可为 0。
 - `TRANSCRIPT_CONFIRM` / `TRANSCRIPT_RETRY` / `TRANSCRIPT_CANCEL` / `CANCEL_TURN`：`recording_id:u16`。
 - `NEW_CONVERSATION` / `SESSION_RESET`：新会话代号 `u32`；App 也可以对 `SESSION_RESET` 发送空负载。
+- `TIME_SYNC`：手机当地午夜后的秒数 `u32`，范围 `0..86399`。App 在每次握手后发送；设备按单调时钟继续计时，重启且尚未同步时显示 `--:--`。
+
+## 显示字符范围
+
+App 发给卡片的 ASR 和 AI 文本只保留固件字库覆盖的 ASCII、CJK 常用汉字、CJK 标点和全角字符。Emoji、颜文字中的扩展符号及其它未覆盖码点在发送前移除，避免设备显示缺字方框；模型系统提示同时要求使用简体中文纯文本和常见标点。
 
 ## 音频帧
 
