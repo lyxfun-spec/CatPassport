@@ -1,0 +1,30 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CatAssistant.Core", "CatAssistant.Core\CatAssistant.Core.csproj", "{2C72A4EA-BB0A-4F2B-B480-17D22D1DB671}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CatAssistant.App", "CatAssistant.App\CatAssistant.App.csproj", "{E507D2B4-0BA2-4128-889D-774C7564894E}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CatAssistant.Core.Tests", "CatAssistant.Core.Tests\CatAssistant.Core.Tests.csproj", "{0F1A5918-B978-4520-B44F-BA64519FAD5F}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{2C72A4EA-BB0A-4F2B-B480-17D22D1DB671}.Debug|x64.ActiveCfg = Debug|x64
+		{2C72A4EA-BB0A-4F2B-B480-17D22D1DB671}.Debug|x64.Build.0 = Debug|x64
+		{2C72A4EA-BB0A-4F2B-B480-17D22D1DB671}.Release|x64.ActiveCfg = Release|x64
+		{2C72A4EA-BB0A-4F2B-B480-17D22D1DB671}.Release|x64.Build.0 = Release|x64
+		{E507D2B4-0BA2-4128-889D-774C7564894E}.Debug|x64.ActiveCfg = Debug|x64
+		{E507D2B4-0BA2-4128-889D-774C7564894E}.Debug|x64.Build.0 = Debug|x64
+		{E507D2B4-0BA2-4128-889D-774C7564894E}.Release|x64.ActiveCfg = Release|x64
+		{E507D2B4-0BA2-4128-889D-774C7564894E}.Release|x64.Build.0 = Release|x64
+		{0F1A5918-B978-4520-B44F-BA64519FAD5F}.Debug|x64.ActiveCfg = Debug|x64
+		{0F1A5918-B978-4520-B44F-BA64519FAD5F}.Debug|x64.Build.0 = Debug|x64
+		{0F1A5918-B978-4520-B44F-BA64519FAD5F}.Release|x64.ActiveCfg = Release|x64
+		{0F1A5918-B978-4520-B44F-BA64519FAD5F}.Release|x64.Build.0 = Release|x64
+	EndGlobalSection
+EndGlobal

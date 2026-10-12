@@ -7,6 +7,9 @@ firmware/managed_components/
 android/.gradle/
 android/**/build/
 android/local.properties
+windows/**/bin/
+windows/**/obj/
+.vs/
 *.jks
 *.keystore
 .idea/
@@ -14,4 +17,3 @@ android/local.properties
 *.iml
 .DS_Store
 Thumbs.db
-
