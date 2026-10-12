@@ -13,10 +13,12 @@
 #include "cat_ble.h"
 #include "cat_clock.h"
 #include "cat_protocol.h"
+#include "cat_screen.h"
 #include "cat_state.h"
 #include "cat_ui.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "nvs.h"
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -29,6 +31,9 @@
 #define AUDIO_MAX_FRAMES 1500U
 #define BATTERY_REFRESH_MS 10000ULL
 #define NOTICE_DURATION_MS 1500ULL
+#define SCREEN_ACTIVE_BRIGHTNESS 80
+#define SCREEN_NVS_NAMESPACE "cat_cfg"
+#define SCREEN_NVS_KEY "screen_s"
 
 typedef enum {
     INPUT_BUTTON, INPUT_BLE_READY, INPUT_BLE_DISCONNECTED,
@@ -58,8 +63,10 @@ static uint16_t s_message_id;
 static uint64_t s_last_battery_ms;
 static int s_battery = -1;
 static cat_clock_t s_clock;
+static cat_screen_t s_screen;
 static int s_clock_minute = -1;
 static uint64_t s_notice_until_ms;
+static bool s_suppress_button_action[3];
 
 static void write_le16(uint8_t *data, uint16_t value)
 {
@@ -84,6 +91,46 @@ static uint32_t read_le32(const uint8_t *data)
 static uint64_t monotonic_ms(void)
 {
     return (uint64_t)esp_timer_get_time() / 1000ULL;
+}
+
+static uint32_t load_screen_timeout(void)
+{
+    uint32_t seconds = CAT_SCREEN_TIMEOUT_DEFAULT_SECONDS;
+    nvs_handle_t handle;
+    if (nvs_open(SCREEN_NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
+        uint32_t stored;
+        if (nvs_get_u32(handle, SCREEN_NVS_KEY, &stored) == ESP_OK &&
+            cat_screen_timeout_valid(stored)) {
+            seconds = stored;
+        }
+        nvs_close(handle);
+    }
+    return seconds;
+}
+
+static void save_screen_timeout(uint32_t seconds)
+{
+    nvs_handle_t handle;
+    esp_err_t result = nvs_open(SCREEN_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (result == ESP_OK) {
+        result = nvs_set_u32(handle, SCREEN_NVS_KEY, seconds);
+        if (result == ESP_OK) result = nvs_commit(handle);
+        nvs_close(handle);
+    }
+    if (result != ESP_OK) ESP_LOGW(TAG, "保存熄屏时间失败: %s", esp_err_to_name(result));
+}
+
+static void note_screen_activity(void)
+{
+    const bool was_off = cat_screen_is_off(&s_screen);
+    cat_screen_note_activity(&s_screen, monotonic_ms());
+    if (was_off) bsp_display_backlight(SCREEN_ACTIVE_BRIGHTNESS);
+}
+
+static bool screen_must_stay_awake(void)
+{
+    return s_model.state == CAT_STATE_RECORDING || s_model.state == CAT_STATE_TRANSCRIBING ||
+           s_model.state == CAT_STATE_AI_WAITING || s_model.state == CAT_STATE_AI_STREAMING;
 }
 
 static uint16_t next_message_id(void)
@@ -127,7 +174,8 @@ static void append_text(const uint8_t *text, size_t length)
 
 static void queue_input(const input_t *input)
 {
-    if (s_queue != NULL) (void)xQueueSend(s_queue, input, 0);
+    if (s_queue != NULL && xQueueSend(s_queue, input, 0) != pdTRUE)
+        ESP_LOGW(TAG, "input queue full, dropped type=%d", input->type);
 }
 
 static void on_button(bsp_btn_t button, bsp_btn_ev_t event, void *context)
@@ -281,9 +329,11 @@ static void handle_message(const cat_protocol_message_t *message)
 {
     switch (message->type) {
     case CAT_MSG_APP_READY:
+        note_screen_activity();
         apply(CAT_EVENT_BLE_CONNECTED);
         break;
     case CAT_MSG_ASR_RESULT:
+        note_screen_activity();
         if (message->payload_length <= CAT_TRANSCRIPT_MAX &&
             cat_protocol_utf8_valid(message->payload, message->payload_length)) {
             set_text(message->payload, message->payload_length);
@@ -291,25 +341,31 @@ static void handle_message(const cat_protocol_message_t *message)
         }
         break;
     case CAT_MSG_ASR_ERROR:
+        note_screen_activity();
         set_text(message->payload, message->payload_length);
         apply(CAT_EVENT_ASR_ERROR);
         break;
     case CAT_MSG_CHAT_STARTED:
+        note_screen_activity();
         set_text(NULL, 0);
         apply(CAT_EVENT_CHAT_STARTED);
         break;
     case CAT_MSG_CHAT_DELTA:
+        note_screen_activity();
         append_text(message->payload, message->payload_length);
         apply(CAT_EVENT_CHAT_DELTA);
         break;
     case CAT_MSG_CHAT_DONE:
+        note_screen_activity();
         apply(CAT_EVENT_CHAT_DONE);
         break;
     case CAT_MSG_CHAT_ERROR:
+        note_screen_activity();
         if (s_text_length == 0) set_text(message->payload, message->payload_length);
         apply(CAT_EVENT_CHAT_ERROR);
         break;
     case CAT_MSG_SESSION_RESET:
+        note_screen_activity();
         set_text(NULL, 0);
         apply(CAT_EVENT_SESSION_RESET);
         break;
@@ -318,6 +374,17 @@ static void handle_message(const cat_protocol_message_t *message)
             cat_clock_sync(&s_clock, read_le32(message->payload), monotonic_ms())) {
             s_clock_minute = -1;
             render();
+        }
+        break;
+    case CAT_MSG_SCREEN_TIMEOUT:
+        if (message->payload_length == 4) {
+            const uint32_t seconds = read_le32(message->payload);
+            const uint32_t previous = s_screen.timeout_seconds;
+            const bool was_off = cat_screen_is_off(&s_screen);
+            if (cat_screen_set_timeout(&s_screen, seconds, monotonic_ms())) {
+                if (was_off) bsp_display_backlight(SCREEN_ACTIVE_BRIGHTNESS);
+                if (seconds != previous) save_screen_timeout(seconds);
+            }
         }
         break;
     case CAT_MSG_PING:
@@ -331,6 +398,20 @@ static void handle_message(const cat_protocol_message_t *message)
 
 static void handle_button(bsp_btn_t button, bsp_btn_ev_t event)
 {
+    if ((unsigned)button >= 3U) return;
+    if (s_suppress_button_action[button]) {
+        if (event == BSP_BTN_CLICK || event == BSP_BTN_LONG) {
+            s_suppress_button_action[button] = false;
+        }
+        return;
+    }
+    if (cat_screen_is_off(&s_screen) && event == BSP_BTN_PRESS) {
+        note_screen_activity();
+        if (button == BSP_BTN_OK) apply(CAT_EVENT_OK_DOWN);
+        else s_suppress_button_action[button] = true;
+        return;
+    }
+    note_screen_activity();
     const bool scrollable = s_model.state == CAT_STATE_TRANSCRIPT_REVIEW ||
                             s_model.state == CAT_STATE_AI_STREAMING ||
                             s_model.state == CAT_STATE_ANSWER_READY;
@@ -383,8 +464,9 @@ static void app_task(void *context)
             case INPUT_BLE_READY: {
                 static const char hello[] =
                     "{\"name\":\"小猫助手\",\"protocol\":1,\"audio\":\"ima-adpcm-16k-mono\",\"max_record_ms\":30000}";
-                (void)cat_ble_send_control(CAT_MSG_HELLO, next_message_id(),
-                                           (const uint8_t *)hello, strlen(hello));
+                const esp_err_t result = cat_ble_send_control(
+                    CAT_MSG_HELLO, next_message_id(), (const uint8_t *)hello, strlen(hello));
+                ESP_LOGI(TAG, "HELLO send result=%s", esp_err_to_name(result));
                 break;
             }
             case INPUT_BLE_DISCONNECTED:
@@ -419,6 +501,9 @@ static void app_task(void *context)
             s_clock_minute = minute;
             render();
         }
+        if (cat_screen_update(&s_screen, now, screen_must_stay_awake())) {
+            bsp_display_backlight(0);
+        }
     }
 }
 
@@ -435,9 +520,10 @@ void app_main(void)
         ESP_LOGE(TAG, "基础硬件初始化失败");
         return;
     }
-    bsp_display_backlight(80);
+    bsp_display_backlight(SCREEN_ACTIVE_BRIGHTNESS);
     cat_state_init(&s_model);
     cat_clock_init(&s_clock);
+    cat_screen_init(&s_screen, load_screen_timeout(), monotonic_ms());
     cat_protocol_reassembler_init(&s_reassembler, s_rx_buffer, sizeof(s_rx_buffer));
     (void)bsp_battery_init();
     s_battery = bsp_battery_soc();

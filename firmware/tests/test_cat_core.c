@@ -8,6 +8,7 @@
 #include "cat_adpcm.h"
 #include "cat_clock.h"
 #include "cat_protocol.h"
+#include "cat_screen.h"
 #include "cat_state.h"
 
 static void test_protocol(void)
@@ -49,6 +50,26 @@ static void test_clock(void)
     assert(cat_clock_minute_of_day(&clock, 2000) == 23 * 60 + 59);
     assert(cat_clock_minute_of_day(&clock, 32000) == 0);
     assert(cat_clock_minute_of_day(&clock, 92000) == 1);
+}
+
+static void test_screen_timeout(void)
+{
+    cat_screen_t screen;
+    cat_screen_init(&screen, 60, 1000);
+    assert(!cat_screen_update(&screen, 60999, false));
+    assert(cat_screen_update(&screen, 61000, false));
+    assert(cat_screen_is_off(&screen));
+
+    cat_screen_note_activity(&screen, 62000);
+    assert(!cat_screen_is_off(&screen));
+    assert(!cat_screen_update(&screen, 200000, true));
+    assert(!cat_screen_update(&screen, 259999, false));
+    assert(cat_screen_update(&screen, 260000, false));
+
+    assert(cat_screen_set_timeout(&screen, 0, 300000));
+    assert(!cat_screen_update(&screen, UINT64_MAX, false));
+    assert(!cat_screen_is_off(&screen));
+    assert(!cat_screen_set_timeout(&screen, CAT_SCREEN_TIMEOUT_MAX_SECONDS + 1U, 0));
 }
 
 static void test_adpcm(void)
@@ -141,6 +162,7 @@ int main(void)
 {
     test_protocol();
     test_clock();
+    test_screen_timeout();
     test_adpcm();
     test_state();
     test_button_interactions();

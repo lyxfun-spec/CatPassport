@@ -5,6 +5,7 @@ idf_component_register(
          "cat_clock.c"
          "cat_font_16.c"
          "cat_protocol.c"
+         "cat_screen.c"
          "cat_sprite_assets.c"
          "cat_state.c"
          "cat_ui.c"

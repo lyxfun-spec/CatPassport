@@ -65,6 +65,7 @@ App 发送：
 | `0x89` | SESSION_RESET | 新会话代号 |
 | `0x8A` | APP_STATUS | 网络/API 状态 JSON |
 | `0x8B` | TIME_SYNC | 手机当地午夜后的秒数 `u32` |
+| `0x8C` | SCREEN_TIMEOUT | 自动熄屏秒数 `u32`；`0` 表示永不 |
 | `0xFE` | PONG | 原样返回 PING 负载 |
 
 ## 类型专用负载
@@ -77,6 +78,7 @@ App 发送：
 - `TRANSCRIPT_CONFIRM` / `TRANSCRIPT_RETRY` / `TRANSCRIPT_CANCEL` / `CANCEL_TURN`：`recording_id:u16`。
 - `NEW_CONVERSATION` / `SESSION_RESET`：新会话代号 `u32`；App 也可以对 `SESSION_RESET` 发送空负载。
 - `TIME_SYNC`：手机当地午夜后的秒数 `u32`，范围 `0..86399`。App 在每次握手后发送；设备按单调时钟继续计时，重启且尚未同步时显示 `--:--`。
+- `SCREEN_TIMEOUT`：自动熄屏秒数 `u32`，范围 `0..86400`。`0` 表示永不熄屏。App 在握手后及设置变更时发送；设备保存到 NVS。
 
 ## 显示字符范围
 

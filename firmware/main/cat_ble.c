@@ -109,6 +109,8 @@ static int gap_event(struct ble_gap_event *event, void *argument)
     (void)argument;
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
+        ESP_LOGI(TAG, "gap connect status=%d handle=%u", event->connect.status,
+                 (unsigned)event->connect.conn_handle);
         if (event->connect.status == 0) {
             xSemaphoreTake(s_lock, portMAX_DELAY);
             s_connection = event->connect.conn_handle;
@@ -116,12 +118,16 @@ static int gap_event(struct ble_gap_event *event, void *argument)
             s_control_subscribed = false;
             s_audio_subscribed = false;
             xSemaphoreGive(s_lock);
-            (void)ble_gap_security_initiate(event->connect.conn_handle);
+            const int security_result = ble_gap_security_initiate(event->connect.conn_handle);
+            ESP_LOGI(TAG, "security initiate handle=%u result=%d",
+                     (unsigned)event->connect.conn_handle, security_result);
         } else {
             (void)advertise();
         }
         return 0;
     case BLE_GAP_EVENT_DISCONNECT:
+        ESP_LOGI(TAG, "gap disconnect handle=%u reason=%d",
+                 (unsigned)event->disconnect.conn.conn_handle, event->disconnect.reason);
         xSemaphoreTake(s_lock, portMAX_DELAY);
         s_connection = BLE_HS_CONN_HANDLE_NONE;
         s_encrypted = false;
@@ -133,13 +139,17 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         return 0;
     case BLE_GAP_EVENT_ENC_CHANGE: {
         struct ble_gap_conn_desc descriptor;
-        const bool encrypted = event->enc_change.status == 0 &&
-                               ble_gap_conn_find(event->enc_change.conn_handle, &descriptor) == 0 &&
+        const int find_result = ble_gap_conn_find(event->enc_change.conn_handle, &descriptor);
+        const bool encrypted = event->enc_change.status == 0 && find_result == 0 &&
                                descriptor.sec_state.encrypted;
         xSemaphoreTake(s_lock, portMAX_DELAY);
         s_encrypted = encrypted;
         const bool ready = link_ready_locked();
         xSemaphoreGive(s_lock);
+        ESP_LOGI(TAG,
+                 "encryption change handle=%u status=%d find=%d encrypted=%d bonded=%d ready=%d",
+                 (unsigned)event->enc_change.conn_handle, event->enc_change.status, find_result,
+                 encrypted, find_result == 0 ? descriptor.sec_state.bonded : 0, ready);
         if (ready) emit(CAT_BLE_EVENT_READY, NULL, 0);
         return 0;
     }
@@ -151,16 +161,34 @@ static int gap_event(struct ble_gap_event *event, void *argument)
             s_audio_subscribed = event->subscribe.cur_notify;
         }
         const bool ready = link_ready_locked();
+        const bool control = s_control_subscribed;
+        const bool audio = s_audio_subscribed;
+        const bool encrypted = s_encrypted;
+        const uint16_t mtu = s_connection == BLE_HS_CONN_HANDLE_NONE ? 0 : ble_att_mtu(s_connection);
         xSemaphoreGive(s_lock);
+        ESP_LOGI(TAG,
+                 "subscribe handle=%u attr=%u reason=%u notify=%u control=%d audio=%d encrypted=%d mtu=%u ready=%d",
+                 (unsigned)event->subscribe.conn_handle, (unsigned)event->subscribe.attr_handle,
+                 (unsigned)event->subscribe.reason, (unsigned)event->subscribe.cur_notify,
+                 control, audio, encrypted, (unsigned)mtu, ready);
         if (ready) emit(CAT_BLE_EVENT_READY, NULL, 0);
         return 0;
-    case BLE_GAP_EVENT_MTU:
-        if (cat_ble_ready()) emit(CAT_BLE_EVENT_READY, NULL, 0);
+    case BLE_GAP_EVENT_MTU: {
+        const bool ready = cat_ble_ready();
+        ESP_LOGI(TAG, "mtu handle=%u channel=%u value=%u ready=%d",
+                 (unsigned)event->mtu.conn_handle, (unsigned)event->mtu.channel_id,
+                 (unsigned)event->mtu.value, ready);
+        if (ready) emit(CAT_BLE_EVENT_READY, NULL, 0);
         return 0;
+    }
     case BLE_GAP_EVENT_REPEAT_PAIRING: {
         struct ble_gap_conn_desc descriptor;
-        if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &descriptor) == 0)
-            (void)ble_store_util_delete_peer(&descriptor.peer_id_addr);
+        const int find_result = ble_gap_conn_find(event->repeat_pairing.conn_handle, &descriptor);
+        const int delete_result = find_result == 0
+                                      ? ble_store_util_delete_peer(&descriptor.peer_id_addr)
+                                      : find_result;
+        ESP_LOGI(TAG, "repeat pairing handle=%u find=%d delete=%d",
+                 (unsigned)event->repeat_pairing.conn_handle, find_result, delete_result);
         return BLE_GAP_REPEAT_PAIRING_RETRY;
     }
     default:
@@ -259,6 +287,8 @@ esp_err_t cat_ble_send_control(uint8_t type, uint16_t message_id,
         const size_t packet_length = cat_protocol_write_fragment(
             s_tx, sizeof(s_tx), type, message_id, offset, payload, chunk, length);
         if (packet_length == 0 || notify(s_control_handle, s_tx, packet_length) != ESP_OK) {
+            ESP_LOGW(TAG, "control notify failed type=0x%02x offset=%u length=%u",
+                     type, (unsigned)offset, (unsigned)packet_length);
             xSemaphoreGive(s_lock);
             return ESP_FAIL;
         }
