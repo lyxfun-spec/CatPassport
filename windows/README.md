@@ -8,6 +8,12 @@ Windows 11 桌面常驻网关。卡片仍是 BLE Peripheral；本程序负责加
 - Visual Studio 2022 17.10+，安装“.NET 桌面开发”和“Windows 应用 SDK C#”工作负载
 - .NET 8 SDK、Windows 10/11 SDK 10.0.19041+
 
+在 PowerShell 中先加载项目环境（ESP-IDF 激活仅对当前 PowerShell 生效）：
+
+```powershell
+. .\windows\Enter-CatAssistantEnvironment.ps1
+```
+
 ```powershell
 dotnet restore windows/CatAssistant.sln
 dotnet build windows/CatAssistant.sln -c Debug
