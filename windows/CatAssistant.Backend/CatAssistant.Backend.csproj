@@ -13,4 +13,7 @@
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
     <ProjectReference Include="..\CatAssistant.Core\CatAssistant.Core.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="CatAssistant.Backend.Tests" />
+  </ItemGroup>
 </Project>

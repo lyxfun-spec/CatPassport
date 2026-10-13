@@ -21,14 +21,17 @@ public sealed class AssistantCoordinator : IAsyncDisposable
     private readonly SessionPolicy _sessionPolicy = new(TimeSpan.FromMinutes(30));
     private readonly PeriodicTimer _reconnectTimer = new(TimeSpan.FromSeconds(10));
     private readonly SemaphoreSlim _connectionGate = new(1, 1);
+    private readonly SemaphoreSlim _chatGate = new(1, 1);
     private readonly Dictionary<ulong, CatDevice> _devices = [];
     private readonly List<ChatMessage> _messages = [];
     private readonly object _stateLock = new();
     private readonly object _audioLock = new();
     private readonly CancellationTokenSource _lifetime = new();
-    private CancellationTokenSource? _turn;
+    private readonly InteractionTurns _turns;
     private RecordingAssembler? _recording;
     private ushort? _recordingId;
+    private ushort? _discardedRecordingId;
+    private string? _discardedRecordingMessage;
     private string? _transcript;
     private long _conversationId;
     private string _status = "未连接";
@@ -37,6 +40,7 @@ public sealed class AssistantCoordinator : IAsyncDisposable
     public AssistantCoordinator(BleGateway ble, DashScopeClient cloud, SqliteRepository repository, SecureApiKeyStore secureStore, AppSettings settings)
     {
         _ble = ble; _cloud = cloud; _repository = repository; _secureStore = secureStore; Settings = settings;
+        _turns = new InteractionTurns(_lifetime.Token);
         _ble.DeviceFound += OnDeviceFound; _ble.ControlMessageReceived += OnControlMessage; _ble.AudioFrameReceived += OnAudioFrame;
         _ble.LinkStateChanged += OnLinkStateChanged;
         SystemEvents.PowerModeChanged += OnPowerModeChanged;
@@ -113,7 +117,7 @@ public sealed class AssistantCoordinator : IAsyncDisposable
         await _connectionGate.WaitAsync(_lifetime.Token);
         try
         {
-            _turn?.Cancel(); await _ble.ForgetAsync(Settings.LastBluetoothAddress);
+            CancelAllTurns("设备已忘记"); await _ble.ForgetAsync(Settings.LastBluetoothAddress);
             Settings.LastBluetoothAddress = null; Settings.LastDeviceName = null;
             await _repository.SaveSettingsAsync(Settings);
             SetStatus("设备已忘记", "请重新扫描并配对");
@@ -139,7 +143,7 @@ public sealed class AssistantCoordinator : IAsyncDisposable
         try
         {
             var type = CurrentStatus().Contains("AI", StringComparison.Ordinal) ? MessageType.ChatError : MessageType.AsrError;
-            CancelTurn("本轮已取消");
+            CancelAllTurns("本轮已取消");
             if (_ble.IsConnected) await _ble.SendAsync(type, CatProtocol.Utf8("已在 Windows 客户端取消", 256), _lifetime.Token);
         }
         catch (Exception error) { ShowError(error); }
@@ -162,8 +166,8 @@ public sealed class AssistantCoordinator : IAsyncDisposable
     {
         text = text.Trim();
         if (text.Length == 0) throw new ArgumentException("消息不能为空。", nameof(text));
-        _turn?.Cancel(); _turn?.Dispose(); _turn = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
-        try { await RunChatAsync(new ChatMessage("user", text, DateTimeOffset.UtcNow), false, null, _turn.Token); }
+        var token = _turns.StartDesktop();
+        try { await RunChatAsync(new ChatMessage("user", text, DateTimeOffset.UtcNow), false, null, token); }
         catch (Exception error) when (error is not OperationCanceledException) { ShowError(error); throw; }
     }
 
@@ -184,13 +188,13 @@ public sealed class AssistantCoordinator : IAsyncDisposable
             {
                 case MessageType.Hello: await HandleHelloAsync(message.Payload); break;
                 case MessageType.RecordStart: BeginRecording(message.Payload); break;
-                case MessageType.RecordEnd: await EndRecordingAsync(message.Payload); break;
+                case MessageType.RecordEnd: await RunCardOperationAsync(token => EndRecordingAsync(message.Payload, token)); break;
                 case MessageType.RecordCancel:
-                case MessageType.TranscriptCancel: CancelTurn("本轮已取消"); break;
-                case MessageType.TranscriptRetry: CancelTurn("请重新录音"); break;
-                case MessageType.TranscriptConfirm: await ConfirmTranscriptAsync(ReadId(message.Payload)); break;
+                case MessageType.TranscriptCancel: CancelCardTurn("本轮已取消"); break;
+                case MessageType.TranscriptRetry: CancelCardTurn("请重新录音"); break;
+                case MessageType.TranscriptConfirm: await RunCardOperationAsync(token => ConfirmTranscriptAsync(ReadId(message.Payload), token)); break;
                 case MessageType.NewConversation: await ResetConversationAsync(message.Payload, true); break;
-                case MessageType.CancelTurn: CancelTurn("生成已停止"); break;
+                case MessageType.CancelTurn: CancelCardTurn("生成已停止"); break;
                 case MessageType.Ping: await _ble.SendAsync(MessageType.Pong, message.Payload, _lifetime.Token); break;
             }
         }
@@ -214,78 +218,122 @@ public sealed class AssistantCoordinator : IAsyncDisposable
         var id = BinaryPrimitives.ReadUInt16LittleEndian(payload);
         var sampleRate = BinaryPrimitives.ReadUInt32LittleEndian(payload.AsSpan(2));
         if (sampleRate != 16000 || payload[8] != 1) throw new ProtocolException("不支持的音频格式。");
-        lock (_audioLock) { _recordingId = id; _recording = new RecordingAssembler(id, checked((int)sampleRate)); }
-        _turn?.Cancel(); _turn?.Dispose(); _turn = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        lock (_audioLock)
+        {
+            _recordingId = id;
+            _recording = new RecordingAssembler(id, checked((int)sampleRate));
+            _discardedRecordingId = null;
+            _discardedRecordingMessage = null;
+        }
+        _turns.StartCard();
         SetStatus("正在录音", $"录音 #{id}");
     }
 
     private void OnAudioFrame(object? sender, byte[] packet)
     {
         try { lock (_audioLock) _recording?.Add(ImaAdpcmDecoder.Decode(packet)); }
-        catch (Exception error) { _turn?.Cancel(); lock (_audioLock) _recording = null; SetDetail($"音频错误：{error.Message}"); }
+        catch (Exception error)
+        {
+            _turns.CancelCard();
+            lock (_audioLock)
+            {
+                _discardedRecordingId = _recordingId;
+                _discardedRecordingMessage = $"音频错误：{error.Message}";
+                _recording = null;
+            }
+            SetDetail(_discardedRecordingMessage);
+        }
     }
 
-    private async Task EndRecordingAsync(byte[] payload)
+    private async Task EndRecordingAsync(byte[] payload, CancellationToken token)
     {
         if (payload.Length != 8) throw new ProtocolException("RECORD_END 负载长度错误。");
-        var id = ReadId(payload); RecordingAssembler recording;
+        var id = ReadId(payload); RecordingAssembler? recording = null; string? discardedMessage = null;
         lock (_audioLock)
         {
-            if (_recordingId != id || _recording is null) throw new ProtocolException("录音结束 ID 与当前录音不匹配。");
-            recording = _recording; _recording = null;
+            if (_recordingId == id && _recording is not null)
+            {
+                recording = _recording;
+                _recording = null;
+            }
+            else if (_discardedRecordingId == id)
+            {
+                discardedMessage = _discardedRecordingMessage ?? "本轮已在 Windows 客户端取消";
+                _discardedRecordingId = null;
+                _discardedRecordingMessage = null;
+            }
+            else
+            {
+                throw new ProtocolException($"录音结束 ID 与当前录音不匹配（结束 #{id}，当前 #{_recordingId?.ToString() ?? "无"}）。");
+            }
+        }
+        if (discardedMessage is not null)
+        {
+            await _ble.SendAsync(MessageType.AsrError, CatProtocol.Utf8(discardedMessage, 256), _lifetime.Token);
+            return;
         }
         var advertisedFrames = BinaryPrimitives.ReadUInt16LittleEndian(payload.AsSpan(6));
-        if (recording.FrameCount != advertisedFrames) throw new ProtocolException($"录音帧数不符，收到 {recording.FrameCount}，卡片声明 {advertisedFrames}。");
-        await _ble.SendAsync(MessageType.AsrStarted, IdPayload(id), _turn!.Token);
+        if (recording!.FrameCount != advertisedFrames) throw new ProtocolException($"录音帧数不符，收到 {recording.FrameCount}，卡片声明 {advertisedFrames}。");
+        await _ble.SendAsync(MessageType.AsrStarted, IdPayload(id), token);
         SetStatus("正在识别", "正在向 DashScope 提交音频…");
-        _transcript = DisplayText.Filter(await _cloud.TranscribeAsync(recording.ToWav(), Settings.AsrModel, _secureStore.Load() ?? "", _turn.Token));
+        _transcript = DisplayText.Filter(await _cloud.TranscribeAsync(recording.ToWav(), Settings.AsrModel, _secureStore.Load() ?? "", token));
         if (string.IsNullOrWhiteSpace(_transcript)) throw new CloudException(CloudError.Service, "语音识别结果不包含卡片可显示的文字。");
-        await _ble.SendAsync(MessageType.AsrResult, CatProtocol.Utf8(_transcript, CatProtocol.TranscriptMaxBytes), _turn.Token);
+        await _ble.SendAsync(MessageType.AsrResult, CatProtocol.Utf8(_transcript, CatProtocol.TranscriptMaxBytes), token);
         SetStatus("等待卡片确认", _transcript);
     }
 
-    private async Task ConfirmTranscriptAsync(ushort id)
+    private async Task ConfirmTranscriptAsync(ushort id, CancellationToken token)
     {
         if (_recordingId != id || string.IsNullOrWhiteSpace(_transcript)) throw new ProtocolException("没有可确认的转写结果。");
-        await RunChatAsync(new ChatMessage("user", _transcript, DateTimeOffset.UtcNow), true, id, _turn!.Token);
+        await RunChatAsync(new ChatMessage("user", _transcript, DateTimeOffset.UtcNow), true, id, token);
         _transcript = null; _recordingId = null;
     }
 
     private async Task RunChatAsync(ChatMessage user, bool sendToCard, ushort? recordingId, CancellationToken token)
     {
-        if (_sessionPolicy.ShouldStartNew(DateTimeOffset.UtcNow) || _conversationId == 0) await CreateConversationAsync(DateTimeOffset.UtcNow);
-        await _repository.AddMessageAsync(_conversationId, user); AddMessage(user);
-        var history = await _repository.LoadMessagesAsync(_conversationId);
-        if (sendToCard) await _ble.SendAsync(MessageType.ChatStarted, IdPayload(recordingId!.Value), token);
-        SetStatus("AI 正在回答", user.Content);
-        StreamChanged?.Invoke(this, new StreamUpdate(_conversationId, "started", Message: user));
-        var answer = new StringBuilder();
-        await foreach (var raw in _cloud.StreamChatAsync(history, Settings.ChatModel, _secureStore.Load() ?? "", token))
+        await _chatGate.WaitAsync(token);
+        try
         {
-            var delta = sendToCard ? DisplayText.Filter(raw) : raw;
-            if (delta.Length == 0) continue;
-            answer.Append(delta);
-            if (sendToCard && Encoding.UTF8.GetByteCount(answer.ToString()) > CatProtocol.AnswerMaxBytes) throw new ProtocolException("AI 回复超过卡片 12 KiB 限制。");
-            if (sendToCard) await _ble.SendAsync(MessageType.ChatDelta, Encoding.UTF8.GetBytes(delta), token);
-            StreamChanged?.Invoke(this, new StreamUpdate(_conversationId, "delta", delta));
+            if (_sessionPolicy.ShouldStartNew(DateTimeOffset.UtcNow) || _conversationId == 0) await CreateConversationAsync(DateTimeOffset.UtcNow);
+            await _repository.AddMessageAsync(_conversationId, user); AddMessage(user);
+            var history = await _repository.LoadMessagesAsync(_conversationId);
+            if (sendToCard) await _ble.SendAsync(MessageType.ChatStarted, IdPayload(recordingId!.Value), token);
+            SetStatus("AI 正在回答", user.Content);
+            StreamChanged?.Invoke(this, new StreamUpdate(_conversationId, "started", Message: user));
+            var answer = new StringBuilder();
+            await foreach (var raw in _cloud.StreamChatAsync(history, Settings.ChatModel, _secureStore.Load() ?? "", token))
+            {
+                var delta = sendToCard ? DisplayText.Filter(raw) : raw;
+                if (delta.Length == 0) continue;
+                answer.Append(delta);
+                if (sendToCard && Encoding.UTF8.GetByteCount(answer.ToString()) > CatProtocol.AnswerMaxBytes) throw new ProtocolException("AI 回复超过卡片 12 KiB 限制。");
+                if (sendToCard) await _ble.SendAsync(MessageType.ChatDelta, Encoding.UTF8.GetBytes(delta), token);
+                StreamChanged?.Invoke(this, new StreamUpdate(_conversationId, "delta", delta));
+            }
+            if (sendToCard)
+            {
+                var done = new byte[4]; BinaryPrimitives.WriteUInt32LittleEndian(done, (uint)Encoding.UTF8.GetByteCount(answer.ToString()));
+                await _ble.SendAsync(MessageType.ChatDone, done, token);
+            }
+            var assistant = new ChatMessage("assistant", answer.ToString(), DateTimeOffset.UtcNow);
+            await _repository.AddMessageAsync(_conversationId, assistant); AddMessage(assistant);
+            _sessionPolicy.Complete(DateTimeOffset.UtcNow);
+            SetStatus("回答完成", answer.ToString());
+            StreamChanged?.Invoke(this, new StreamUpdate(_conversationId, "completed", Message: assistant));
         }
-        if (sendToCard)
-        {
-            var done = new byte[4]; BinaryPrimitives.WriteUInt32LittleEndian(done, (uint)Encoding.UTF8.GetByteCount(answer.ToString()));
-            await _ble.SendAsync(MessageType.ChatDone, done, token);
-        }
-        var assistant = new ChatMessage("assistant", answer.ToString(), DateTimeOffset.UtcNow);
-        await _repository.AddMessageAsync(_conversationId, assistant); AddMessage(assistant);
-        _sessionPolicy.Complete(DateTimeOffset.UtcNow);
-        SetStatus("回答完成", answer.ToString());
-        StreamChanged?.Invoke(this, new StreamUpdate(_conversationId, "completed", Message: assistant));
+        finally { _chatGate.Release(); }
     }
 
     private async Task ResetConversationAsync(byte[] payload, bool notifyCard)
     {
-        CancelTurn("已开始新对话");
-        await CreateConversationAsync(DateTimeOffset.UtcNow);
-        if (notifyCard) await _ble.SendAsync(MessageType.SessionReset, payload.Length == 4 ? payload : [], _lifetime.Token);
+        CancelAllTurns("已开始新对话");
+        await _chatGate.WaitAsync(_lifetime.Token);
+        try
+        {
+            await CreateConversationAsync(DateTimeOffset.UtcNow);
+            if (notifyCard) await _ble.SendAsync(MessageType.SessionReset, payload.Length == 4 ? payload : [], _lifetime.Token);
+        }
+        finally { _chatGate.Release(); }
     }
 
     private async Task CreateConversationAsync(DateTimeOffset now)
@@ -295,11 +343,40 @@ public sealed class AssistantCoordinator : IAsyncDisposable
     }
 
     private void AddMessage(ChatMessage message) { lock (_stateLock) _messages.Add(message); PublishState(); }
-    private void CancelTurn(string status) { _turn?.Cancel(); lock (_audioLock) _recording = null; _transcript = null; SetStatus(status, CurrentDetail()); }
+    private async Task RunCardOperationAsync(Func<CancellationToken, Task> operation)
+    {
+        var token = _turns.CardToken();
+        try { await operation(token); }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+    }
+
+    private void CancelCardTurn(string status)
+    {
+        _turns.CancelCard();
+        lock (_audioLock) _recording = null;
+        _transcript = null;
+        SetStatus(status, CurrentDetail());
+    }
+
+    private void CancelAllTurns(string status)
+    {
+        _turns.CancelAll();
+        lock (_audioLock)
+        {
+            if (_recording is not null)
+            {
+                _discardedRecordingId = _recordingId;
+                _discardedRecordingMessage = "本轮已在 Windows 客户端取消";
+                _recording = null;
+            }
+        }
+        _transcript = null;
+        SetStatus(status, CurrentDetail());
+    }
 
     private async Task ReportTurnErrorAsync(Exception error)
     {
-        if (error is OperationCanceledException && (_turn?.IsCancellationRequested == true || _lifetime.IsCancellationRequested)) return;
+        if (error is OperationCanceledException && _lifetime.IsCancellationRequested) return;
         var type = CurrentStatus().Contains("AI", StringComparison.Ordinal) ? MessageType.ChatError : MessageType.AsrError;
         ShowError(error);
         var publicMessage = error is CloudException { Kind: CloudError.ApiKeyMissing or CloudError.ApiKeyInvalid } ? "请在 Windows 客户端检查 API Key" : "服务暂时不可用，请稍后重试";
@@ -348,6 +425,6 @@ public sealed class AssistantCoordinator : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         SystemEvents.PowerModeChanged -= OnPowerModeChanged; NetworkInformation.NetworkStatusChanged -= OnNetworkStatusChanged;
-        _lifetime.Cancel(); _turn?.Cancel(); _reconnectTimer.Dispose(); await _ble.DisposeAsync(); _cloud.Dispose(); _lifetime.Dispose(); _turn?.Dispose(); _connectionGate.Dispose();
+        _lifetime.Cancel(); _turns.CancelAll(); _reconnectTimer.Dispose(); await _ble.DisposeAsync(); _cloud.Dispose(); _turns.Dispose(); _lifetime.Dispose(); _connectionGate.Dispose(); _chatGate.Dispose();
     }
 }
