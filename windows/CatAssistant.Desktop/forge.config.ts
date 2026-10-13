@@ -9,12 +9,13 @@ import { fileURLToPath } from 'node:url';
 const desktopDirectory = path.dirname(fileURLToPath(import.meta.url));
 const backendProject = path.resolve(desktopDirectory, '..', 'CatAssistant.Backend', 'CatAssistant.Backend.csproj');
 const backendOutput = path.resolve(desktopDirectory, '.artifacts', 'backend');
+const iconPath = path.resolve(desktopDirectory, '..', '..', 'assets', 'branding', 'cat-assistant-icon-transparent.png');
 
 const config: ForgeConfig = {
   packagerConfig: {
     asar: true,
     executableName: 'CatAssistant',
-    extraResource: [backendOutput]
+    extraResource: [backendOutput, iconPath]
   },
   rebuildConfig: {},
   hooks: {
