@@ -4,9 +4,11 @@ VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CatAssistant.Core", "CatAssistant.Core\CatAssistant.Core.csproj", "{2C72A4EA-BB0A-4F2B-B480-17D22D1DB671}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CatAssistant.App", "CatAssistant.App\CatAssistant.App.csproj", "{E507D2B4-0BA2-4128-889D-774C7564894E}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CatAssistant.Backend", "CatAssistant.Backend\CatAssistant.Backend.csproj", "{A9D6F71C-9F2A-49A7-B28C-74B279CBBCE6}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CatAssistant.Core.Tests", "CatAssistant.Core.Tests\CatAssistant.Core.Tests.csproj", "{0F1A5918-B978-4520-B44F-BA64519FAD5F}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CatAssistant.Backend.Tests", "CatAssistant.Backend.Tests\CatAssistant.Backend.Tests.csproj", "{1DD9FB8C-8E3A-4DA4-82CC-0E4CA6E8770A}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -18,13 +20,17 @@ Global
 		{2C72A4EA-BB0A-4F2B-B480-17D22D1DB671}.Debug|x64.Build.0 = Debug|x64
 		{2C72A4EA-BB0A-4F2B-B480-17D22D1DB671}.Release|x64.ActiveCfg = Release|x64
 		{2C72A4EA-BB0A-4F2B-B480-17D22D1DB671}.Release|x64.Build.0 = Release|x64
-		{E507D2B4-0BA2-4128-889D-774C7564894E}.Debug|x64.ActiveCfg = Debug|x64
-		{E507D2B4-0BA2-4128-889D-774C7564894E}.Debug|x64.Build.0 = Debug|x64
-		{E507D2B4-0BA2-4128-889D-774C7564894E}.Release|x64.ActiveCfg = Release|x64
-		{E507D2B4-0BA2-4128-889D-774C7564894E}.Release|x64.Build.0 = Release|x64
+		{A9D6F71C-9F2A-49A7-B28C-74B279CBBCE6}.Debug|x64.ActiveCfg = Debug|x64
+		{A9D6F71C-9F2A-49A7-B28C-74B279CBBCE6}.Debug|x64.Build.0 = Debug|x64
+		{A9D6F71C-9F2A-49A7-B28C-74B279CBBCE6}.Release|x64.ActiveCfg = Release|x64
+		{A9D6F71C-9F2A-49A7-B28C-74B279CBBCE6}.Release|x64.Build.0 = Release|x64
 		{0F1A5918-B978-4520-B44F-BA64519FAD5F}.Debug|x64.ActiveCfg = Debug|x64
 		{0F1A5918-B978-4520-B44F-BA64519FAD5F}.Debug|x64.Build.0 = Debug|x64
 		{0F1A5918-B978-4520-B44F-BA64519FAD5F}.Release|x64.ActiveCfg = Release|x64
 		{0F1A5918-B978-4520-B44F-BA64519FAD5F}.Release|x64.Build.0 = Release|x64
+		{1DD9FB8C-8E3A-4DA4-82CC-0E4CA6E8770A}.Debug|x64.ActiveCfg = Debug|x64
+		{1DD9FB8C-8E3A-4DA4-82CC-0E4CA6E8770A}.Debug|x64.Build.0 = Debug|x64
+		{1DD9FB8C-8E3A-4DA4-82CC-0E4CA6E8770A}.Release|x64.ActiveCfg = Release|x64
+		{1DD9FB8C-8E3A-4DA4-82CC-0E4CA6E8770A}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 EndGlobal

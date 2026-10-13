@@ -1,0 +1,36 @@
+{
+  "name": "cat-assistant-desktop",
+  "productName": "小猫助手",
+  "version": "1.0.0",
+  "description": "FoloToy AI Passport Windows gateway",
+  "author": "Cat Assistant contributors",
+  "type": "module",
+  "main": ".vite/build/main.cjs",
+  "private": true,
+  "scripts": {
+    "dev": "electron-forge start",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "package": "electron-forge package --platform=win32 --arch=x64",
+    "make": "electron-forge make --platform=win32 --arch=x64"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "8.0.1",
+    "@electron-forge/maker-squirrel": "8.0.1",
+    "@electron-forge/maker-zip": "8.0.1",
+    "@electron-forge/plugin-vite": "8.0.1",
+    "@electron-forge/shared-types": "8.0.1",
+    "@types/node": "^22.18.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "electron": "44.7.0",
+    "typescript": "7.0.2",
+    "vite": "8.3.4",
+    "vitest": "^4.0.0"
+  },
+  "dependencies": {
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  }
+}

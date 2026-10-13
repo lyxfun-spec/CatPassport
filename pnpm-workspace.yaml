@@ -1,0 +1,6 @@
+packages:
+  - windows/CatAssistant.Desktop
+nodeLinker: hoisted
+allowBuilds:
+  electron: true
+  electron-winstaller: true

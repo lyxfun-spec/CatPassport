@@ -1,7 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 
-namespace CatAssistant.App.Services;
+namespace CatAssistant.Backend.Services;
 
 public sealed class SecureApiKeyStore
 {

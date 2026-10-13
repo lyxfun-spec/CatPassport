@@ -1,0 +1,11 @@
+{
+  "name": "cat-assistant",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --dir windows/CatAssistant.Desktop dev",
+    "typecheck": "pnpm --dir windows/CatAssistant.Desktop typecheck",
+    "test": "dotnet test windows/CatAssistant.sln -c Debug && pnpm --dir windows/CatAssistant.Desktop test",
+    "package": "pnpm --dir windows/CatAssistant.Desktop package",
+    "make": "pnpm --dir windows/CatAssistant.Desktop make"
+  }
+}

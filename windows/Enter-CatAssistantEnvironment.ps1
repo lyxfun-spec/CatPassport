@@ -1,30 +1,23 @@
 [CmdletBinding()]
-param(
-    [switch]$SkipFirmware
-)
+param()
 
 $ErrorActionPreference = 'Stop'
 
 $dotnet = Get-Command dotnet -ErrorAction Stop
-$sdkList = & $dotnet.Source --list-sdks
-if ([string]::IsNullOrWhiteSpace($sdkList)) {
-    throw '.NET SDK 8 is required. Install Microsoft.DotNet.SDK.8 and retry.'
+$node = Get-Command node -ErrorAction Stop
+$pnpm = Get-Command pnpm -ErrorAction Stop
+
+$dotnetVersion = [Version](& $dotnet.Source --version)
+$nodeVersion = [Version]((& $node.Source --version).TrimStart('v'))
+
+if ($dotnetVersion.Major -ne 8) {
+    throw ".NET SDK 8 is required; found $dotnetVersion."
+}
+if ($nodeVersion.Major -lt 22) {
+    throw "Node.js 22 or newer is required; found $nodeVersion."
 }
 
-if (-not $SkipFirmware) {
-    $idfExport = 'C:\Espressif\v5.5.3\esp-idf\export.ps1'
-    if (-not (Test-Path -LiteralPath $idfExport)) {
-        throw "ESP-IDF 5.5.3 was not found at $idfExport. Install it with the Espressif tools installer."
-    }
-
-    . $idfExport
-    $idfVersion = idf.py --version
-    if ($idfVersion -notmatch '^ESP-IDF v5\.5\.3$') {
-        throw "Expected ESP-IDF v5.5.3, got: $idfVersion"
-    }
-}
-
-Write-Host "dotnet: $(& $dotnet.Source --version)"
-if (-not $SkipFirmware) {
-    Write-Host "ESP-IDF: $(idf.py --version)"
-}
+Write-Host "dotnet: $dotnetVersion"
+Write-Host "node: $nodeVersion"
+Write-Host "pnpm: $(& $pnpm.Source --version)"
+Write-Host 'Ready. Run pnpm dev from the repository root.'

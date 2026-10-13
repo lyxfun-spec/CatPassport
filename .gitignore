@@ -9,6 +9,11 @@ android/**/build/
 android/local.properties
 windows/**/bin/
 windows/**/obj/
+windows/**/node_modules/
+windows/CatAssistant.Desktop/.vite/
+windows/CatAssistant.Desktop/.artifacts/
+windows/CatAssistant.Desktop/out/
+node_modules/
 .vs/
 *.jks
 *.keystore

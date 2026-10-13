@@ -4,11 +4,11 @@ using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
-using CatAssistant.App.Models;
+using CatAssistant.Backend.Models;
 
-namespace CatAssistant.App.Services;
+namespace CatAssistant.Backend.Services;
 
-public sealed class DashScopeClient
+public sealed class DashScopeClient : IDisposable
 {
     private const string AsrUrl = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation";
     private const string ChatUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
@@ -17,7 +17,7 @@ public sealed class DashScopeClient
     public async Task<string> TranscribeAsync(byte[] wav, string model, string apiKey, CancellationToken cancellationToken)
     {
         EnsureKey(apiKey);
-        var request = CreateRequest(AsrUrl, apiKey);
+        using var request = CreateRequest(AsrUrl, apiKey);
         request.Headers.Add("X-DashScope-SSE", "disable");
         request.Content = JsonContent.Create(new
         {
@@ -37,7 +37,7 @@ public sealed class DashScopeClient
         EnsureKey(apiKey);
         var messages = new List<object> { new { role = "system", content = "你是小猫助手，可爱、温暖、简洁，但不要声称自己是真实宠物。请使用简体中文纯文本回答，不使用 Markdown、Emoji、颜文字或生僻特殊符号。标点只使用常见中文标点或 ASCII 字符。" } };
         messages.AddRange(history.Select(message => (object)new { role = message.Role, content = message.Content }));
-        var request = CreateRequest(ChatUrl, apiKey);
+        using var request = CreateRequest(ChatUrl, apiKey);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
         request.Content = JsonContent.Create(new { model, messages, stream = true, stream_options = new { include_usage = true } });
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
@@ -100,6 +100,8 @@ public sealed class DashScopeClient
         if (output.TryGetProperty("choices", out var choices) && choices.GetArrayLength() > 0 && choices[0].TryGetProperty("message", out var message) && message.TryGetProperty("content", out var content)) { text = content.GetString() ?? ""; return text.Length > 0; }
         return false;
     }
+
+    public void Dispose() => _http.Dispose();
 }
 
 public enum CloudError { ApiKeyMissing, ApiKeyInvalid, Permission, Model, Network, Timeout, Service }

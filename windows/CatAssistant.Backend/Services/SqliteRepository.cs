@@ -1,7 +1,7 @@
-using CatAssistant.App.Models;
+using CatAssistant.Backend.Models;
 using Microsoft.Data.Sqlite;
 
-namespace CatAssistant.App.Services;
+namespace CatAssistant.Backend.Services;
 
 public sealed class SqliteRepository
 {
@@ -80,11 +80,9 @@ public sealed class SqliteRepository
     public async Task<(long Id, DateTimeOffset LastAt)?> LoadLatestConversationAsync()
     {
         await using var db = new SqliteConnection(_connectionString); await db.OpenAsync();
-        var command = db.CreateCommand();
-        command.CommandText = "SELECT id,last_utc FROM conversations ORDER BY last_utc DESC LIMIT 1";
+        var command = db.CreateCommand(); command.CommandText = "SELECT id,last_utc FROM conversations ORDER BY last_utc DESC LIMIT 1";
         await using var reader = await command.ExecuteReaderAsync();
-        if (!await reader.ReadAsync()) return null;
-        return (reader.GetInt64(0), DateTimeOffset.Parse(reader.GetString(1)));
+        return await reader.ReadAsync() ? (reader.GetInt64(0), DateTimeOffset.Parse(reader.GetString(1))) : null;
     }
 
     public async Task AddMessageAsync(long conversationId, ChatMessage message)
