@@ -13,7 +13,6 @@ typedef enum {
     CAT_STATE_AI_STREAMING,
     CAT_STATE_ANSWER_READY,
     CAT_STATE_ERROR,
-    CAT_STATE_RECORD_TOO_SHORT,
     CAT_STATE_NEW_CONVERSATION,
 } cat_app_state_t;
 
@@ -22,6 +21,8 @@ typedef enum {
     CAT_EVENT_BLE_DISCONNECTED,
     CAT_EVENT_OK_DOWN,
     CAT_EVENT_OK_UP,
+    CAT_EVENT_RECORD_ACTIVATE,
+    CAT_EVENT_RECORD_ABORT,
     CAT_EVENT_UP_LONG,
     CAT_EVENT_DOWN_LONG,
     CAT_EVENT_ASR_STARTED,
@@ -48,15 +49,19 @@ enum {
     CAT_ACTION_CLEAR_TEXT = 1U << 6,
     CAT_ACTION_NEW_CONVERSATION = 1U << 7,
     CAT_ACTION_REFRESH_UI = 1U << 8,
+    CAT_ACTION_ACTIVATE_RECORDING = 1U << 9,
 };
 
 typedef struct {
     cat_app_state_t state;
     cat_app_state_t error_return_state;
+    cat_app_state_t recording_origin_state;
     uint16_t recording_id;
+    uint16_t armed_recording_id;
     bool app_ready;
     bool has_transcript;
     bool has_answer;
+    bool recording_active;
 } cat_app_model_t;
 
 void cat_state_init(cat_app_model_t *model);

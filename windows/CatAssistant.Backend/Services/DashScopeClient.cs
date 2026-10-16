@@ -26,10 +26,10 @@ public sealed class DashScopeClient : IDisposable
             parameters = new { format = "wav", sample_rate = "16000" }
         });
         using var response = await _http.SendAsync(request, cancellationToken);
-        EnsureSuccess(response);
+        EnsureSuccess(response, isAsrRequest: true);
         using var json = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(cancellationToken));
         if (TryText(json.RootElement, out var text)) return text;
-        throw new CloudException(CloudError.Service, "语音识别未返回文字。");
+        throw new CloudException(CloudError.NoSpeech, "语音识别未返回文字。");
     }
 
     public async IAsyncEnumerable<string> StreamChatAsync(IReadOnlyList<ChatMessage> history, string model, string apiKey, [EnumeratorCancellation] CancellationToken cancellationToken)
@@ -41,7 +41,7 @@ public sealed class DashScopeClient : IDisposable
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
         request.Content = JsonContent.Create(new { model, messages, stream = true, stream_options = new { include_usage = true } });
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        EnsureSuccess(response);
+        EnsureSuccess(response, isAsrRequest: false);
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var reader = new StreamReader(stream, Encoding.UTF8);
         while (await reader.ReadLineAsync(cancellationToken) is { } line)
@@ -71,11 +71,17 @@ public sealed class DashScopeClient : IDisposable
         if (string.IsNullOrWhiteSpace(apiKey)) throw new CloudException(CloudError.ApiKeyMissing, "尚未配置 DashScope API Key。");
     }
 
-    private static void EnsureSuccess(HttpResponseMessage response)
+    private static void EnsureSuccess(HttpResponseMessage response, bool isAsrRequest)
     {
         if (response.IsSuccessStatusCode) return;
-        var kind = response.StatusCode switch
+        throw ErrorForStatus(response.StatusCode, isAsrRequest);
+    }
+
+    internal static CloudException ErrorForStatus(HttpStatusCode statusCode, bool isAsrRequest)
+    {
+        var kind = statusCode switch
         {
+            HttpStatusCode.BadRequest when isAsrRequest => CloudError.NoSpeech,
             HttpStatusCode.Unauthorized => CloudError.ApiKeyInvalid,
             HttpStatusCode.Forbidden => CloudError.Permission,
             HttpStatusCode.NotFound => CloudError.Model,
@@ -83,12 +89,13 @@ public sealed class DashScopeClient : IDisposable
         };
         var message = kind switch
         {
+            CloudError.NoSpeech => "DashScope 未检测到有效语音。",
             CloudError.ApiKeyInvalid => "DashScope API Key 无效。",
             CloudError.Permission => "DashScope API Key 无权访问所选模型。",
             CloudError.Model => "配置的 DashScope 模型不存在。",
-            _ => $"DashScope 服务返回 HTTP {(int)response.StatusCode}。"
+            _ => $"DashScope 服务返回 HTTP {(int)statusCode}。"
         };
-        throw new CloudException(kind, message);
+        return new CloudException(kind, message);
     }
 
     private static bool TryText(JsonElement root, out string text)
@@ -104,5 +111,5 @@ public sealed class DashScopeClient : IDisposable
     public void Dispose() => _http.Dispose();
 }
 
-public enum CloudError { ApiKeyMissing, ApiKeyInvalid, Permission, Model, Network, Timeout, Service }
+public enum CloudError { ApiKeyMissing, ApiKeyInvalid, Permission, Model, Network, Timeout, NoSpeech, Service }
 public sealed class CloudException(CloudError kind, string message) : Exception(message) { public CloudError Kind { get; } = kind; }

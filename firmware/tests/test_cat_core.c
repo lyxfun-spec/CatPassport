@@ -8,6 +8,7 @@
 #include "cat_adpcm.h"
 #include "cat_clock.h"
 #include "cat_protocol.h"
+#include "cat_scroll.h"
 #include "cat_screen.h"
 #include "cat_state.h"
 
@@ -102,13 +103,27 @@ static void test_state(void)
     cat_state_apply(&model, CAT_EVENT_BLE_CONNECTED);
     assert(model.state == CAT_STATE_IDLE);
     uint32_t actions = cat_state_apply(&model, CAT_EVENT_OK_DOWN);
-    assert(model.state == CAT_STATE_RECORDING && (actions & CAT_ACTION_START_RECORDING));
+    assert(model.state == CAT_STATE_RECORDING && !model.recording_active);
+    assert(actions & CAT_ACTION_START_RECORDING);
+    actions = cat_state_apply(&model, CAT_EVENT_OK_UP);
+    assert(model.state == CAT_STATE_IDLE && (actions & CAT_ACTION_CANCEL_RECORDING));
+
+    cat_state_apply(&model, CAT_EVENT_OK_DOWN);
+    actions = cat_state_apply(&model, CAT_EVENT_RECORD_ACTIVATE);
+    assert(model.state == CAT_STATE_RECORDING && model.recording_active);
+    assert(actions & CAT_ACTION_ACTIVATE_RECORDING);
     actions = cat_state_apply(&model, CAT_EVENT_OK_UP);
     assert(model.state == CAT_STATE_TRANSCRIBING && (actions & CAT_ACTION_STOP_RECORDING));
     cat_state_apply(&model, CAT_EVENT_ASR_RESULT);
     assert(model.state == CAT_STATE_TRANSCRIPT_REVIEW && model.has_transcript);
+    const uint16_t transcript_id = model.recording_id;
     actions = cat_state_apply(&model, CAT_EVENT_OK_DOWN);
+    assert(model.state == CAT_STATE_RECORDING && (actions & CAT_ACTION_START_RECORDING));
+    assert(model.recording_id == transcript_id);
+    assert(model.armed_recording_id != transcript_id);
+    actions = cat_state_apply(&model, CAT_EVENT_OK_UP);
     assert(model.state == CAT_STATE_AI_WAITING && (actions & CAT_ACTION_CONFIRM_TRANSCRIPT));
+    assert(model.recording_id == transcript_id);
     cat_state_apply(&model, CAT_EVENT_CHAT_DELTA);
     assert(model.state == CAT_STATE_AI_STREAMING && model.has_answer);
     cat_state_apply(&model, CAT_EVENT_CHAT_DONE);
@@ -138,24 +153,63 @@ static void test_button_interactions(void)
     assert(model.state == CAT_STATE_IDLE);
 
     cat_state_apply(&model, CAT_EVENT_OK_DOWN);
+    const uint16_t previous_recording_id = model.recording_id;
+    assert(model.armed_recording_id != previous_recording_id);
+    cat_state_apply(&model, CAT_EVENT_RECORD_ACTIVATE);
+    assert(model.recording_id == model.armed_recording_id);
+    assert(model.recording_id != previous_recording_id);
+    cat_state_apply(&model, CAT_EVENT_OK_UP);
+    cat_state_apply(&model, CAT_EVENT_ASR_RESULT);
+    actions = cat_state_apply(&model, CAT_EVENT_OK_DOWN);
+    assert(model.state == CAT_STATE_RECORDING &&
+           model.recording_origin_state == CAT_STATE_TRANSCRIPT_REVIEW);
+    actions = cat_state_apply(&model, CAT_EVENT_RECORD_ACTIVATE);
+    assert(actions & CAT_ACTION_REQUEST_RERECORD);
+    assert(actions & CAT_ACTION_ACTIVATE_RECORDING);
+    cat_state_apply(&model, CAT_EVENT_OK_UP);
+    assert(model.state == CAT_STATE_TRANSCRIBING);
+
+    cat_state_apply(&model, CAT_EVENT_ASR_RESULT);
+    cat_state_apply(&model, CAT_EVENT_OK_DOWN); /* 短按确认识别文字。 */
+    cat_state_apply(&model, CAT_EVENT_OK_UP);
+    cat_state_apply(&model, CAT_EVENT_CHAT_DELTA);
+    actions = cat_state_apply(&model, CAT_EVENT_OK_DOWN);
+    assert(model.state == CAT_STATE_ANSWER_READY && (actions & CAT_ACTION_CANCEL_TURN));
+
+    model.has_answer = true;
+    cat_state_apply(&model, CAT_EVENT_OK_DOWN);
+    actions = cat_state_apply(&model, CAT_EVENT_OK_UP);
+    assert(model.state == CAT_STATE_IDLE && model.has_answer);
+    assert(actions & CAT_ACTION_CANCEL_RECORDING);
+
+    model.state = CAT_STATE_ANSWER_READY;
+    cat_state_apply(&model, CAT_EVENT_OK_DOWN);
+    cat_state_apply(&model, CAT_EVENT_RECORD_ACTIVATE);
     cat_state_apply(&model, CAT_EVENT_OK_UP);
     cat_state_apply(&model, CAT_EVENT_RECORD_TOO_SHORT);
-    assert(model.state == CAT_STATE_RECORD_TOO_SHORT);
-    actions = cat_state_apply(&model, CAT_EVENT_OK_DOWN);
-    assert(model.state == CAT_STATE_RECORDING && (actions & CAT_ACTION_START_RECORDING));
+    assert(model.state == CAT_STATE_ANSWER_READY);
+}
 
-    cat_state_apply(&model, CAT_EVENT_OK_UP);
-    cat_state_apply(&model, CAT_EVENT_ASR_RESULT);
-    actions = cat_state_apply(&model, CAT_EVENT_UP_LONG);
-    assert(model.state == CAT_STATE_IDLE && (actions & CAT_ACTION_REQUEST_RERECORD));
+static void test_scroll_motion(void)
+{
+    cat_scroll_motion_t motion;
+    cat_scroll_init(&motion);
+    assert(!cat_scroll_is_active(&motion));
 
-    cat_state_apply(&model, CAT_EVENT_OK_DOWN);
-    cat_state_apply(&model, CAT_EVENT_OK_UP);
-    cat_state_apply(&model, CAT_EVENT_ASR_RESULT);
-    cat_state_apply(&model, CAT_EVENT_OK_DOWN);
-    cat_state_apply(&model, CAT_EVENT_CHAT_DELTA);
-    actions = cat_state_apply(&model, CAT_EVENT_DOWN_LONG);
-    assert(model.state == CAT_STATE_ANSWER_READY && (actions & CAT_ACTION_CANCEL_TURN));
+    cat_scroll_press(&motion, 1);
+    assert(cat_scroll_is_active(&motion));
+    assert(cat_scroll_update(&motion, 16) > 0);
+
+    int32_t held_distance = 0;
+    for (int i = 0; i < 50; ++i) held_distance += cat_scroll_update(&motion, 20);
+    assert(held_distance > 180 && held_distance < 350);
+
+    cat_scroll_press(&motion, -1);
+    assert(cat_scroll_update(&motion, 16) < 0);
+    cat_scroll_release(&motion, -1);
+    for (int i = 0; i < 100 && cat_scroll_is_active(&motion); ++i)
+        (void)cat_scroll_update(&motion, 20);
+    assert(!cat_scroll_is_active(&motion));
 }
 
 int main(void)
@@ -166,6 +220,7 @@ int main(void)
     test_adpcm();
     test_state();
     test_button_interactions();
+    test_scroll_motion();
     puts("Cat assistant core tests: PASS");
     return 0;
 }

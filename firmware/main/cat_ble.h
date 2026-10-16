@@ -28,12 +28,13 @@ typedef struct {
     size_t length;
 } cat_ble_event_t;
 
-/* Callback storage is borrowed and valid only for the duration of the call. */
-typedef void (*cat_ble_event_cb_t)(const cat_ble_event_t *event, void *context);
+/* Callback storage is borrowed and valid only for the duration of the call.
+ * Returning false rejects a received control write with ATT insufficient resources. */
+typedef bool (*cat_ble_event_cb_t)(const cat_ble_event_t *event, void *context);
 
 esp_err_t cat_ble_init(cat_ble_event_cb_t callback, void *context);
 esp_err_t cat_ble_send_control(uint8_t type, uint16_t message_id,
                                const uint8_t *payload, size_t length);
 esp_err_t cat_ble_send_audio(const uint8_t *frame, size_t length);
+esp_err_t cat_ble_disconnect(void);
 bool cat_ble_ready(void);
-

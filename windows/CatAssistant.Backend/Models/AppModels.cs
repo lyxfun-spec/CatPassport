@@ -19,6 +19,7 @@ public sealed record BackendSnapshot(
     string Detail,
     bool IsConnected,
     bool HasPairedDevice,
+    ulong? PairedDeviceAddress,
     uint MaxPduSize,
     IReadOnlyList<CatDevice> Devices,
     PublicSettings Settings,

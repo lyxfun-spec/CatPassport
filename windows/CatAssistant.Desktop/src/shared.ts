@@ -24,6 +24,7 @@ export interface BackendSnapshot {
   detail: string;
   isConnected: boolean;
   hasPairedDevice: boolean;
+  pairedDeviceAddress?: number | null;
   maxPduSize: number;
   devices: CatDevice[];
   settings: PublicSettings;

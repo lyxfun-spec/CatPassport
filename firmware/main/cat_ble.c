@@ -4,6 +4,7 @@
 
 #include "cat_protocol.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "host/ble_att.h"
@@ -39,14 +40,17 @@ static uint8_t s_address_type;
 static bool s_encrypted;
 static bool s_control_subscribed;
 static bool s_audio_subscribed;
+static bool s_ready_emitted;
+static int64_t s_connected_at_us;
 static uint8_t s_tx[CAT_BLE_TX_MAX];
 
-static void emit(cat_ble_event_type_t type, const uint8_t *data, size_t length)
+static bool emit(cat_ble_event_type_t type, const uint8_t *data, size_t length)
 {
     if (s_callback != NULL) {
         const cat_ble_event_t event = {.type = type, .data = data, .length = length};
-        s_callback(&event, s_context);
+        return s_callback(&event, s_context);
     }
+    return false;
 }
 
 static bool link_ready_locked(void)
@@ -72,7 +76,7 @@ static int gatt_access(uint16_t connection, uint16_t attribute,
     (void)argument;
     if (context->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
 
-    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (xSemaphoreTake(s_lock, 0) != pdTRUE) return BLE_ATT_ERR_INSUFFICIENT_RES;
     const bool allowed = connection == s_connection && s_encrypted;
     xSemaphoreGive(s_lock);
     if (!allowed) return BLE_ATT_ERR_INSUFFICIENT_ENC;
@@ -82,7 +86,8 @@ static int gatt_access(uint16_t connection, uint16_t attribute,
     if (length > sizeof(value) || os_mbuf_copydata(context->om, 0, length, value) != 0) {
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     }
-    emit(CAT_BLE_EVENT_CONTROL_FRAGMENT, value, length);
+    if (!emit(CAT_BLE_EVENT_CONTROL_FRAGMENT, value, length))
+        return BLE_ATT_ERR_INSUFFICIENT_RES;
     return 0;
 }
 
@@ -117,25 +122,56 @@ static int gap_event(struct ble_gap_event *event, void *argument)
             s_encrypted = false;
             s_control_subscribed = false;
             s_audio_subscribed = false;
+            s_ready_emitted = false;
+            s_connected_at_us = esp_timer_get_time();
             xSemaphoreGive(s_lock);
-            const int security_result = ble_gap_security_initiate(event->connect.conn_handle);
-            ESP_LOGI(TAG, "security initiate handle=%u result=%d",
-                     (unsigned)event->connect.conn_handle, security_result);
+            /* The Windows central owns security negotiation.  Starting encryption
+             * here with a retained peripheral bond races a fresh Windows pairing:
+             * after Windows has forgotten its key it rejects our old-key request
+             * and disconnects before it can send a Pairing Request.  Waiting for
+             * the central lets normal reconnects restore their bond and lets the
+             * repeat-pairing event below replace a stale peripheral bond. */
+            ESP_LOGI(TAG, "waiting for central security handle=%u",
+                     (unsigned)event->connect.conn_handle);
         } else {
-            (void)advertise();
+            const int advertise_result = advertise();
+            if (advertise_result != 0) ESP_LOGE(TAG, "advertising restart failed: %d", advertise_result);
         }
         return 0;
     case BLE_GAP_EVENT_DISCONNECT:
-        ESP_LOGI(TAG, "gap disconnect handle=%u reason=%d",
-                 (unsigned)event->disconnect.conn.conn_handle, event->disconnect.reason);
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        const bool encrypted_before_disconnect = s_encrypted;
+        const int64_t connected_for_us = esp_timer_get_time() - s_connected_at_us;
+        xSemaphoreGive(s_lock);
+        const bool stale_bond_rejected =
+            !encrypted_before_disconnect &&
+            connected_for_us >= 0 && connected_for_us < 3000000 &&
+            event->disconnect.reason == BLE_HS_HCI_ERR(BLE_ERR_REM_USER_CONN_TERM);
+        int stale_bond_delete_result = BLE_HS_ENOENT;
+        if (stale_bond_rejected) {
+            /* Windows can forget its key while the card still retains the peer
+             * bond.  In that state Windows terminates almost immediately, before
+             * sending a new SMP Pairing Request, so REPEAT_PAIRING cannot run.
+             * Remove only this peer's record; the desktop retries transparently. */
+            stale_bond_delete_result =
+                ble_store_util_delete_peer(&event->disconnect.conn.peer_id_addr);
+        }
+        ESP_LOGI(TAG,
+                 "gap disconnect handle=%u reason=%d encrypted=%d duration_ms=%lld stale_delete=%d",
+                 (unsigned)event->disconnect.conn.conn_handle, event->disconnect.reason,
+                 encrypted_before_disconnect, (long long)(connected_for_us / 1000),
+                 stale_bond_delete_result);
         xSemaphoreTake(s_lock, portMAX_DELAY);
         s_connection = BLE_HS_CONN_HANDLE_NONE;
         s_encrypted = false;
         s_control_subscribed = false;
         s_audio_subscribed = false;
+        s_ready_emitted = false;
+        s_connected_at_us = 0;
         xSemaphoreGive(s_lock);
-        emit(CAT_BLE_EVENT_DISCONNECTED, NULL, 0);
-        (void)advertise();
+        (void)emit(CAT_BLE_EVENT_DISCONNECTED, NULL, 0);
+        const int advertise_result = advertise();
+        if (advertise_result != 0) ESP_LOGE(TAG, "advertising restart failed: %d", advertise_result);
         return 0;
     case BLE_GAP_EVENT_ENC_CHANGE: {
         struct ble_gap_conn_desc descriptor;
@@ -145,22 +181,31 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         xSemaphoreTake(s_lock, portMAX_DELAY);
         s_encrypted = encrypted;
         const bool ready = link_ready_locked();
+        const bool emit_ready = ready && !s_ready_emitted;
+        s_ready_emitted = ready;
         xSemaphoreGive(s_lock);
         ESP_LOGI(TAG,
                  "encryption change handle=%u status=%d find=%d encrypted=%d bonded=%d ready=%d",
                  (unsigned)event->enc_change.conn_handle, event->enc_change.status, find_result,
                  encrypted, find_result == 0 ? descriptor.sec_state.bonded : 0, ready);
-        if (ready) emit(CAT_BLE_EVENT_READY, NULL, 0);
+        if (emit_ready) (void)emit(CAT_BLE_EVENT_READY, NULL, 0);
+        if (!encrypted && event->enc_change.status != 0)
+            (void)ble_gap_terminate(event->enc_change.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         return 0;
     }
     case BLE_GAP_EVENT_SUBSCRIBE:
         xSemaphoreTake(s_lock, portMAX_DELAY);
+        bool lost_subscription = false;
         if (event->subscribe.attr_handle == s_control_handle) {
+            lost_subscription = s_control_subscribed && !event->subscribe.cur_notify;
             s_control_subscribed = event->subscribe.cur_notify;
         } else if (event->subscribe.attr_handle == s_audio_handle) {
+            lost_subscription = s_audio_subscribed && !event->subscribe.cur_notify;
             s_audio_subscribed = event->subscribe.cur_notify;
         }
         const bool ready = link_ready_locked();
+        const bool emit_ready = ready && !s_ready_emitted;
+        s_ready_emitted = ready;
         const bool control = s_control_subscribed;
         const bool audio = s_audio_subscribed;
         const bool encrypted = s_encrypted;
@@ -171,14 +216,20 @@ static int gap_event(struct ble_gap_event *event, void *argument)
                  (unsigned)event->subscribe.conn_handle, (unsigned)event->subscribe.attr_handle,
                  (unsigned)event->subscribe.reason, (unsigned)event->subscribe.cur_notify,
                  control, audio, encrypted, (unsigned)mtu, ready);
-        if (ready) emit(CAT_BLE_EVENT_READY, NULL, 0);
+        if (emit_ready) (void)emit(CAT_BLE_EVENT_READY, NULL, 0);
+        if (lost_subscription && encrypted)
+            (void)ble_gap_terminate(event->subscribe.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         return 0;
     case BLE_GAP_EVENT_MTU: {
-        const bool ready = cat_ble_ready();
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        const bool ready = link_ready_locked();
+        const bool emit_ready = ready && !s_ready_emitted;
+        s_ready_emitted = ready;
+        xSemaphoreGive(s_lock);
         ESP_LOGI(TAG, "mtu handle=%u channel=%u value=%u ready=%d",
                  (unsigned)event->mtu.conn_handle, (unsigned)event->mtu.channel_id,
                  (unsigned)event->mtu.value, ready);
-        if (ready) emit(CAT_BLE_EVENT_READY, NULL, 0);
+        if (emit_ready) (void)emit(CAT_BLE_EVENT_READY, NULL, 0);
         return 0;
     }
     case BLE_GAP_EVENT_REPEAT_PAIRING: {
@@ -190,6 +241,16 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         ESP_LOGI(TAG, "repeat pairing handle=%u find=%d delete=%d",
                  (unsigned)event->repeat_pairing.conn_handle, find_result, delete_result);
         return BLE_GAP_REPEAT_PAIRING_RETRY;
+    }
+    case BLE_GAP_EVENT_ADV_COMPLETE: {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        const bool disconnected = s_connection == BLE_HS_CONN_HANDLE_NONE;
+        xSemaphoreGive(s_lock);
+        if (disconnected) {
+            const int result = advertise();
+            if (result != 0) ESP_LOGE(TAG, "advertising completion recovery failed: %d", result);
+        }
+        return 0;
     }
     default:
         return 0;
@@ -221,10 +282,24 @@ static int advertise(void)
 
 static void on_sync(void)
 {
-    if (ble_hs_util_ensure_addr(0) == 0 && ble_hs_id_infer_auto(0, &s_address_type) == 0) {
-        const int result = advertise();
-        if (result != 0) ESP_LOGE(TAG, "advertising failed: %d", result);
-    }
+    int result = ble_hs_util_ensure_addr(0);
+    if (result == 0) result = ble_hs_id_infer_auto(0, &s_address_type);
+    if (result == 0) result = advertise();
+    if (result != 0) ESP_LOGE(TAG, "NimBLE sync/advertising failed: %d", result);
+}
+
+static void on_reset(int reason)
+{
+    ESP_LOGE(TAG, "NimBLE host reset: %d", reason);
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    const bool was_connected = s_connection != BLE_HS_CONN_HANDLE_NONE;
+    s_connection = BLE_HS_CONN_HANDLE_NONE;
+    s_encrypted = false;
+    s_control_subscribed = false;
+    s_audio_subscribed = false;
+    s_ready_emitted = false;
+    xSemaphoreGive(s_lock);
+    if (was_connected) (void)emit(CAT_BLE_EVENT_DISCONNECTED, NULL, 0);
 }
 
 static void host_task(void *argument)
@@ -253,6 +328,7 @@ esp_err_t cat_ble_init(cat_ble_event_cb_t callback, void *context)
     if (result == 0) result = ble_gatts_add_svcs(SERVICES);
     if (result != 0) return ESP_FAIL;
 
+    ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.sm_bonding = 1;
     ble_hs_cfg.sm_sc = 1;
@@ -286,11 +362,15 @@ esp_err_t cat_ble_send_control(uint8_t type, uint16_t message_id,
         const size_t chunk = (length - offset) < chunk_max ? (length - offset) : chunk_max;
         const size_t packet_length = cat_protocol_write_fragment(
             s_tx, sizeof(s_tx), type, message_id, offset, payload, chunk, length);
-        if (packet_length == 0 || notify(s_control_handle, s_tx, packet_length) != ESP_OK) {
-            ESP_LOGW(TAG, "control notify failed type=0x%02x offset=%u length=%u",
-                     type, (unsigned)offset, (unsigned)packet_length);
+        const esp_err_t send_result = packet_length == 0
+                                          ? ESP_FAIL
+                                          : notify(s_control_handle, s_tx, packet_length);
+        if (send_result != ESP_OK) {
+            ESP_LOGW(TAG, "control notify failed type=0x%02x offset=%u length=%u err=%s",
+                     type, (unsigned)offset, (unsigned)packet_length,
+                     esp_err_to_name(send_result));
             xSemaphoreGive(s_lock);
-            return ESP_FAIL;
+            return send_result;
         }
         offset += chunk;
     } while (offset < length);
@@ -309,4 +389,15 @@ esp_err_t cat_ble_send_audio(const uint8_t *frame, size_t length)
     const esp_err_t result = notify(s_audio_handle, frame, length);
     xSemaphoreGive(s_lock);
     return result;
+}
+
+esp_err_t cat_ble_disconnect(void)
+{
+    if (s_lock == NULL) return ESP_ERR_INVALID_STATE;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    const uint16_t connection = s_connection;
+    xSemaphoreGive(s_lock);
+    if (connection == BLE_HS_CONN_HANDLE_NONE) return ESP_ERR_INVALID_STATE;
+    const int result = ble_gap_terminate(connection, BLE_ERR_REM_USER_CONN_TERM);
+    return result == 0 || result == BLE_HS_EALREADY ? ESP_OK : ESP_FAIL;
 }

@@ -14,7 +14,9 @@ LV_FONT_DECLARE(cat_font_16);
 #define COLOR_BORDER 0x293238
 #define COLOR_ACCENT 0x59C9B2
 #define COLOR_MUTED 0x87918F
-#define SCROLL_STEP 72
+#define TEXT_BODY_Y 42
+#define TEXT_BODY_HEIGHT 268
+#define FOLLOW_LATEST_MARGIN 20
 
 static lv_obj_t *s_time;
 static lv_obj_t *s_status;
@@ -27,6 +29,14 @@ static cat_app_state_t s_cat_state = CAT_STATE_DISCONNECTED;
 static cat_app_state_t s_layout_state = CAT_STATE_DISCONNECTED;
 static uint8_t s_animation_tick;
 static bool s_follow_latest = true;
+
+/* 预录阶段保持原页面，超过 300 ms 后才切换到“正在听”。 */
+static cat_app_state_t display_state(const cat_app_model_t *model)
+{
+    if (model->state == CAT_STATE_RECORDING && !model->recording_active)
+        return model->recording_origin_state;
+    return model->state;
+}
 
 static cat_sprite_pose_t cat_pose(cat_app_state_t state, uint8_t tick)
 {
@@ -151,6 +161,11 @@ static bool full_text_state(cat_app_state_t state)
            state == CAT_STATE_ANSWER_READY;
 }
 
+static bool answer_text_state(cat_app_state_t state)
+{
+    return state == CAT_STATE_AI_STREAMING || state == CAT_STATE_ANSWER_READY;
+}
+
 static void set_layout(cat_app_state_t state)
 {
     const bool full_text = full_text_state(state);
@@ -158,12 +173,16 @@ static void set_layout(cat_app_state_t state)
     if (full_text) {
         lv_obj_add_flag(s_cat_image, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(s_card, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_align(s_status, LV_ALIGN_TOP_MID, 0, 38);
-        lv_obj_set_pos(s_card, 10, 62);
-        lv_obj_set_size(s_card, 220, 220);
+        lv_obj_set_width(s_status, 100);
+        lv_obj_align(s_status, LV_ALIGN_TOP_MID, 0, 8);
+        lv_obj_set_pos(s_card, 10, TEXT_BODY_Y);
+        lv_obj_set_size(s_card, 220, TEXT_BODY_HEIGHT);
+        lv_obj_add_flag(s_hint, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_remove_flag(s_cat_image, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_width(s_status, 210);
         lv_obj_align(s_status, LV_ALIGN_TOP_MID, 0, 128);
+        lv_obj_remove_flag(s_hint, LV_OBJ_FLAG_HIDDEN);
         if (show_error) {
             lv_obj_remove_flag(s_card, LV_OBJ_FLAG_HIDDEN);
             lv_obj_set_pos(s_card, 12, 158);
@@ -173,23 +192,30 @@ static void set_layout(cat_app_state_t state)
         }
     }
     if (state != s_layout_state) {
-        s_follow_latest = true;
-        lv_obj_scroll_to_y(s_card, 0, LV_ANIM_OFF);
+        const bool preserve_answer_position =
+            answer_text_state(state) && answer_text_state(s_layout_state);
+        if (!preserve_answer_position) {
+            s_follow_latest = answer_text_state(state);
+            lv_obj_scroll_to_y(s_card, 0, LV_ANIM_OFF);
+        }
     }
     s_layout_state = state;
 }
 
-void cat_ui_scroll_text(int direction)
+bool cat_ui_scroll_text_pixels(int pixels)
 {
-    if (s_card == NULL || lv_obj_has_flag(s_card, LV_OBJ_FLAG_HIDDEN) || direction == 0) return;
+    if (s_card == NULL || lv_obj_has_flag(s_card, LV_OBJ_FLAG_HIDDEN) || pixels == 0)
+        return false;
     lv_obj_update_layout(s_card);
     const int32_t current = lv_obj_get_scroll_y(s_card);
     const int32_t maximum = current + lv_obj_get_scroll_bottom(s_card);
-    int32_t target = current + (direction > 0 ? SCROLL_STEP : -SCROLL_STEP);
+    int32_t target = current + pixels;
     if (target < 0) target = 0;
     if (target > maximum) target = maximum;
-    s_follow_latest = direction > 0 && target >= maximum;
-    lv_obj_scroll_to_y(s_card, target, LV_ANIM_ON);
+    if (pixels < 0) s_follow_latest = false;
+    else if (target >= maximum - FOLLOW_LATEST_MARGIN) s_follow_latest = true;
+    lv_obj_scroll_to_y(s_card, target, LV_ANIM_OFF);
+    return target != current;
 }
 
 void cat_ui_render(const cat_app_model_t *model, const char *text, size_t text_length,
@@ -198,21 +224,21 @@ void cat_ui_render(const cat_app_model_t *model, const char *text, size_t text_l
     if (model == NULL) return;
     static const char *STATUS[] = {
         "等待手机连接", "随时可以说话", "正在听", "正在识别",
-        "确认识别文字", "正在思考", "回答中", "回答完成", "遇到一点问题",
-        "录音时间太短", "新对话已开启"
+        "识别结果", "正在思考", "AI 回复", "AI 回复", "遇到一点问题",
+        "新对话已开启"
     };
     static const char *HINT[] = {
         "请在手机打开小猫助手", "按住 OK 说话", "松开发送", "长按下键取消",
-        "上下查看  OK发送\n长按上键重录  下键取消", "长按下键取消",
-        "上下键查看\n长按下键停止", "上下查看  按住OK继续\n长按上键新对话",
-        "OK返回  长按上键回首页", "请按住 OK 超过 0.3 秒", "可以开始新的聊天了"
+        "", "长按下键取消", "", "",
+        "OK返回  长按上键回首页", "可以开始新的聊天了"
     };
-    const unsigned index = (unsigned)model->state < sizeof(STATUS) / sizeof(STATUS[0])
-                               ? (unsigned)model->state : 0;
+    const cat_app_state_t shown_state = display_state(model);
+    const unsigned index = (unsigned)shown_state < sizeof(STATUS) / sizeof(STATUS[0])
+                               ? (unsigned)shown_state : 0;
     lv_label_set_text(s_status, STATUS[index]);
     lv_label_set_text(s_hint, HINT[index]);
-    set_cat_state(model->state);
-    set_layout(model->state);
+    set_cat_state(shown_state);
+    set_layout(shown_state);
 
     char clock_text[8];
     if (minute_of_day >= 0 && minute_of_day < 24 * 60) {

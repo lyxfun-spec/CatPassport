@@ -13,6 +13,7 @@
 #include "cat_ble.h"
 #include "cat_clock.h"
 #include "cat_protocol.h"
+#include "cat_scroll.h"
 #include "cat_screen.h"
 #include "cat_state.h"
 #include "cat_ui.h"
@@ -28,16 +29,21 @@
 #define AUDIO_SAMPLES 320U
 #define AUDIO_PAYLOAD_BYTES 160U
 #define AUDIO_PACKET_BYTES (CAT_AUDIO_HEADER_SIZE + AUDIO_PAYLOAD_BYTES)
+#define AUDIO_PREROLL_FRAMES 15U /* 15 x 20 ms = 300 ms，约 2.6 KiB。 */
 #define AUDIO_MAX_FRAMES 1500U
+#define BLE_SEND_RETRY_COUNT 20U
+#define BLE_SEND_RETRY_MS 5U
+#define OK_HOLD_THRESHOLD_MS 300ULL
+#define INTERACTION_TICK_MS 16U
 #define BATTERY_REFRESH_MS 10000ULL
+#define HELLO_RETRY_MS 2000ULL
 #define NOTICE_DURATION_MS 1500ULL
 #define SCREEN_ACTIVE_BRIGHTNESS 80
 #define SCREEN_NVS_NAMESPACE "cat_cfg"
 #define SCREEN_NVS_KEY "screen_s"
 
 typedef enum {
-    INPUT_BUTTON, INPUT_BLE_READY, INPUT_BLE_DISCONNECTED,
-    INPUT_BLE_FRAGMENT, INPUT_AUDIO_FINISHED,
+    INPUT_BUTTON, INPUT_BLE_STATE, INPUT_BLE_FRAGMENT, INPUT_AUDIO_FINISHED,
 } input_type_t;
 
 typedef struct {
@@ -45,7 +51,14 @@ typedef struct {
     union {
         struct { bsp_btn_t button; bsp_btn_ev_t event; } key;
         struct { uint16_t length; uint8_t bytes[244]; } fragment;
-        struct { uint16_t recording_id; uint16_t frames; bool canceled; bool failed; bool limit; } audio;
+        struct {
+            uint16_t recording_id;
+            uint16_t frames;
+            bool activated;
+            bool canceled;
+            bool failed;
+            bool limit;
+        } audio;
     } data;
 } input_t;
 
@@ -58,15 +71,27 @@ static uint8_t s_rx_buffer[CAT_ANSWER_MAX];
 static char s_text[CAT_ANSWER_MAX + 1U];
 static size_t s_text_length;
 static atomic_bool s_recording;
+static atomic_bool s_recording_active;
 static atomic_bool s_cancel_recording;
+static atomic_bool s_ble_ready_pending;
+static atomic_bool s_ble_disconnected_pending;
+/* 预录缓冲由 audio_task 独占写入；激活前不会通过 BLE 暴露一次短按。 */
+static uint8_t s_audio_preroll[AUDIO_PREROLL_FRAMES][AUDIO_PACKET_BYTES];
 static uint16_t s_message_id;
 static uint64_t s_last_battery_ms;
+static uint64_t s_last_hello_ms;
 static int s_battery = -1;
 static cat_clock_t s_clock;
 static cat_screen_t s_screen;
 static int s_clock_minute = -1;
 static uint64_t s_notice_until_ms;
 static bool s_suppress_button_action[3];
+static bool s_ok_held;
+static uint64_t s_ok_pressed_at_ms;
+static uint64_t s_scroll_tick_ms;
+static cat_scroll_motion_t s_scroll_motion;
+
+static void apply(cat_app_event_t event);
 
 static void write_le16(uint8_t *data, uint16_t value)
 {
@@ -147,11 +172,12 @@ static void render(void)
     bsp_lvgl_unlock();
 }
 
-static void scroll_text(int direction)
+static bool scroll_text_pixels(int pixels)
 {
-    if (!bsp_lvgl_lock(100)) return;
-    cat_ui_scroll_text(direction);
+    if (!bsp_lvgl_lock(100)) return false;
+    const bool moved = cat_ui_scroll_text_pixels(pixels);
     bsp_lvgl_unlock();
+    return moved;
 }
 
 static void set_text(const uint8_t *text, size_t length)
@@ -172,10 +198,11 @@ static void append_text(const uint8_t *text, size_t length)
     s_text[s_text_length] = '\0';
 }
 
-static void queue_input(const input_t *input)
+static bool queue_input(const input_t *input)
 {
-    if (s_queue != NULL && xQueueSend(s_queue, input, 0) != pdTRUE)
-        ESP_LOGW(TAG, "input queue full, dropped type=%d", input->type);
+    if (s_queue != NULL && xQueueSend(s_queue, input, 0) == pdTRUE) return true;
+    ESP_LOGW(TAG, "input queue full, rejected type=%d", input->type);
+    return false;
 }
 
 static void on_button(bsp_btn_t button, bsp_btn_ev_t event, void *context)
@@ -183,22 +210,33 @@ static void on_button(bsp_btn_t button, bsp_btn_ev_t event, void *context)
     (void)context;
     const input_t input = {.type = INPUT_BUTTON,
                            .data.key = {.button = button, .event = event}};
-    queue_input(&input);
+    (void)queue_input(&input);
 }
 
-static void on_ble(const cat_ble_event_t *event, void *context)
+static bool on_ble(const cat_ble_event_t *event, void *context)
 {
     (void)context;
     input_t input = {0};
-    if (event->type == CAT_BLE_EVENT_READY) input.type = INPUT_BLE_READY;
-    else if (event->type == CAT_BLE_EVENT_DISCONNECTED) input.type = INPUT_BLE_DISCONNECTED;
-    else {
-        if (event->length > sizeof(input.data.fragment.bytes)) return;
+    if (event->type == CAT_BLE_EVENT_READY) {
+        atomic_store_explicit(&s_ble_ready_pending, true, memory_order_release);
+        input.type = INPUT_BLE_STATE;
+        (void)queue_input(&input);
+        return true;
+    }
+    if (event->type == CAT_BLE_EVENT_DISCONNECTED) {
+        atomic_store_explicit(&s_ble_ready_pending, false, memory_order_release);
+        atomic_store_explicit(&s_ble_disconnected_pending, true, memory_order_release);
+        input.type = INPUT_BLE_STATE;
+        (void)queue_input(&input);
+        return true;
+    }
+    {
+        if (event->length > sizeof(input.data.fragment.bytes)) return false;
         input.type = INPUT_BLE_FRAGMENT;
         input.data.fragment.length = (uint16_t)event->length;
         memcpy(input.data.fragment.bytes, event->data, event->length);
     }
-    queue_input(&input);
+    return queue_input(&input);
 }
 
 static void fill_audio_header(uint8_t *packet, uint8_t flags, uint16_t recording_id,
@@ -215,6 +253,38 @@ static void fill_audio_header(uint8_t *packet, uint8_t flags, uint16_t recording
     packet[13] = 0;
 }
 
+static esp_err_t send_audio_with_retry(const uint8_t *frame, size_t length)
+{
+    esp_err_t result = ESP_FAIL;
+    for (unsigned attempt = 0; attempt < BLE_SEND_RETRY_COUNT; ++attempt) {
+        result = cat_ble_send_audio(frame, length);
+        if (result == ESP_OK || result != ESP_ERR_NO_MEM) return result;
+        vTaskDelay(pdMS_TO_TICKS(BLE_SEND_RETRY_MS));
+    }
+    return result;
+}
+
+static esp_err_t send_control_with_retry(uint8_t type, uint16_t message_id,
+                                         const uint8_t *payload, size_t length)
+{
+    esp_err_t result = ESP_FAIL;
+    for (unsigned attempt = 0; attempt < BLE_SEND_RETRY_COUNT; ++attempt) {
+        result = cat_ble_send_control(type, message_id, payload, length);
+        if (result == ESP_OK || result != ESP_ERR_NO_MEM) return result;
+        vTaskDelay(pdMS_TO_TICKS(BLE_SEND_RETRY_MS));
+    }
+    return result;
+}
+
+static void recover_ble_send_failure(const char *operation, esp_err_t result)
+{
+    ESP_LOGE(TAG, "%s failed, resetting BLE session: %s", operation, esp_err_to_name(result));
+    atomic_store_explicit(&s_cancel_recording, true, memory_order_release);
+    atomic_store_explicit(&s_recording, false, memory_order_release);
+    (void)cat_ble_disconnect();
+    if (s_model.state != CAT_STATE_DISCONNECTED) apply(CAT_EVENT_BLE_DISCONNECTED);
+}
+
 static void audio_task(void *context)
 {
     (void)context;
@@ -223,14 +293,24 @@ static void audio_task(void *context)
     uint8_t current[AUDIO_PACKET_BYTES];
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        const uint16_t recording_id = s_model.recording_id;
+        const uint16_t recording_id = s_model.armed_recording_id;
         cat_adpcm_state_t adpcm = {0};
         uint16_t frames = 0;
+        uint16_t preroll_frames = 0;
         bool have_pending = false;
         bool failed = false;
 
         while (atomic_load_explicit(&s_recording, memory_order_acquire) &&
                frames < AUDIO_MAX_FRAMES) {
+            /*
+             * 预录最多保留 300 ms。阈值事件通常与第 15 帧同时到达；若应用任务
+             * 短暂繁忙，这里让出 CPU，而不是覆盖开头语音或扩大无界缓存。
+             */
+            if (!atomic_load_explicit(&s_recording_active, memory_order_acquire) &&
+                preroll_frames >= AUDIO_PREROLL_FRAMES) {
+                vTaskDelay(pdMS_TO_TICKS(1));
+                continue;
+            }
             if (bsp_audio_read(pcm, sizeof(pcm)) != ESP_OK) { failed = true; break; }
             int16_t predictor;
             uint8_t step_index;
@@ -240,7 +320,26 @@ static void audio_task(void *context)
             if (encoded != AUDIO_PAYLOAD_BYTES) { failed = true; break; }
             fill_audio_header(current, frames == 0 ? 0x01 : 0x00,
                               recording_id, frames, predictor, step_index);
-            if (have_pending && cat_ble_send_audio(pending, sizeof(pending)) != ESP_OK) {
+
+            if (!atomic_load_explicit(&s_recording_active, memory_order_acquire)) {
+                memcpy(s_audio_preroll[preroll_frames++], current, sizeof(current));
+                ++frames;
+                continue;
+            }
+
+            /* RECORD_START 已经发出，先把固定预录片段按原序送出。 */
+            for (uint16_t i = 0; i < preroll_frames; ++i) {
+                if (have_pending && send_audio_with_retry(pending, sizeof(pending)) != ESP_OK) {
+                    failed = true;
+                    break;
+                }
+                if (have_pending) vTaskDelay(pdMS_TO_TICKS(1));
+                memcpy(pending, s_audio_preroll[i], sizeof(pending));
+                have_pending = true;
+            }
+            preroll_frames = 0;
+            if (failed) break;
+            if (have_pending && send_audio_with_retry(pending, sizeof(pending)) != ESP_OK) {
                 failed = true;
                 break;
             }
@@ -249,45 +348,78 @@ static void audio_task(void *context)
             ++frames;
         }
         atomic_store_explicit(&s_recording, false, memory_order_release);
-        if (!failed && have_pending) {
+        const bool activated =
+            atomic_load_explicit(&s_recording_active, memory_order_acquire);
+        if (activated && !failed) {
+            for (uint16_t i = 0; i < preroll_frames; ++i) {
+                if (have_pending && send_audio_with_retry(pending, sizeof(pending)) != ESP_OK) {
+                    failed = true;
+                    break;
+                }
+                if (have_pending) vTaskDelay(pdMS_TO_TICKS(1));
+                memcpy(pending, s_audio_preroll[i], sizeof(pending));
+                have_pending = true;
+            }
+        }
+        if (activated && !failed && have_pending) {
             pending[3] |= 0x02;
-            if (cat_ble_send_audio(pending, sizeof(pending)) != ESP_OK) failed = true;
+            if (send_audio_with_retry(pending, sizeof(pending)) != ESP_OK) failed = true;
         }
         const input_t done = {
             .type = INPUT_AUDIO_FINISHED,
             .data.audio = {
                 .recording_id = recording_id,
                 .frames = frames,
+                .activated = activated,
                 .canceled = atomic_load_explicit(&s_cancel_recording, memory_order_acquire),
                 .failed = failed,
                 .limit = frames >= AUDIO_MAX_FRAMES,
             },
         };
-        queue_input(&done);
+        /* 这是发送 RECORD_END/RECORD_CANCEL 的唯一触发点，绝不能静默丢弃。 */
+        if (xQueueSend(s_queue, &done, portMAX_DELAY) != pdTRUE)
+            ESP_LOGE(TAG, "audio completion queue failed");
     }
 }
 
-static void send_record_start(void)
+/* 开始本地预录，不发送控制消息；短按时可完全静默丢弃。 */
+static void arm_recording(void)
+{
+    atomic_store_explicit(&s_cancel_recording, false, memory_order_release);
+    atomic_store_explicit(&s_recording_active, false, memory_order_release);
+    atomic_store_explicit(&s_recording, true, memory_order_release);
+    xTaskNotifyGive(s_audio_task);
+}
+
+/* 达到 300 ms 后先宣布录音，再允许 audio_task 刷出预录帧。 */
+static void activate_recording(void)
 {
     uint8_t payload[9];
     write_le16(payload, s_model.recording_id);
     write_le32(payload + 2, 16000);
     write_le16(payload + 6, AUDIO_SAMPLES);
     payload[8] = 1; /* frame-independent IMA-ADPCM */
-    if (cat_ble_send_control(CAT_MSG_RECORD_START, next_message_id(), payload,
-                             sizeof(payload)) != ESP_OK) {
-        (void)cat_state_apply(&s_model, CAT_EVENT_BLE_DISCONNECTED);
+    const esp_err_t result = send_control_with_retry(
+        CAT_MSG_RECORD_START, next_message_id(), payload, sizeof(payload));
+    if (result != ESP_OK) {
+        recover_ble_send_failure("RECORD_START", result);
         return;
     }
-    atomic_store_explicit(&s_cancel_recording, false, memory_order_release);
-    atomic_store_explicit(&s_recording, true, memory_order_release);
-    xTaskNotifyGive(s_audio_task);
+    atomic_store_explicit(&s_recording_active, true, memory_order_release);
 }
 
 static void execute(uint32_t actions)
 {
     if (actions & CAT_ACTION_CLEAR_TEXT) set_text(NULL, 0);
-    if (actions & CAT_ACTION_START_RECORDING) send_record_start();
+    uint8_t recording[2];
+    write_le16(recording, s_model.recording_id);
+    if (actions & CAT_ACTION_REQUEST_RERECORD) {
+        const esp_err_t result = send_control_with_retry(
+            CAT_MSG_TRANSCRIPT_RETRY, next_message_id(), recording, 2);
+        if (result != ESP_OK) { recover_ble_send_failure("TRANSCRIPT_RETRY", result); return; }
+    }
+    if (actions & CAT_ACTION_START_RECORDING) arm_recording();
+    if (actions & CAT_ACTION_ACTIVATE_RECORDING) activate_recording();
     if (actions & CAT_ACTION_STOP_RECORDING) {
         atomic_store_explicit(&s_recording, false, memory_order_release);
     }
@@ -295,18 +427,22 @@ static void execute(uint32_t actions)
         atomic_store_explicit(&s_cancel_recording, true, memory_order_release);
         atomic_store_explicit(&s_recording, false, memory_order_release);
     }
-    uint8_t recording[2];
-    write_le16(recording, s_model.recording_id);
-    if (actions & CAT_ACTION_CONFIRM_TRANSCRIPT)
-        (void)cat_ble_send_control(CAT_MSG_TRANSCRIPT_CONFIRM, next_message_id(), recording, 2);
-    if (actions & CAT_ACTION_REQUEST_RERECORD)
-        (void)cat_ble_send_control(CAT_MSG_TRANSCRIPT_RETRY, next_message_id(), recording, 2);
-    if (actions & CAT_ACTION_CANCEL_TURN)
-        (void)cat_ble_send_control(CAT_MSG_CANCEL_TURN, next_message_id(), recording, 2);
+    if (actions & CAT_ACTION_CONFIRM_TRANSCRIPT) {
+        const esp_err_t result = send_control_with_retry(
+            CAT_MSG_TRANSCRIPT_CONFIRM, next_message_id(), recording, 2);
+        if (result != ESP_OK) { recover_ble_send_failure("TRANSCRIPT_CONFIRM", result); return; }
+    }
+    if (actions & CAT_ACTION_CANCEL_TURN) {
+        const esp_err_t result = send_control_with_retry(
+            CAT_MSG_CANCEL_TURN, next_message_id(), recording, 2);
+        if (result != ESP_OK) { recover_ble_send_failure("CANCEL_TURN", result); return; }
+    }
     if (actions & CAT_ACTION_NEW_CONVERSATION) {
         uint8_t token[4];
         write_le32(token, (uint32_t)(esp_timer_get_time() / 1000));
-        (void)cat_ble_send_control(CAT_MSG_NEW_CONVERSATION, next_message_id(), token, 4);
+        const esp_err_t result = send_control_with_retry(
+            CAT_MSG_NEW_CONVERSATION, next_message_id(), token, 4);
+        if (result != ESP_OK) { recover_ble_send_failure("NEW_CONVERSATION", result); return; }
     }
     if (actions & CAT_ACTION_REFRESH_UI) render();
 }
@@ -315,14 +451,69 @@ static void apply(cat_app_event_t event)
 {
     const cat_app_state_t previous = s_model.state;
     const uint32_t actions = cat_state_apply(&s_model, event);
-    const bool notice = s_model.state == CAT_STATE_RECORD_TOO_SHORT ||
-                        s_model.state == CAT_STATE_NEW_CONVERSATION;
+    const bool notice = s_model.state == CAT_STATE_NEW_CONVERSATION;
     if (notice && s_model.state != previous) {
         s_notice_until_ms = monotonic_ms() + NOTICE_DURATION_MS;
     } else if (!notice) {
         s_notice_until_ms = 0;
     }
     execute(actions);
+}
+
+static bool text_is_scrollable(void)
+{
+    return s_model.state == CAT_STATE_TRANSCRIPT_REVIEW ||
+           s_model.state == CAT_STATE_AI_STREAMING ||
+           s_model.state == CAT_STATE_ANSWER_READY;
+}
+
+/*
+ * 处理 OK 的 300 ms 分流。IDLE/ANSWER_READY/TRANSCRIPT_REVIEW 会先进入本地
+ * 预录；AI_STREAMING 则把 OK 作为停止生成，不启动录音。
+ */
+static void handle_ok_button(bsp_btn_ev_t event, uint64_t now)
+{
+    if (event == BSP_BTN_PRESS) {
+        apply(CAT_EVENT_OK_DOWN);
+        if (s_model.state == CAT_STATE_RECORDING && !s_model.recording_active) {
+            s_ok_held = true;
+            s_ok_pressed_at_ms = now;
+        }
+        return;
+    }
+    if (event != BSP_BTN_RELEASE || !s_ok_held) return;
+
+    if (s_model.state == CAT_STATE_RECORDING) {
+        if (!s_model.recording_active && now - s_ok_pressed_at_ms >= OK_HOLD_THRESHOLD_MS)
+            apply(CAT_EVENT_RECORD_ACTIVATE);
+        apply(CAT_EVENT_OK_UP);
+    }
+    s_ok_held = false;
+}
+
+static void update_interactions(uint64_t now)
+{
+    if (s_ok_held && s_model.state == CAT_STATE_RECORDING &&
+        !s_model.recording_active && now - s_ok_pressed_at_ms >= OK_HOLD_THRESHOLD_MS) {
+        apply(CAT_EVENT_RECORD_ACTIVATE);
+    }
+    if (s_ok_held && s_model.state != CAT_STATE_RECORDING) s_ok_held = false;
+
+    if (!text_is_scrollable()) {
+        cat_scroll_stop(&s_scroll_motion);
+        s_scroll_tick_ms = now;
+        return;
+    }
+    if (!cat_scroll_is_active(&s_scroll_motion)) {
+        s_scroll_tick_ms = now;
+        return;
+    }
+    const uint32_t elapsed = s_scroll_tick_ms == 0 || now <= s_scroll_tick_ms
+                                 ? INTERACTION_TICK_MS
+                                 : (uint32_t)(now - s_scroll_tick_ms);
+    s_scroll_tick_ms = now;
+    const int32_t pixels = cat_scroll_update(&s_scroll_motion, elapsed);
+    if (pixels != 0 && !scroll_text_pixels(pixels)) cat_scroll_stop(&s_scroll_motion);
 }
 
 static void handle_message(const cat_protocol_message_t *message)
@@ -388,8 +579,11 @@ static void handle_message(const cat_protocol_message_t *message)
         }
         break;
     case CAT_MSG_PING:
-        (void)cat_ble_send_control(CAT_MSG_PONG, next_message_id(),
-                                   message->payload, message->payload_length);
+        {
+            const esp_err_t result = send_control_with_retry(
+                CAT_MSG_PONG, next_message_id(), message->payload, message->payload_length);
+            if (result != ESP_OK) recover_ble_send_failure("PONG", result);
+        }
         break;
     default:
         break;
@@ -407,30 +601,38 @@ static void handle_button(bsp_btn_t button, bsp_btn_ev_t event)
     }
     if (cat_screen_is_off(&s_screen) && event == BSP_BTN_PRESS) {
         note_screen_activity();
-        if (button == BSP_BTN_OK) apply(CAT_EVENT_OK_DOWN);
-        else s_suppress_button_action[button] = true;
-        return;
+        if (button != BSP_BTN_OK) {
+            s_suppress_button_action[button] = true;
+            return;
+        }
     }
     note_screen_activity();
-    const bool scrollable = s_model.state == CAT_STATE_TRANSCRIPT_REVIEW ||
-                            s_model.state == CAT_STATE_AI_STREAMING ||
-                            s_model.state == CAT_STATE_ANSWER_READY;
-    if (scrollable && button == BSP_BTN_UP && event == BSP_BTN_CLICK) {
-        scroll_text(-1);
+    if (text_is_scrollable() && (button == BSP_BTN_UP || button == BSP_BTN_DOWN)) {
+        const int direction = button == BSP_BTN_DOWN ? 1 : -1;
+        if (event == BSP_BTN_PRESS) {
+            cat_scroll_press(&s_scroll_motion, direction);
+            s_scroll_tick_ms = monotonic_ms();
+        } else if (event == BSP_BTN_RELEASE) {
+            cat_scroll_release(&s_scroll_motion, direction);
+        }
+        /* CLICK/LONG 在阅读页全部被消费，永远不会落入业务状态机。 */
         return;
     }
-    if (scrollable && button == BSP_BTN_DOWN && event == BSP_BTN_CLICK) {
-        scroll_text(1);
-        return;
-    }
-    if (button == BSP_BTN_OK && event == BSP_BTN_PRESS) apply(CAT_EVENT_OK_DOWN);
-    else if (button == BSP_BTN_OK && event == BSP_BTN_RELEASE) apply(CAT_EVENT_OK_UP);
+    if (button == BSP_BTN_OK) handle_ok_button(event, monotonic_ms());
     else if (button == BSP_BTN_UP && event == BSP_BTN_LONG) apply(CAT_EVENT_UP_LONG);
     else if (button == BSP_BTN_DOWN && event == BSP_BTN_LONG) apply(CAT_EVENT_DOWN_LONG);
 }
 
 static void handle_audio_finished(const input_t *input)
 {
+    if (!input->data.audio.activated) {
+        if (input->data.audio.failed && s_model.state == CAT_STATE_RECORDING &&
+            s_model.recording_id == input->data.audio.recording_id) {
+            apply(CAT_EVENT_RECORD_ABORT);
+            s_ok_held = false;
+        }
+        return;
+    }
     if (input->data.audio.limit && s_model.state == CAT_STATE_RECORDING)
         apply(CAT_EVENT_RECORD_LIMIT);
     uint8_t payload[8];
@@ -441,7 +643,14 @@ static void handle_audio_finished(const input_t *input)
                            cat_recording_is_too_short(input->data.audio.frames);
     const uint8_t type = (input->data.audio.canceled || input->data.audio.failed || too_short)
                              ? CAT_MSG_RECORD_CANCEL : CAT_MSG_RECORD_END;
-    (void)cat_ble_send_control(type, next_message_id(), payload, sizeof(payload));
+    const esp_err_t send_result = input->data.audio.activated
+                                      ? send_control_with_retry(type, next_message_id(), payload,
+                                                                sizeof(payload))
+                                      : ESP_OK;
+    if (send_result != ESP_OK && s_model.state != CAT_STATE_DISCONNECTED) {
+        recover_ble_send_failure("recording terminal message", send_result);
+        return;
+    }
     if (too_short && s_model.state == CAT_STATE_TRANSCRIBING) {
         apply(CAT_EVENT_RECORD_TOO_SHORT);
     } else if (input->data.audio.failed && s_model.state != CAT_STATE_DISCONNECTED) {
@@ -451,28 +660,47 @@ static void handle_audio_finished(const input_t *input)
     }
 }
 
+static void send_hello(void)
+{
+    static const char hello[] =
+        "{\"name\":\"小猫助手\",\"protocol\":1,\"audio\":\"ima-adpcm-16k-mono\",\"max_record_ms\":30000}";
+    s_last_hello_ms = monotonic_ms();
+    const esp_err_t result = send_control_with_retry(
+        CAT_MSG_HELLO, next_message_id(), (const uint8_t *)hello, strlen(hello));
+    ESP_LOGI(TAG, "HELLO send result=%s", esp_err_to_name(result));
+    if (result != ESP_OK) recover_ble_send_failure("HELLO", result);
+}
+
+static void handle_pending_ble_state(void)
+{
+    if (atomic_exchange_explicit(&s_ble_disconnected_pending, false, memory_order_acq_rel)) {
+        atomic_store_explicit(&s_cancel_recording, true, memory_order_release);
+        atomic_store_explicit(&s_recording, false, memory_order_release);
+        s_ok_held = false;
+        s_last_hello_ms = 0;
+        cat_scroll_stop(&s_scroll_motion);
+        cat_protocol_reassembler_init(&s_reassembler, s_rx_buffer, sizeof(s_rx_buffer));
+        apply(CAT_EVENT_BLE_DISCONNECTED);
+    }
+    if (atomic_exchange_explicit(&s_ble_ready_pending, false, memory_order_acq_rel)) {
+        send_hello();
+    }
+}
+
 static void app_task(void *context)
 {
     (void)context;
     input_t input;
     for (;;) {
-        if (xQueueReceive(s_queue, &input, pdMS_TO_TICKS(250)) == pdTRUE) {
+        const bool interaction_active = s_ok_held || cat_scroll_is_active(&s_scroll_motion);
+        const TickType_t wait = pdMS_TO_TICKS(interaction_active ? INTERACTION_TICK_MS : 250U);
+        if (xQueueReceive(s_queue, &input, wait) == pdTRUE) {
             switch (input.type) {
             case INPUT_BUTTON:
                 handle_button(input.data.key.button, input.data.key.event);
                 break;
-            case INPUT_BLE_READY: {
-                static const char hello[] =
-                    "{\"name\":\"小猫助手\",\"protocol\":1,\"audio\":\"ima-adpcm-16k-mono\",\"max_record_ms\":30000}";
-                const esp_err_t result = cat_ble_send_control(
-                    CAT_MSG_HELLO, next_message_id(), (const uint8_t *)hello, strlen(hello));
-                ESP_LOGI(TAG, "HELLO send result=%s", esp_err_to_name(result));
-                break;
-            }
-            case INPUT_BLE_DISCONNECTED:
-                atomic_store_explicit(&s_cancel_recording, true, memory_order_release);
-                atomic_store_explicit(&s_recording, false, memory_order_release);
-                apply(CAT_EVENT_BLE_DISCONNECTED);
+            case INPUT_BLE_STATE:
+                handle_pending_ble_state();
                 break;
             case INPUT_BLE_FRAGMENT: {
                 cat_protocol_message_t message;
@@ -486,7 +714,15 @@ static void app_task(void *context)
                 break;
             }
         }
+        handle_pending_ble_state();
         const uint64_t now = monotonic_ms();
+        // Windows can restore CCCD subscriptions before the application has
+        // installed its notification handlers. Repeat HELLO until APP_READY so
+        // reconnect success does not depend on that startup race.
+        if (cat_ble_ready() && !s_model.app_ready &&
+            now - s_last_hello_ms >= HELLO_RETRY_MS)
+            send_hello();
+        update_interactions(now);
         if (s_notice_until_ms != 0 && now >= s_notice_until_ms) {
             s_notice_until_ms = 0;
             apply(CAT_EVENT_NOTICE_DONE);
@@ -522,6 +758,7 @@ void app_main(void)
     }
     bsp_display_backlight(SCREEN_ACTIVE_BRIGHTNESS);
     cat_state_init(&s_model);
+    cat_scroll_init(&s_scroll_motion);
     cat_clock_init(&s_clock);
     cat_screen_init(&s_screen, load_screen_timeout(), monotonic_ms());
     cat_protocol_reassembler_init(&s_reassembler, s_rx_buffer, sizeof(s_rx_buffer));

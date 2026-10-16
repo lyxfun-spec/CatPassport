@@ -67,9 +67,18 @@ function Loading() { return <div className="loading"><div className="pulse">🐾
 function Connection({ snapshot, busy, run }: { snapshot: BackendSnapshot; busy?: string; run: (n:string,a:()=>Promise<unknown>)=>Promise<void> }) {
   const connect = (device: CatDevice) => run('connect', () => invoke('devices.connect', { address: device.address, name: device.name }));
   const unpair = () => run('forget', () => invoke('devices.forget'));
-  return <section className="page"><Header eyebrow="BLE GATEWAY" title="连接卡片" description={snapshot.isConnected ? '当前仅连接这一张 AI 卡片。' : '正在自动查找附近的 AI 卡片，点击设备即可连接。'} action={<button className="ghost danger unpair" disabled={!snapshot.hasPairedDevice || !!busy} onClick={() => void unpair()}>{busy === 'forget' ? '正在取消…' : '取消配对'}</button>}/>
-    <div className="scan-state"><i className={snapshot.isConnected ? 'online' : ''}/><span>{snapshot.isConnected ? '已连接一张 AI 卡片' : busy === 'connect' ? '正在连接所选卡片…' : '正在自动扫描附近设备…'}</span></div>
-    <div className="device-grid">{snapshot.devices.length ? snapshot.devices.map(device => <button key={device.address} className={`device ${snapshot.isConnected ? 'locked' : ''}`} disabled={snapshot.isConnected || !!busy} onClick={() => void connect(device)}><span className="signal">{device.rssi > -60 ? '▂▄▆█' : device.rssi > -75 ? '▂▄▆' : '▂▄'}</span><strong>{device.name}</strong><code>{device.addressText}</code><small>{device.rssi} dBm · {snapshot.isConnected ? '已有卡片连接' : '点击连接'}</small></button>) : <div className="empty"><b>{snapshot.isConnected ? 'AI 卡片已连接' : '正在查找附近卡片'}</b><span>{snapshot.isConnected ? '如需更换卡片，请先点击右上角“取消配对”。' : '请确认卡片开机并正在广播，无需手动刷新。'}</span></div>}</div>
+  const owner = snapshot.pairedDeviceAddress;
+  const description = snapshot.isConnected ? '当前客户端只服务这张已绑定的 AI 卡片。'
+    : snapshot.hasPairedDevice ? '正在自动恢复已绑定卡片；其它卡片不会被连接。'
+    : '选择一张 AI 卡片完成首次绑定。';
+  return <section className="page"><Header eyebrow="BLE GATEWAY" title="连接卡片" description={description} action={<button className="ghost danger unpair" disabled={!snapshot.hasPairedDevice || !!busy} onClick={() => void unpair()}>{busy === 'forget' ? '正在取消…' : '取消配对'}</button>}/>
+    <div className="scan-state"><i className={snapshot.isConnected ? 'online' : ''}/><span>{snapshot.isConnected ? '已绑定卡片在线' : busy === 'connect' ? '正在建立安全连接…' : snapshot.hasPairedDevice ? '正在等待已绑定卡片…' : '正在自动扫描附近设备…'}</span></div>
+    <div className="device-grid">{snapshot.devices.length ? snapshot.devices.map(device => {
+      const isOwner = owner == null || device.address === owner;
+      const locked = snapshot.isConnected || !isOwner;
+      const hint = snapshot.isConnected ? '已绑定卡片在线' : !isOwner ? '已绑定其它卡片' : snapshot.hasPairedDevice ? '已绑定 · 点击重连' : '点击绑定';
+      return <button key={device.address} className={`device ${locked ? 'locked' : ''}`} disabled={locked || !!busy} onClick={() => void connect(device)}><span className="signal">{device.rssi > -60 ? '▂▄▆█' : device.rssi > -75 ? '▂▄▆' : '▂▄'}</span><strong>{device.name}</strong><code>{device.addressText}</code><small>{device.rssi} dBm · {hint}</small></button>;
+    }) : <div className="empty"><b>{snapshot.isConnected ? '已绑定卡片在线' : snapshot.hasPairedDevice ? '正在查找已绑定卡片' : '正在查找附近卡片'}</b><span>{snapshot.hasPairedDevice ? '如需更换卡片，请先点击右上角“取消配对”。' : '请确认卡片开机并正在广播，无需手动刷新。'}</span></div>}</div>
     <div className="diagnostic"><div><span>连接诊断</span><strong>{snapshot.detail}</strong></div><code>PDU {snapshot.maxPduSize || '--'} · 要求 ≥177</code></div>
   </section>;
 }

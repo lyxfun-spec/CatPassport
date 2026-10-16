@@ -57,6 +57,34 @@ public class ProtocolTests
     }
 
     [Fact]
+    public void BuffersAudioThatArrivesBeforeRecordStart()
+    {
+        var inbox = new RecordingInbox();
+        inbox.Add(new AudioFrame(5, 1, false, true, [2]));
+        inbox.Add(new AudioFrame(5, 0, true, false, [1]));
+
+        inbox.Begin(5, 16000);
+
+        Assert.Equal(2, inbox.ActiveFrameCount);
+        Assert.True(inbox.TryComplete(5, 2, out var recording));
+        Assert.Equal(new byte[] { 1, 0, 2, 0 }, recording!.ToWav()[44..]);
+    }
+
+    [Fact]
+    public void WaitsForAudioThatArrivesAfterRecordEnd()
+    {
+        var inbox = new RecordingInbox();
+        inbox.Begin(8, 16000);
+        inbox.Add(new AudioFrame(8, 0, true, false, [1]));
+
+        Assert.False(inbox.TryComplete(8, 2, out _));
+
+        inbox.Add(new AudioFrame(8, 1, false, true, [2]));
+        Assert.True(inbox.TryComplete(8, 2, out var recording));
+        Assert.Equal(2, recording!.FrameCount);
+    }
+
+    [Fact]
     public void SessionExpiresAfterThirtyMinutes()
     {
         var policy = new SessionPolicy(TimeSpan.FromMinutes(30));

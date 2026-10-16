@@ -2,15 +2,15 @@
 
 ## GATT 布局
 
-设备作为 BLE peripheral，只允许一个手机连接。
+设备作为 BLE peripheral，只允许一个客户端连接。当前产品客户端为 Windows 桌面端；`android/` 仅保留历史实现。
 
 | 特征 | 方向 | 属性 | 用途 |
 | --- | --- | --- | --- |
-| Control RX | App → 设备 | Write / Write Without Response | App 状态、ASR 文本、AI 文本和错误 |
+| Control RX | 客户端 → 设备 | Write / Write Without Response | 客户端状态、ASR 文本、AI 文本和错误 |
 | Control TX | 设备 → App | Notify | 录音生命周期、用户确认、新会话和设备状态 |
 | Audio TX | 设备 → App | Notify | IMA-ADPCM 音频帧 |
 
-所有特征要求已加密链路。App 连接后请求较大 MTU；MTU 不能容纳完整音频帧时，设备报告 `MTU_TOO_SMALL` 并拒绝录音。
+所有特征要求已加密链路。客户端连接后请求较大 MTU；MTU 不能容纳完整音频帧时，设备报告 `MTU_TOO_SMALL` 并拒绝录音。Windows 客户端使用带响应写入，使设备队列繁忙等拒绝可以传回客户端；客户端先短暂重试，持续失败才重建连接。
 
 ## 控制分片
 
@@ -48,7 +48,7 @@ offset  size  field
 | `0x15` | TRANSCRIPT_CANCEL | 录音 ID |
 | `0x20` | NEW_CONVERSATION | 本地会话代号 |
 | `0x21` | CANCEL_TURN | 当前录音 ID |
-| `0x7E` | PING | 单调毫秒计数低 32 位 |
+| `0x7E` | PING | 心跳令牌；任一端发送，接收端原样返回 PONG |
 
 App 发送：
 
@@ -66,7 +66,7 @@ App 发送：
 | `0x8A` | APP_STATUS | 网络/API 状态 JSON |
 | `0x8B` | TIME_SYNC | 手机当地午夜后的秒数 `u32` |
 | `0x8C` | SCREEN_TIMEOUT | 自动熄屏秒数 `u32`；`0` 表示永不 |
-| `0xFE` | PONG | 原样返回 PING 负载 |
+| `0xFE` | PONG | 原样返回 PING 负载；任一端发送 |
 
 ## 类型专用负载
 
@@ -106,7 +106,9 @@ offset  size  field
 
 ## 错误恢复
 
-- BLE 断开：设备停止录音并清空队列；App 丢弃未完成音频。
+- Windows 客户端只有完成加密、通知订阅、MTU 校验和 HELLO / APP_READY 后才认为链路就绪。
+- BLE 断开、心跳超时或关键写入失败：设备停止录音，客户端取消旧会话并自动重连唯一绑定的卡片。
+- 控制接收队列繁忙：设备拒绝带响应写入，不静默丢弃协议片段。
 - ASR 失败：设备显示错误并允许重录。
 - AI 流中断：保留已收到文本并标记不完整，允许从本轮问题重试。
 - API Key 无效：设备只显示通用配置提示，具体服务错误留在 App，避免泄露鉴权信息。
