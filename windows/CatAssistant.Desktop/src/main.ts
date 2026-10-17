@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, nativeImage, Tray } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, nativeImage, shell, Tray } from 'electron';
 import path from 'node:path';
 import { BackendClient } from './backend-client';
 
@@ -6,7 +6,10 @@ declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
 declare const MAIN_WINDOW_VITE_NAME: string;
 
 const allowedMethods = new Set([
-  'state.get', 'devices.scan', 'devices.connect', 'devices.forget',
+  'app.bootstrap', 'state.get',
+  'conversations.list', 'conversations.get', 'conversations.create', 'conversations.rename',
+  'conversations.delete', 'conversations.activate', 'conversations.send', 'conversations.cancel',
+  'devices.scan', 'devices.connect', 'devices.forget', 'devices.followDesktop',
   'conversation.new', 'conversation.cancel', 'conversation.send', 'settings.save'
 ]);
 const backend = new BackendClient();
@@ -28,11 +31,15 @@ function showWindow(): void {
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1080, height: 720, minWidth: 860, minHeight: 600, show: false,
-    backgroundColor: '#f8f4ee', title: '小猫助手', icon: iconPath, autoHideMenuBar: true,
+    backgroundColor: '#fbfaf8', title: 'Cat Assistant', icon: iconPath, autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true, nodeIntegration: false, sandbox: true
     }
+  });
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('https://') || url.startsWith('http://')) void shell.openExternal(url);
+    return { action: 'deny' };
   });
   if (MAIN_WINDOW_VITE_DEV_SERVER_URL) void mainWindow.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
   else void mainWindow.loadFile(path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`));

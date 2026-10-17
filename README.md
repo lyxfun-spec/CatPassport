@@ -7,6 +7,8 @@
 - `windows/`：当前使用的 Electron + React 桌面客户端与独立 .NET 后台；后台负责 BLE、音频、AI、SQLite 和 DPAPI，并在托盘常驻。
 - `docs/`：产品状态机、BLE 协议和验收说明。
 
+桌面客户端的完整重构方案见[《桌面 AI Agent 客户端重构设计》](docs/desktop-agent-architecture.zh_CN.md)。
+
 设备本身不连接互联网。阿里云 API Key 仅由用户在 Windows 客户端中输入并使用 DPAPI 保存在本机，不会写入固件或通过 BLE 发送。
 
 ## 开发约束

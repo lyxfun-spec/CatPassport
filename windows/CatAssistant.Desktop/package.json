@@ -2,7 +2,7 @@
   "name": "cat-assistant-desktop",
   "productName": "小猫助手",
   "version": "1.0.0",
-  "description": "FoloToy AI Passport Windows gateway",
+  "description": "Desktop AI client with optional FoloToy AI Passport companion hardware",
   "author": "Cat Assistant contributors",
   "type": "module",
   "main": ".vite/build/main.cjs",
@@ -31,6 +31,7 @@
   },
   "dependencies": {
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "react-markdown": "^10.1.0"
   }
 }

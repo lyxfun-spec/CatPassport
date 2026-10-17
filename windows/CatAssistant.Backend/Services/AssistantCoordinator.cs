@@ -7,7 +7,6 @@ using System.Threading.Channels;
 using CatAssistant.Backend.Models;
 using CatAssistant.Core.Audio;
 using CatAssistant.Core.Protocol;
-using CatAssistant.Core.Sessions;
 using Microsoft.Win32;
 using Windows.Networking.Connectivity;
 
@@ -19,12 +18,11 @@ public sealed class AssistantCoordinator : IAsyncDisposable
     private readonly DashScopeClient _cloud;
     private readonly SqliteRepository _repository;
     private readonly SecureApiKeyStore _secureStore;
-    private readonly SessionPolicy _sessionPolicy = new(TimeSpan.FromMinutes(30));
+    private readonly ConversationService _conversations;
     private readonly PeriodicTimer _reconnectTimer = new(TimeSpan.FromSeconds(1));
     private readonly SemaphoreSlim _connectionGate = new(1, 1);
-    private readonly SemaphoreSlim _chatGate = new(1, 1);
     private readonly Dictionary<ulong, CatDevice> _devices = [];
-    private readonly List<ChatMessage> _messages = [];
+    private readonly Dictionary<string, int> _cardRunBytes = [];
     private readonly object _stateLock = new();
     private readonly object _audioLock = new();
     private readonly SemaphoreSlim _audioArrived = new(0);
@@ -37,7 +35,6 @@ public sealed class AssistantCoordinator : IAsyncDisposable
     private ushort? _discardedRecordingId;
     private string? _discardedRecordingMessage;
     private string? _transcript;
-    private long _conversationId;
     private string _status = "未连接";
     private string _detail = "请扫描并选择小猫助手卡片";
     private TaskCompletionSource<bool>? _handshakeReady;
@@ -58,30 +55,25 @@ public sealed class AssistantCoordinator : IAsyncDisposable
     public AssistantCoordinator(BleGateway ble, DashScopeClient cloud, SqliteRepository repository, SecureApiKeyStore secureStore, AppSettings settings)
     {
         _ble = ble; _cloud = cloud; _repository = repository; _secureStore = secureStore; Settings = settings;
+        _conversations = new ConversationService(repository, cloud, () => Settings, () => _secureStore.Load() ?? "", _lifetime.Token);
         _turns = new InteractionTurns(_lifetime.Token);
         _ble.DeviceFound += OnDeviceFound; _ble.ControlMessageReceived += OnControlMessage; _ble.AudioFrameReceived += OnAudioFrame;
         _ble.LinkStateChanged += OnLinkStateChanged;
         _ble.ConnectionLost += OnConnectionLost;
         SystemEvents.PowerModeChanged += OnPowerModeChanged;
         NetworkInformation.NetworkStatusChanged += OnNetworkStatusChanged;
+        _conversations.Changed += OnConversationChanged;
         _controlPump = ProcessControlMessagesAsync(_lifetime.Token);
         _linkHealthPump = MonitorLinkHealthAsync(_lifetime.Token);
     }
 
     public AppSettings Settings { get; }
-    public event EventHandler<BackendSnapshot>? StateChanged;
-    public event EventHandler<StreamUpdate>? StreamChanged;
+    public ConversationService Conversations => _conversations;
+    public event EventHandler<DeviceState>? StateChanged;
 
     public async Task StartAsync()
     {
-        var latest = await _repository.LoadLatestConversationAsync();
-        if (latest is { } saved)
-        {
-            _conversationId = saved.Id;
-            var savedMessages = await _repository.LoadMessagesAsync(saved.Id);
-            lock (_stateLock) _messages.AddRange(savedMessages);
-            if (DateTimeOffset.UtcNow - saved.LastAt < TimeSpan.FromMinutes(30)) _sessionPolicy.Complete(saved.LastAt);
-        }
+        await _conversations.InitializeAsync();
         PublishState();
         _ = ReconnectLoopAsync(_lifetime.Token);
         if (Settings.AutoReconnect && Settings.LastBluetoothAddress is ulong address)
@@ -89,19 +81,25 @@ public sealed class AssistantCoordinator : IAsyncDisposable
         else await ScanAsync();
     }
 
-    public BackendSnapshot Snapshot()
+    public DeviceState Snapshot()
     {
         lock (_stateLock)
         {
-            return new BackendSnapshot(
+            return new DeviceState(
                 _status, _detail, _linkReady, Settings.LastBluetoothAddress is not null,
-                Settings.LastBluetoothAddress, _ble.MaxPduSize,
+                Settings.LastBluetoothAddress, Settings.LastDeviceName, _ble.MaxPduSize,
                 _devices.Values.OrderByDescending(device => device.Rssi).ToArray(),
-                new PublicSettings(Settings.AsrModel, Settings.ChatModel, Settings.ScreenTimeoutSeconds, Settings.AutoReconnect, !string.IsNullOrWhiteSpace(_secureStore.Load())),
-                _conversationId == 0 ? null : _conversationId,
-                _messages.ToArray());
+                _conversations.DeviceActiveConversationId, null, _conversations.DeviceFollowDesktop);
         }
     }
+
+    public PublicSettings PublicSettings() => new(
+        Settings.AsrModel,
+        Settings.ChatModel,
+        Settings.ScreenTimeoutSeconds,
+        Settings.AutoReconnect,
+        Settings.WebSearchEnabled,
+        !string.IsNullOrWhiteSpace(_secureStore.Load()));
 
     public async Task ScanAsync()
     {
@@ -201,9 +199,7 @@ public sealed class AssistantCoordinator : IAsyncDisposable
     {
         try
         {
-            var alias = unchecked((uint)Environment.TickCount64);
-            var payload = new byte[4]; BinaryPrimitives.WriteUInt32LittleEndian(payload, alias);
-            await ResetConversationAsync(payload, IsLinkReady());
+            await _conversations.CreateAsync();
         }
         catch (Exception error) { ShowError(error); }
     }
@@ -213,18 +209,19 @@ public sealed class AssistantCoordinator : IAsyncDisposable
         try
         {
             var type = CurrentStatus().Contains("AI", StringComparison.Ordinal) ? MessageType.ChatError : MessageType.AsrError;
-            CancelAllTurns("本轮已取消");
+            var conversationId = _conversations.DesktopActiveConversationId;
+            if (conversationId is not null) await _conversations.CancelAsync(conversationId);
             if (IsLinkReady()) await _ble.SendAsync(type, CatProtocol.Utf8("已在 Windows 客户端取消", 256), _lifetime.Token);
         }
         catch (Exception error) { ShowError(error); }
     }
 
-    public async Task SaveSettingsAsync(string? apiKey, string asrModel, string chatModel, uint screenTimeout, bool autoReconnect)
+    public async Task SaveSettingsAsync(string? apiKey, string asrModel, string chatModel, uint screenTimeout, bool autoReconnect, bool webSearchEnabled)
     {
         try
         {
             if (!string.IsNullOrWhiteSpace(apiKey)) _secureStore.Save(apiKey);
-            Settings.AsrModel = asrModel.Trim(); Settings.ChatModel = chatModel.Trim(); Settings.ScreenTimeoutSeconds = screenTimeout; Settings.AutoReconnect = autoReconnect;
+            Settings.AsrModel = asrModel.Trim(); Settings.ChatModel = chatModel.Trim(); Settings.ScreenTimeoutSeconds = screenTimeout; Settings.AutoReconnect = autoReconnect; Settings.WebSearchEnabled = webSearchEnabled;
             await _repository.SaveSettingsAsync(Settings);
             if (IsLinkReady()) { await SendUInt32Async(MessageType.ScreenTimeout, screenTimeout); await SendAppStatusAsync(); }
             SetDetail("设置已保存");
@@ -236,8 +233,8 @@ public sealed class AssistantCoordinator : IAsyncDisposable
     {
         text = text.Trim();
         if (text.Length == 0) throw new ArgumentException("消息不能为空。", nameof(text));
-        var token = _turns.StartDesktop();
-        try { await RunChatAsync(new ChatMessage("user", text, DateTimeOffset.UtcNow), false, null, token); }
+        var conversationId = _conversations.DesktopActiveConversationId ?? throw new InvalidOperationException("没有活动对话。");
+        try { await _conversations.SendAsync(conversationId, text, "desktop"); }
         catch (Exception error) when (error is not OperationCanceledException) { ShowError(error); throw; }
     }
 
@@ -245,6 +242,74 @@ public sealed class AssistantCoordinator : IAsyncDisposable
     {
         lock (_stateLock) _devices[device.Address] = device;
         PublishState();
+    }
+
+    private void OnConversationChanged(object? sender, ConversationEvent update)
+    {
+        if (update.Type is "conversation.created" or "conversation.activated" or "conversation.deleted" or "device.binding")
+            PublishState();
+        if (!IsLinkReady() || update.ConversationId != _conversations.DeviceActiveConversationId) return;
+        _ = RelayConversationToCardAsync(update);
+    }
+
+    private async Task RelayConversationToCardAsync(ConversationEvent update)
+    {
+        try
+        {
+            switch (update.Type)
+            {
+                case "run.started" when update.RunId is not null:
+                    lock (_stateLock) _cardRunBytes[update.RunId] = 0;
+                    await _ble.SendAsync(MessageType.ChatStarted, ReadOnlyMemory<byte>.Empty, _lifetime.Token);
+                    SetStatus("AI 正在回答", "正在生成回复");
+                    break;
+                case "message.delta" when update.RunId is not null && update.Delta is not null:
+                    var filtered = DisplayText.Filter(update.Delta);
+                    if (filtered.Length == 0) break;
+                    int used;
+                    lock (_stateLock) used = _cardRunBytes.GetValueOrDefault(update.RunId);
+                    var remaining = CatProtocol.AnswerMaxBytes - used;
+                    if (remaining <= 0) break;
+                    var payload = Utf8Prefix(filtered, remaining);
+                    if (payload.Length == 0) break;
+                    lock (_stateLock) _cardRunBytes[update.RunId] = used + payload.Length;
+                    await _ble.SendAsync(MessageType.ChatDelta, payload, _lifetime.Token);
+                    break;
+                case "message.completed" when update.RunId is not null:
+                case "message.interrupted" when update.RunId is not null:
+                    int count;
+                    lock (_stateLock)
+                    {
+                        count = _cardRunBytes.GetValueOrDefault(update.RunId);
+                        _cardRunBytes.Remove(update.RunId);
+                    }
+                    var done = new byte[4];
+                    BinaryPrimitives.WriteUInt32LittleEndian(done, (uint)count);
+                    await _ble.SendAsync(MessageType.ChatDone, done, _lifetime.Token);
+                    SetStatus(update.Type == "message.interrupted" ? "回答已打断" : "回答完成", "可继续提问");
+                    break;
+                case "run.failed":
+                    await _ble.SendAsync(MessageType.ChatError, CatProtocol.Utf8("服务暂时不可用，请稍后重试", 256), _lifetime.Token);
+                    SetStatus("AI 服务错误", update.Error ?? "服务暂时不可用");
+                    break;
+                case "conversation.activated" when _conversations.DeviceFollowDesktop:
+                case "device.binding":
+                    await _ble.SendAsync(MessageType.SessionReset, ReadOnlyMemory<byte>.Empty, _lifetime.Token);
+                    SetStatus("卡片已就绪", "已跟随电脑当前对话");
+                    break;
+            }
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception error) { Console.Error.WriteLine($"{DateTimeOffset.Now:O} card relay failed: {error.Message}"); }
+    }
+
+    private static byte[] Utf8Prefix(string value, int maximumBytes)
+    {
+        var bytes = Encoding.UTF8.GetBytes(value);
+        if (bytes.Length <= maximumBytes) return bytes;
+        var length = maximumBytes;
+        while (length > 0 && (bytes[length] & 0xC0) == 0x80) length--;
+        return bytes[..length];
     }
 
     private void OnLinkStateChanged(object? sender, string state) => SetDetail(state);
@@ -427,64 +492,17 @@ public sealed class AssistantCoordinator : IAsyncDisposable
     private async Task ConfirmTranscriptAsync(ushort id, CancellationToken token)
     {
         if (_recordingId != id || string.IsNullOrWhiteSpace(_transcript)) throw new ProtocolException("没有可确认的转写结果。");
-        await RunChatAsync(new ChatMessage("user", _transcript, DateTimeOffset.UtcNow), true, id, token);
+        var conversationId = _conversations.DeviceActiveConversationId ?? throw new InvalidOperationException("卡片没有活动对话。");
+        await _conversations.SendAsync(conversationId, _transcript, "device");
         _transcript = null; _recordingId = null;
-    }
-
-    private async Task RunChatAsync(ChatMessage user, bool sendToCard, ushort? recordingId, CancellationToken token)
-    {
-        await _chatGate.WaitAsync(token);
-        try
-        {
-            if (_sessionPolicy.ShouldStartNew(DateTimeOffset.UtcNow) || _conversationId == 0) await CreateConversationAsync(DateTimeOffset.UtcNow);
-            await _repository.AddMessageAsync(_conversationId, user); AddMessage(user);
-            var history = await _repository.LoadMessagesAsync(_conversationId);
-            if (sendToCard) await _ble.SendAsync(MessageType.ChatStarted, IdPayload(recordingId!.Value), token);
-            SetStatus("AI 正在回答", user.Content);
-            StreamChanged?.Invoke(this, new StreamUpdate(_conversationId, "started", Message: user));
-            var answer = new StringBuilder();
-            await foreach (var raw in _cloud.StreamChatAsync(history, Settings.ChatModel, _secureStore.Load() ?? "", token))
-            {
-                var delta = sendToCard ? DisplayText.Filter(raw) : raw;
-                if (delta.Length == 0) continue;
-                answer.Append(delta);
-                if (sendToCard && Encoding.UTF8.GetByteCount(answer.ToString()) > CatProtocol.AnswerMaxBytes) throw new ProtocolException("AI 回复超过卡片 12 KiB 限制。");
-                if (sendToCard) await _ble.SendAsync(MessageType.ChatDelta, Encoding.UTF8.GetBytes(delta), token);
-                StreamChanged?.Invoke(this, new StreamUpdate(_conversationId, "delta", delta));
-            }
-            if (sendToCard)
-            {
-                var done = new byte[4]; BinaryPrimitives.WriteUInt32LittleEndian(done, (uint)Encoding.UTF8.GetByteCount(answer.ToString()));
-                await _ble.SendAsync(MessageType.ChatDone, done, token);
-            }
-            var assistant = new ChatMessage("assistant", answer.ToString(), DateTimeOffset.UtcNow);
-            await _repository.AddMessageAsync(_conversationId, assistant); AddMessage(assistant);
-            _sessionPolicy.Complete(DateTimeOffset.UtcNow);
-            SetStatus("回答完成", answer.ToString());
-            StreamChanged?.Invoke(this, new StreamUpdate(_conversationId, "completed", Message: assistant));
-        }
-        finally { _chatGate.Release(); }
     }
 
     private async Task ResetConversationAsync(byte[] payload, bool notifyCard)
     {
         CancelAllTurns("已开始新对话");
-        await _chatGate.WaitAsync(_lifetime.Token);
-        try
-        {
-            await CreateConversationAsync(DateTimeOffset.UtcNow);
-            if (notifyCard) await _ble.SendAsync(MessageType.SessionReset, payload.Length == 4 ? payload : [], _lifetime.Token);
-        }
-        finally { _chatGate.Release(); }
+        await _conversations.CreateForDeviceAsync();
+        if (notifyCard) await _ble.SendAsync(MessageType.SessionReset, payload.Length == 4 ? payload : [], _lifetime.Token);
     }
-
-    private async Task CreateConversationAsync(DateTimeOffset now)
-    {
-        _conversationId = await _repository.NewConversationAsync(now); _sessionPolicy.Complete(now);
-        lock (_stateLock) _messages.Clear(); PublishState();
-    }
-
-    private void AddMessage(ChatMessage message) { lock (_stateLock) _messages.Add(message); PublishState(); }
     private async Task RunCardOperationAsync(Func<CancellationToken, Task> operation)
     {
         var token = _turns.CardToken();
@@ -504,6 +522,7 @@ public sealed class AssistantCoordinator : IAsyncDisposable
     private void CancelCardTurn(string status)
     {
         _turns.CancelCard();
+        if (_conversations.DeviceActiveConversationId is { } conversationId) _ = _conversations.CancelAsync(conversationId);
         lock (_audioLock) _recordings.Cancel(_recordingId);
         _transcript = null;
         SetStatus(status, CurrentDetail());
@@ -667,8 +686,10 @@ public sealed class AssistantCoordinator : IAsyncDisposable
     {
         SystemEvents.PowerModeChanged -= OnPowerModeChanged; NetworkInformation.NetworkStatusChanged -= OnNetworkStatusChanged;
         _ble.ConnectionLost -= OnConnectionLost;
+        _conversations.Changed -= OnConversationChanged;
         _lifetime.Cancel(); _controlMessages.Writer.TryComplete(); _turns.CancelAll(); _reconnectTimer.Dispose();
         try { await Task.WhenAll(_controlPump, _linkHealthPump); } catch (OperationCanceledException) { }
-        await _ble.DisposeAsync(); _cloud.Dispose(); _turns.Dispose(); _lifetime.Dispose(); _audioArrived.Dispose(); _connectionGate.Dispose(); _chatGate.Dispose();
+        await _conversations.DisposeAsync();
+        await _ble.DisposeAsync(); _cloud.Dispose(); _turns.Dispose(); _lifetime.Dispose(); _audioArrived.Dispose(); _connectionGate.Dispose();
     }
 }

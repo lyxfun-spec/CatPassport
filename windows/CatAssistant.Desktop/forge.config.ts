@@ -15,7 +15,15 @@ const config: ForgeConfig = {
   packagerConfig: {
     asar: true,
     executableName: 'CatAssistant',
-    extraResource: [backendOutput, iconPath]
+    extraResource: [backendOutput, iconPath],
+    download: {
+      // Pin the official Electron release checksums so packaging remains verifiable
+      // when GitHub's checksum endpoint is unavailable from the build environment.
+      checksums: {
+        'electron-v44.7.0-win32-arm64.zip': 'ee2621a4513f92a952273d5363e153db6f0e4dd183d89f2c0f740faa13623316',
+        'electron-v44.7.0-win32-x64.zip': 'eee30dc8fa1f5ea95490e59f44e46ea68dd24c6e93d22facf70fe5c2d4c2665c'
+      }
+    }
   },
   rebuildConfig: {},
   hooks: {

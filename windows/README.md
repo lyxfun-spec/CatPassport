@@ -1,82 +1,99 @@
 # 小猫助手 Windows 客户端
 
-Windows 11 桌面常驻网关。界面使用 Electron + React + TypeScript；BLE、设备协议、音频、DashScope、SQLite 与 DPAPI 密钥存储仍全部运行在 C#/.NET 后台中。
+小猫助手是一个以桌面 AI 对话为主体、可选连接 AI Passport 卡片的 Windows 客户端。卡片是 Chat 模式的伴随硬件，不是应用的主界面；即使没有卡片，桌面 Chat 仍可独立使用。
+
+完整产品边界、数据模型、打断语义、卡片会话绑定和 Work 扩展契约见：
+
+- [桌面 AI Agent 客户端重构设计（中文）](../docs/desktop-agent-architecture.zh_CN.md)
+- [Desktop AI Agent Client Architecture (English)](../docs/desktop-agent-architecture.md)
+
+## 当前版本范围
+
+- 完整的桌面 Chat 模式：会话创建、切换、重命名、删除、历史持久化和流式回复。
+- 同一会话收到新消息时立即打断旧生成；已产生的部分回复保存为 `interrupted`，并参与后续上下文。
+- DashScope/Qwen 文本对话，可在设置中开启或关闭阿里云联网搜索。
+- AI 回复支持 Markdown 展示、复制和搜索来源链接。
+- Chat / Work 使用统一会话列表和界面；Work 入口已保留但尚未启用，未来接入独立 Agent 后端与沙箱。
+- AI Passport 卡片只接入 Chat：默认跟随电脑当前 Chat，也可在卡片上创建独立对话，再由电脑继续。
+- API Key 使用 Windows DPAPI 保存，不进入 renderer、SQLite、日志或 BLE 数据。
+
+V1 不包含图片/文件消息、消息编辑、重新生成、Work Agent、本地工具或旧演示会话导入。
 
 ## 架构
 
 ```text
-React renderer（纯 UI）
+React renderer（统一会话 UI）
     ↕ Electron contextBridge / IPC
-Electron main（窗口、托盘、后台进程生命周期）
+Electron main（窗口、托盘、外链与后台生命周期）
     ↕ stdin/stdout：版本化 NDJSON RPC
-CatAssistant.Backend（BLE、音频、AI、SQLite、DPAPI）
-    ↕
-CatAssistant.Core（设备协议、分片、ADPCM、会话策略）
+CatAssistant.Backend
+    ├─ ConversationService（会话、运行、打断、上下文）
+    ├─ DashScopeClient（Qwen、联网搜索、ASR）
+    ├─ SqliteRepository（V2 数据与迁移）
+    └─ AssistantCoordinator（卡片链路和会话绑定）
+        ↕
+CatAssistant.Core（设备协议、分片与音频）
 ```
 
-- `CatAssistant.Desktop/`：Electron 主进程、受限 preload、React UI、动画、托盘和打包配置。
-- `CatAssistant.Backend/`：独立 .NET 8 后台；不引用 WinUI 或 Windows App SDK。
-- `CatAssistant.Core/`：纯 .NET 协议、音频和会话逻辑。
-- `CatAssistant.Backend.Tests/`、`CatAssistant.Core.Tests/`：IPC 安全边界和底层协议测试。
+- `CatAssistant.Desktop/`：Electron 主进程、受限 preload、React UI、托盘和打包配置。
+- `CatAssistant.Backend/`：独立 .NET 8 后台；renderer 不直接访问云服务、数据库或 BLE。
+- `CatAssistant.Core/`：纯 .NET 协议、音频和会话底层逻辑。
+- `CatAssistant.Backend.Tests/`、`CatAssistant.Core.Tests/`：会话竞态、IPC 边界和协议测试。
 
-后台协议版本为 1。请求格式为 `{"version":1,"id":1,"method":"state.get","params":{...}}`；响应使用 `kind=response`，状态和流式对话使用 `kind=event`。当前方法按领域分为 `state.*`、`devices.*`、`settings.*`、`conversation.*` 和 `app.*`。`conversation.stream` 事件包含 `started`、`delta`、`completed` 阶段，电脑端直接对话与卡片对话共用同一个 C# 会话/流式实现，Electron 不直接调用 AI 服务。
+后台协议版本仍为 1。新版主要 RPC 领域为 `app.*`、`conversations.*`、`devices.*` 和 `settings.*`；事件分为 `device.changed` 与 `conversation.changed`。旧演示 RPC 暂时保留作兼容入口，但新版 UI 不再依赖它们。
+
+## 会话与打断规则
+
+每个会话最多有一个活动生成，不同会话可以并行：
+
+1. 用户消息先持久化，再创建 run 和 assistant 占位消息。
+2. 若同一会话仍在生成，先取消旧 run。
+3. 旧回复尚无文本时删除空占位；已有文本时保存为 `interrupted`。
+4. 新用户消息随后进入历史，并基于包含该部分回复的最新上下文开始新生成。
+5. 旧 run 即使迟到返回 token，也会因 run 身份校验而被丢弃。
+
+这保证连续发送消息不需要等待队列，也不会让被打断的内容悄悄从上下文消失。
+
+## 数据与迁移
+
+- SQLite：`%LOCALAPPDATA%\FoloToy\CatAssistant\cat-assistant.db`
+- DashScope Key：`%LOCALAPPDATA%\FoloToy\CatAssistant\dashscope.key`
+- 新数据写入 `conversations_v2`、`messages_v2`、`runs`、`citations`、`app_state` 和 `work_requests`。
+- 原 `conversations`、`messages` 和设置表不会被删除，也不会自动混入新版会话列表。
+- 异常退出后启动恢复会把悬空 run 和有内容的生成消息标为 `interrupted`，移除空占位。
+- 原 BLE UUID、加密配对、通知订阅、分片、音频序号和 PDU 要求保持不变。
 
 ## 环境与开发
 
-- Windows 11（支持 Bluetooth LE）
+- Windows 11（卡片功能需要 Bluetooth LE）
 - .NET 8 SDK
 - Node.js 22+
 - pnpm 11+
 
-不需要 Visual Studio、WinUI 3 工作负载或 Windows App SDK。首次安装依赖：
-
 ```powershell
 pnpm install
-```
-
-从仓库根目录用一条命令启动 Electron、React 热更新和 .NET 后台：
-
-```powershell
 pnpm dev
 ```
 
-可选的环境检查：
-
-```powershell
-. .\windows\Enter-CatAssistantEnvironment.ps1
-```
-
-## 数据与安全兼容
-
-迁移没有改变用户数据位置或格式：
-
-- SQLite：`%LOCALAPPDATA%\FoloToy\CatAssistant\cat-assistant.db`
-- DashScope Key：`%LOCALAPPDATA%\FoloToy\CatAssistant\dashscope.key`
-- Key 继续使用 DPAPI `CurrentUser` 加密；不会发送给 Electron renderer、写入 SQLite、日志或 BLE。
-- 原有 `settings`、`conversations`、`messages` 表和键名保持不变，无需数据迁移。
-- 原 BLE Service/Characteristic UUID、加密配对、通知订阅、分片、音频序号校验和 PDU ≥177 行为保持不变。
-
-首次运行时在“设置”中填写 DashScope API Key。连接页会自动扫描附近的 `FoloToy Cat`。首次连接成功并完成应用握手后，客户端才把该地址保存为唯一绑定；以后只允许连接这张卡片，其它扫描结果不可选。更换设备前必须使用右上角“取消配对”，该操作会同时清除 Windows 系统配对和客户端绑定。
-
-连接状态以完整应用链路为准，而不是仅凭 Windows 报告的 GATT 状态：服务和特征使用非缓存发现，控制写入要求响应并短暂重试设备忙，完成加密、双通知订阅、PDU ≥177 和 HELLO / APP_READY 握手后才进入就绪。就绪后客户端定期发送 PING；断链、PONG 超时或重试后仍失败的关键写入会取消旧会话，并按 1、2、4、8、15 秒上限自动重连已绑定卡片。关闭窗口只隐藏到托盘，Electron 与 .NET 后台继续运行并服务卡片；双击托盘或选择“打开小猫助手”恢复窗口。只有托盘“退出”才会请求后台优雅关闭并完全退出。
+没有卡片时也可以开发和测试桌面 Chat；后台会继续尝试发现已绑定设备，但不会阻塞 UI。
 
 ## 检查与打包
 
 ```powershell
 pnpm typecheck
 pnpm test
-pnpm package   # 生成 unpacked Windows x64 应用
-pnpm make      # 生成 Squirrel 安装包和 ZIP
+dotnet test .\windows\CatAssistant.sln -c Debug
+pnpm package   # unpacked Windows x64 应用
+pnpm make      # Squirrel 安装包和 ZIP
 ```
 
-打包前会执行 `dotnet publish -c Release -r win-x64 --self-contained true`，并把输出放入 Electron 的 `resources/backend/`。因此正式应用携带 .NET 运行时及后台所需 DLL，目标电脑无需单独安装 .NET。当前打包目标为 Windows x64；发布前仍应配置正式图标和 Windows 代码签名证书。
+打包前会执行 `dotnet publish -c Release -r win-x64 --self-contained true`，并把后台放入 Electron `resources/backend/`。正式应用因此无需目标电脑另行安装 .NET。当前仍需在发布前配置正式图标、签名证书和安装升级策略。
 
-## 真机检查
+## 验收重点
 
-1. 首次配对后确认链路已加密，Control TX 与 Audio TX 均成功订阅。
-2. 确认界面显示的 PDU 至少为 177，并完成 HELLO / `app=windows` 的 APP_READY。
-3. 连续录音 30 秒，验证无丢帧、WAV/ASR 正常且请求结束后不保留原始音频。
-4. 覆盖窗口关闭后卡片继续服务、托盘恢复、取消、新会话、卡片重启、蓝牙关闭再打开、系统睡眠唤醒和忘记后重新配对；确认恢复无需用户手工开关蓝牙。
-5. 绑定后扫描到第二张卡片时确认它不可连接；取消配对后才能把第二张卡片设为新的唯一绑定。
-6. 覆盖电脑端直接对话的 `started/delta/completed` 流，以及卡片与电脑共用本地会话历史。
-7. 断网、错误 API Key、无模型权限时确认错误类别清晰且卡片只显示通用提示。
+1. 连续发送两条消息，确认第一轮生成被正确截断，新回复只由最新 run 更新。
+2. 切换会话时确认不同会话可并行生成，历史和流式内容不串线。
+3. 开关联网搜索，确认来源链接可打开且非 HTTP(S) URL 不进入 UI。
+4. 卡片跟随电脑、卡片新建独立 Chat、电脑切回该 Chat 三条路径均保持相同历史。
+5. 覆盖断网、错误 Key、模型无权限、应用异常退出和重启恢复。
+6. 真机覆盖配对、断链重连、录音/ASR、卡片重启、蓝牙切换和系统睡眠唤醒。

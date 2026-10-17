@@ -1,111 +1,329 @@
-import React, { useEffect, useReducer, useState } from 'react';
+import React, { useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import type { BackendSnapshot, CatDevice } from './shared';
+import ReactMarkdown from 'react-markdown';
+import type {
+  BackendEvent,
+  BootstrapState,
+  CatDevice,
+  ConversationDetail,
+  ConversationMessage,
+  ConversationSummary,
+  PublicSettings
+} from './shared';
 import { initialState, reduceBackendEvent } from './state';
 import './styles.css';
 
-type Page = 'connection' | 'status' | 'chat' | 'settings';
+type IconName = 'new' | 'search' | 'chat' | 'work' | 'device' | 'settings' | 'menu' | 'send' | 'copy' | 'close' | 'sidebar' | 'check' | 'back';
 
-function Icon({ name }: { name: Page }) {
-  const paths: Record<Page, React.ReactNode> = {
-    connection: <><path d="M10 13a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1"/><path d="M14 11a5 5 0 0 0-7.1 0l-2 2A5 5 0 0 0 12 20.1l1.1-1.1"/></>,
-    status: <><path d="M4 4h16v12H7l-3 3z"/><path d="M8 8h8M8 12h5"/></>,
-    chat: <><path d="M12 3a8 8 0 0 0-7 12l-1 5 5-1a8 8 0 1 0 3-16z"/><path d="M8 11h.01M12 11h.01M16 11h.01"/></>,
-    settings: <><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6V21h-4v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H3v-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6V3h4v.1a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.1v4H21a1.7 1.7 0 0 0-1.6 1z"/></>
-  };
-  return <svg viewBox="0 0 24 24" aria-hidden="true">{paths[name]}</svg>;
+const iconPaths: Record<IconName, React.ReactNode> = {
+  new: <><path d="M12 5v14M5 12h14"/></>,
+  search: <><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></>,
+  chat: <><path d="M5 18.2 3.8 21l3.7-1.2A9 9 0 1 0 5 18.2Z"/><path d="M8 11.5h8M8 15h5"/></>,
+  work: <><rect x="4" y="7" width="16" height="12" rx="2"/><path d="M9 7V5h6v2M4 12h16M10 12v2h4v-2"/></>,
+  device: <><rect x="6" y="3" width="12" height="18" rx="3"/><path d="M10 7h4M10 17h4"/></>,
+  settings: <><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6V21h-4v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14v-4a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6 1.7 1.7 0 0 0 10 3h4a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1v4a1.7 1.7 0 0 0-1.6 1Z"/></>,
+  menu: <><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></>,
+  send: <><path d="m4 12 16-8-6.5 16-2-6Z"/><path d="m11.5 14 3-3"/></>,
+  copy: <><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></>,
+  close: <><path d="m6 6 12 12M18 6 6 18"/></>,
+  sidebar: <><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></>,
+  check: <path d="m5 12 4 4L19 6"/>,
+  back: <><path d="m15 18-6-6 6-6"/></>
+};
+
+function Icon({ name, size = 19 }: { name: IconName; size?: number }) {
+  return <svg className="icon" width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">{iconPaths[name]}</svg>;
 }
 
-function invoke(method: string, params?: Record<string, unknown>) {
-  return window.catAssistant.invoke<BackendSnapshot>(method, params);
+function invoke<T>(method: string, params?: Record<string, unknown>) {
+  return window.catAssistant.invoke<T>(method, params);
 }
 
 function App() {
   const [state, dispatch] = useReducer(reduceBackendEvent, initialState);
-  const [page, setPage] = useState<Page>('connection');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [newOpen, setNewOpen] = useState(false);
+  const [deviceOpen, setDeviceOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState<string>();
-  const [error, setError] = useState<string>();
+  const [localError, setLocalError] = useState<string>();
+  const onboardingShown = useRef(false);
+
+  const refresh = async () => dispatch({ event: 'ui.bootstrap', data: await invoke<BootstrapState>('app.bootstrap') });
 
   useEffect(() => {
-    const unsubscribe = window.catAssistant.onEvent(dispatch);
-    invoke('state.get').then(snapshot => dispatch({ event: 'state.changed', data: snapshot })).catch(reason => setError(String(reason.message ?? reason)));
-    return unsubscribe;
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    const unsubscribe = window.catAssistant.onEvent((event: BackendEvent) => {
+      dispatch(event);
+      if (event.event === 'message.delta' || event.event === 'device.changed' || event.event === 'backend.ready') return;
+      if (event.event === 'backend.exited') return;
+      clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => void refresh().catch(reason => setLocalError(errorText(reason))), 30);
+    });
+    invoke<BootstrapState>('app.bootstrap').then(data => dispatch({ event: 'ui.bootstrap', data })).catch(reason => setLocalError(errorText(reason)));
+    return () => { clearTimeout(refreshTimer); unsubscribe(); };
   }, []);
 
-  const run = async (name: string, action: () => Promise<unknown>) => {
-    setBusy(name); setError(undefined);
-    try { await action(); } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+  useEffect(() => {
+    if (!onboardingShown.current && state.bootstrap && !state.bootstrap.settings.hasApiKey) {
+      onboardingShown.current = true;
+      setSettingsOpen(true);
+    }
+  }, [state.bootstrap]);
+
+  const run = async <T,>(name: string, action: () => Promise<T>): Promise<T | undefined> => {
+    setBusy(name); setLocalError(undefined);
+    try { return await action(); }
+    catch (reason) { setLocalError(errorText(reason)); return undefined; }
     finally { setBusy(undefined); }
   };
 
-  const snapshot = state.snapshot;
-  return <div className="shell">
-    <aside>
-      <div className="brand"><div className="cat">🐱</div><div><strong>小猫助手</strong><span>Windows AI 网关</span></div></div>
-      <nav>
-        {([['connection','连接'],['status','状态'],['chat','电脑对话'],['settings','设置']] as [Page,string][]).map(([id,label]) =>
-          <button key={id} className={page === id ? 'active' : ''} onClick={() => setPage(id)}><Icon name={id}/><span>{label}</span></button>)}
-      </nav>
-      <div className="resident"><i className={snapshot?.isConnected ? 'online' : ''}/><div><b>{snapshot?.isConnected ? '卡片在线' : '后台常驻'}</b><span>关闭窗口仍会继续服务</span></div></div>
-    </aside>
-    <main>
-      {(error || state.backendError) && <div className="alert">{error ?? state.backendError}</div>}
-      {!snapshot ? <Loading/> : page === 'connection' ? <Connection snapshot={snapshot} busy={busy} run={run}/>
-        : page === 'status' ? <Status snapshot={snapshot} busy={busy} run={run}/>
-        : page === 'chat' ? <Chat snapshot={snapshot} streaming={state.streamingText} busy={busy} run={run}/>
-        : <Settings snapshot={snapshot} busy={busy} run={run}/>} 
+  if (!state.bootstrap) return <Loading error={localError ?? state.backendError}/>;
+  const bootstrap = state.bootstrap;
+  const active = bootstrap.activeConversation;
+
+  const selectConversation = async (id: string) => {
+    const detail = await run('activate', () => invoke<ConversationDetail>('conversations.activate', { id }));
+    if (detail) dispatch({ event: 'ui.conversation', data: detail });
+    void refresh().catch(reason => setLocalError(errorText(reason)));
+  };
+
+  const createConversation = async () => {
+    const created = await run('create', () => invoke<ConversationSummary>('conversations.create', { mode: 'chat' }));
+    if (!created) return;
+    setNewOpen(false);
+    await refresh();
+  };
+
+  const send = async () => {
+    const text = draft.trim();
+    if (!text || !active) return;
+    setDraft('');
+    const detail = await run('send', () => invoke<ConversationDetail>('conversations.send', { id: active.conversation.id, text }));
+    if (detail) dispatch({ event: 'ui.conversation', data: detail });
+  };
+
+  const rename = async () => {
+    if (!active) return;
+    const title = window.prompt('重命名对话', active.conversation.title)?.trim();
+    if (!title || title === active.conversation.title) return;
+    await run('rename', () => invoke('conversations.rename', { id: active.conversation.id, title }));
+    await refresh();
+  };
+
+  const remove = async () => {
+    if (!active || !window.confirm(`删除“${active.conversation.title}”？此操作无法撤销。`)) return;
+    await run('delete', () => invoke('conversations.delete', { id: active.conversation.id }));
+    await refresh();
+  };
+
+  return <div className={`app-shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
+    <Sidebar
+      bootstrap={bootstrap}
+      query={query}
+      onQuery={setQuery}
+      collapsed={sidebarCollapsed}
+      onToggle={() => setSidebarCollapsed(value => !value)}
+      onNew={() => setNewOpen(true)}
+      onSelect={id => void selectConversation(id)}
+      onDevice={() => setDeviceOpen(true)}
+      onSettings={() => setSettingsOpen(true)}
+    />
+    <main className="conversation-pane">
+      {(localError || state.backendError) && <div className="global-alert"><span>{localError ?? state.backendError}</span><button onClick={() => { setLocalError(undefined); dispatch({ event: 'ui.clearError' }); }}><Icon name="close"/></button></div>}
+      {active ? <>
+        <ConversationHeader conversation={active.conversation} onRename={() => void rename()} onDelete={() => void remove()}/>
+        <MessageList detail={active} runError={state.runError}/>
+        <Composer value={draft} onChange={setDraft} onSend={() => void send()} disabled={!bootstrap.settings.hasApiKey || !draft.trim()} sending={busy === 'send'} onOpenSettings={() => setSettingsOpen(true)}/>
+      </> : <EmptyConversation onNew={() => setNewOpen(true)}/>}
     </main>
+    {newOpen && <NewConversationDialog
+      busy={busy === 'create'}
+      onClose={() => setNewOpen(false)}
+      onCreate={() => void createConversation()}
+    />}
+    {deviceOpen && <DevicePanel
+      bootstrap={bootstrap}
+      busy={busy}
+      run={run}
+      onClose={() => setDeviceOpen(false)}
+      onOpenConversation={id => { setDeviceOpen(false); void selectConversation(id); }}
+      onRefresh={() => void refresh()}
+    />}
+    {settingsOpen && <SettingsDialog
+      settings={bootstrap.settings}
+      busy={busy === 'settings'}
+      run={run}
+      onClose={() => setSettingsOpen(false)}
+      onSaved={() => void refresh()}
+    />}
   </div>;
 }
 
-function Header({ eyebrow, title, description, action }: { eyebrow: string; title: string; description: string; action?: React.ReactNode }) {
-  return <header className="page-header"><div><span>{eyebrow}</span><h1>{title}</h1><p>{description}</p></div>{action}</header>;
+function Sidebar({ bootstrap, query, onQuery, collapsed, onToggle, onNew, onSelect, onDevice, onSettings }: {
+  bootstrap: BootstrapState;
+  query: string;
+  onQuery(value: string): void;
+  collapsed: boolean;
+  onToggle(): void;
+  onNew(): void;
+  onSelect(id: string): void;
+  onDevice(): void;
+  onSettings(): void;
+}) {
+  const filtered = useMemo(() => bootstrap.conversations.filter(item => item.title.toLocaleLowerCase().includes(query.toLocaleLowerCase())), [bootstrap.conversations, query]);
+  const groups = groupConversations(filtered);
+  const activeDeviceConversation = bootstrap.conversations.find(item => item.id === bootstrap.device.activeConversationId);
+  return <aside className="sidebar">
+    <div className="brand-row">
+      <div className="brand-mark"><span>CA</span></div>
+      <div className="brand-copy"><strong>Cat Assistant</strong><small>Desktop AI</small></div>
+      <button className="icon-button sidebar-toggle" onClick={onToggle} title={collapsed ? '展开侧边栏' : '收起侧边栏'}><Icon name="sidebar"/></button>
+    </div>
+    <button className="new-conversation" onClick={onNew}><Icon name="new"/><span>新对话</span></button>
+    <label className="search-box"><Icon name="search"/><input value={query} onChange={event => onQuery(event.target.value)} placeholder="搜索对话" aria-label="搜索对话"/></label>
+    <div className="conversation-list">
+      {groups.map(group => <section className="conversation-group" key={group.label}>
+        <h2>{group.label}</h2>
+        {group.items.map(item => <button key={item.id} className={`conversation-item ${bootstrap.activeConversationId === item.id ? 'active' : ''}`} onClick={() => onSelect(item.id)} title={item.title}>
+          <Icon name={item.mode === 'work' ? 'work' : 'chat'} size={17}/><span>{item.title}</span>
+        </button>)}
+      </section>)}
+      {filtered.length === 0 && <div className="no-results">没有匹配的对话</div>}
+    </div>
+    <div className="sidebar-footer">
+      <button className="footer-entry device-entry" onClick={onDevice}>
+        <span className={`status-dot ${bootstrap.device.isConnected ? 'online' : ''}`}/><Icon name="device"/><span className="footer-copy"><b>{bootstrap.device.isConnected ? 'AI 卡片' : '连接 AI 卡片'}</b><small>{bootstrap.device.isConnected ? activeDeviceConversation?.title ?? '已连接' : bootstrap.device.hasPairedDevice ? '正在等待设备' : '可选辅助硬件'}</small></span>
+      </button>
+      <button className="footer-entry" onClick={onSettings}><Icon name="settings"/><span className="footer-copy"><b>设置</b><small>{bootstrap.settings.hasApiKey ? 'AI 服务已配置' : '需要配置 API Key'}</small></span></button>
+    </div>
+  </aside>;
 }
 
-function Loading() { return <div className="loading"><div className="pulse">🐾</div><h2>正在启动 .NET 后台</h2><p>正在恢复本地会话并准备蓝牙服务…</p></div>; }
-
-function Connection({ snapshot, busy, run }: { snapshot: BackendSnapshot; busy?: string; run: (n:string,a:()=>Promise<unknown>)=>Promise<void> }) {
-  const connect = (device: CatDevice) => run('connect', () => invoke('devices.connect', { address: device.address, name: device.name }));
-  const unpair = () => run('forget', () => invoke('devices.forget'));
-  const owner = snapshot.pairedDeviceAddress;
-  const description = snapshot.isConnected ? '当前客户端只服务这张已绑定的 AI 卡片。'
-    : snapshot.hasPairedDevice ? '正在自动恢复已绑定卡片；其它卡片不会被连接。'
-    : '选择一张 AI 卡片完成首次绑定。';
-  return <section className="page"><Header eyebrow="BLE GATEWAY" title="连接卡片" description={description} action={<button className="ghost danger unpair" disabled={!snapshot.hasPairedDevice || !!busy} onClick={() => void unpair()}>{busy === 'forget' ? '正在取消…' : '取消配对'}</button>}/>
-    <div className="scan-state"><i className={snapshot.isConnected ? 'online' : ''}/><span>{snapshot.isConnected ? '已绑定卡片在线' : busy === 'connect' ? '正在建立安全连接…' : snapshot.hasPairedDevice ? '正在等待已绑定卡片…' : '正在自动扫描附近设备…'}</span></div>
-    <div className="device-grid">{snapshot.devices.length ? snapshot.devices.map(device => {
-      const isOwner = owner == null || device.address === owner;
-      const locked = snapshot.isConnected || !isOwner;
-      const hint = snapshot.isConnected ? '已绑定卡片在线' : !isOwner ? '已绑定其它卡片' : snapshot.hasPairedDevice ? '已绑定 · 点击重连' : '点击绑定';
-      return <button key={device.address} className={`device ${locked ? 'locked' : ''}`} disabled={locked || !!busy} onClick={() => void connect(device)}><span className="signal">{device.rssi > -60 ? '▂▄▆█' : device.rssi > -75 ? '▂▄▆' : '▂▄'}</span><strong>{device.name}</strong><code>{device.addressText}</code><small>{device.rssi} dBm · {hint}</small></button>;
-    }) : <div className="empty"><b>{snapshot.isConnected ? '已绑定卡片在线' : snapshot.hasPairedDevice ? '正在查找已绑定卡片' : '正在查找附近卡片'}</b><span>{snapshot.hasPairedDevice ? '如需更换卡片，请先点击右上角“取消配对”。' : '请确认卡片开机并正在广播，无需手动刷新。'}</span></div>}</div>
-    <div className="diagnostic"><div><span>连接诊断</span><strong>{snapshot.detail}</strong></div><code>PDU {snapshot.maxPduSize || '--'} · 要求 ≥177</code></div>
-  </section>;
+function ConversationHeader({ conversation, onRename, onDelete }: { conversation: ConversationSummary; onRename(): void; onDelete(): void }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  return <header className="conversation-header">
+    <div className="title-block"><h1>{conversation.title}</h1><span className="mode-chip"><Icon name={conversation.mode === 'work' ? 'work' : 'chat'} size={14}/>{conversation.mode === 'work' ? 'Work' : 'Chat'}</span></div>
+    <div className="header-menu"><button className="icon-button" onClick={() => setMenuOpen(value => !value)} title="对话选项"><Icon name="menu"/></button>{menuOpen && <div className="popover-menu"><button onClick={() => { setMenuOpen(false); onRename(); }}>重命名</button><button className="danger" onClick={() => { setMenuOpen(false); onDelete(); }}>删除对话</button></div>}</div>
+  </header>;
 }
 
-function Status({ snapshot, busy, run }: { snapshot: BackendSnapshot; busy?: string; run: (n:string,a:()=>Promise<unknown>)=>Promise<void> }) {
-  return <section className="page"><Header eyebrow="SERVICE STATUS" title="运行状态" description="窗口隐藏后，BLE、音频与 AI 服务继续由 .NET 后台处理。"/>
-    <div className="status-card"><div className="orb"><i className={snapshot.isConnected ? 'online' : ''}/></div><div><span>当前阶段</span><h2>{snapshot.status}</h2><p>{snapshot.detail}</p></div><code>PDU {snapshot.maxPduSize || '--'}</code></div>
-    <div className="toolbar"><button className="primary" disabled={!!busy} onClick={() => void run('new', () => invoke('conversation.new'))}>新对话</button><button disabled={!!busy} onClick={() => void run('cancel', () => invoke('conversation.cancel'))}>取消当前轮次</button></div>
-    <div className="privacy"><b>本地与安全</b><p>API Key 仍由当前 Windows 用户的 DPAPI 加密；SQLite 只保存设置和会话，不保存原始录音、密钥或调试对话日志。</p></div>
-  </section>;
+function MessageList({ detail, runError }: { detail: ConversationDetail; runError?: string }) {
+  const scroller = useRef<HTMLDivElement>(null);
+  useEffect(() => { scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: 'smooth' }); }, [detail.messages.length, detail.messages.at(-1)?.content]);
+  if (detail.messages.length === 0) return <div className="messages empty-chat" ref={scroller}><div className="welcome-mark">CA</div><h2>有什么想一起聊聊的吗？</h2><p>可以直接提问，需要最新信息时我会使用网络搜索。</p></div>;
+  return <div className="messages" ref={scroller}>
+    <div className="message-column">
+      {detail.messages.map(message => <MessageItem key={message.id} message={message} citations={detail.citations.filter(item => item.messageId === message.id)}/>) }
+      {runError && <div className="run-error">{runError}</div>}
+    </div>
+  </div>;
 }
 
-function Chat({ snapshot, streaming, busy, run }: { snapshot: BackendSnapshot; streaming: string; busy?: string; run: (n:string,a:()=>Promise<unknown>)=>Promise<void> }) {
-  const [text, setText] = useState('');
-  const send = async () => { const value = text.trim(); if (!value) return; setText(''); await run('send', () => invoke('conversation.send', { text: value })); };
-  return <section className="page chat-page"><Header eyebrow="DESKTOP CONVERSATION" title="电脑对话" description="与卡片共用同一套会话、模型和流式后台结构。"/>
-    <div className="messages">{snapshot.messages.length === 0 && !streaming ? <div className="empty"><b>开始一段新对话</b><span>消息由 .NET 后台发送，前端只负责显示流式结果。</span></div> : snapshot.messages.map((message,index) => <article key={`${message.createdAt}-${index}`} className={message.role === 'user' ? 'user' : 'assistant'}><small>{message.role === 'user' ? '你' : '小猫助手'}</small><p>{message.content}</p></article>)}{streaming && <article className="assistant streaming"><small>小猫助手 · 正在输入</small><p>{streaming}<i/></p></article>}</div>
-    <div className="composer"><textarea value={text} onChange={event => setText(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder="直接在电脑上问小猫助手…"/><button className="primary" disabled={!text.trim() || busy === 'send'} onClick={() => void send()}>发送</button></div>
-  </section>;
+function MessageItem({ message, citations }: { message: ConversationMessage; citations: ConversationDetail['citations'] }) {
+  const [copied, setCopied] = useState(false);
+  if (message.role === 'assistant' && message.status === 'streaming' && !message.content) return <article className="message assistant"><div className="thinking"><i/><i/><i/></div></article>;
+  return <article className={`message ${message.role} ${message.status}`}>
+    <div className="message-body">{message.role === 'assistant'
+      ? <ReactMarkdown components={{ a: props => <a {...props} target="_blank" rel="noreferrer"/> }}>{message.content}</ReactMarkdown>
+      : <p>{message.content}</p>}</div>
+    {citations.length > 0 && <div className="sources"><span>来源</span>{citations.map(citation => <a key={citation.id} href={citation.url} target="_blank" rel="noreferrer"><b>{citation.ordinal}</b><span>{citation.title}</span></a>)}</div>}
+    {message.role === 'assistant' && message.content && <div className="message-actions">
+      {message.status === 'interrupted' && <span className="interrupted-label">已中断</span>}
+      {message.status === 'failed' && <span className="failed-label">生成失败</span>}
+      <button onClick={() => { void navigator.clipboard.writeText(message.content).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1200); }); }}><Icon name={copied ? 'check' : 'copy'} size={15}/>{copied ? '已复制' : '复制'}</button>
+    </div>}
+  </article>;
 }
 
-function Settings({ snapshot, busy, run }: { snapshot: BackendSnapshot; busy?: string; run: (n:string,a:()=>Promise<unknown>)=>Promise<void> }) {
-  const [apiKey, setApiKey] = useState(''); const [asr, setAsr] = useState(snapshot.settings.asrModel); const [chat, setChat] = useState(snapshot.settings.chatModel); const [timeout, setTimeoutValue] = useState(snapshot.settings.screenTimeoutSeconds); const [reconnect, setReconnect] = useState(snapshot.settings.autoReconnect);
-  const save = () => run('save', () => invoke('settings.save', { apiKey: apiKey || undefined, asrModel: asr, chatModel: chat, screenTimeoutSeconds: timeout, autoReconnect: reconnect })).then(() => setApiKey(''));
-  return <section className="page"><Header eyebrow="PREFERENCES" title="设置" description="模型配置保存在原 SQLite 数据库，密钥不会进入 Electron 渲染进程的持久存储。"/>
-    <div className="form"><label><span>DashScope API Key <em>{snapshot.settings.hasApiKey ? '已安全配置' : '尚未配置'}</em></span><input type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} placeholder="留空表示不更改" autoComplete="off"/></label><div className="row"><label><span>ASR 模型</span><input value={asr} onChange={event => setAsr(event.target.value)}/></label><label><span>聊天模型</span><input value={chat} onChange={event => setChat(event.target.value)}/></label></div><label><span>卡片屏幕超时（秒）</span><input type="number" min="0" max="86400" value={timeout} onChange={event => setTimeoutValue(Math.max(0, Math.min(86400, Number(event.target.value))))}/><small>0 表示永不熄屏。</small></label><label className="check"><input type="checkbox" checked={reconnect} onChange={event => setReconnect(event.target.checked)}/><span>记住设备并自动重连</span></label><button className="primary save" disabled={!!busy} onClick={() => void save()}>{busy === 'save' ? '保存中…' : '保存设置'}</button></div>
-  </section>;
+function Composer({ value, onChange, onSend, disabled, sending, onOpenSettings }: { value: string; onChange(value: string): void; onSend(): void; disabled: boolean; sending: boolean; onOpenSettings(): void }) {
+  return <div className="composer-wrap">
+    <div className="composer">
+      <textarea value={value} onChange={event => onChange(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (!disabled) onSend(); } }} placeholder="输入消息" rows={1}/>
+      <button className="send-button" disabled={disabled || sending} onClick={onSend} title="发送"><Icon name="send"/></button>
+    </div>
+    {disabled && !value.trim() ? <p>AI 生成的内容可能不准确，请核实重要信息。</p> : null}
+    {disabled && value.trim() ? <button className="key-hint" onClick={onOpenSettings}>配置 API Key 后即可发送</button> : null}
+  </div>;
 }
+
+function EmptyConversation({ onNew }: { onNew(): void }) {
+  return <div className="standalone-empty"><h1>开始一段新对话</h1><button onClick={onNew}><Icon name="new"/>新建 Chat</button></div>;
+}
+
+function NewConversationDialog({ busy, onClose, onCreate }: { busy: boolean; onClose(): void; onCreate(): void }) {
+  return <Modal onClose={onClose} width="500px"><div className="dialog-heading"><div><h2>开始新对话</h2><p>选择这次对话使用的模式</p></div><button className="icon-button" onClick={onClose}><Icon name="close"/></button></div>
+    <div className="mode-selector"><button className="selected"><Icon name="chat"/><span><b>Chat</b><small>日常交流与联网搜索</small></span><Icon name="check"/></button><button disabled><Icon name="work"/><span><b>Work</b><small>完成本地工作任务</small></span><em>即将推出</em></button></div>
+    <button className="primary wide" disabled={busy} onClick={onCreate}>{busy ? '正在创建…' : '开始 Chat'}</button>
+  </Modal>;
+}
+
+function DevicePanel({ bootstrap, busy, run, onClose, onOpenConversation, onRefresh }: {
+  bootstrap: BootstrapState;
+  busy?: string;
+  run<T>(name: string, action: () => Promise<T>): Promise<T | undefined>;
+  onClose(): void;
+  onOpenConversation(id: string): void;
+  onRefresh(): void;
+}) {
+  const device = bootstrap.device;
+  const active = bootstrap.conversations.find(item => item.id === device.activeConversationId);
+  const connect = async (item: CatDevice) => { await run('device', () => invoke('devices.connect', { address: item.address, name: item.name })); onRefresh(); };
+  const follow = async () => { await run('device', () => invoke('devices.followDesktop')); onRefresh(); };
+  const forget = async () => { if (!window.confirm('忘记当前 AI 卡片并重新扫描？')) return; await run('device', () => invoke('devices.forget')); onRefresh(); };
+  return <div className="drawer-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}><aside className="device-panel">
+    <div className="panel-header"><button className="icon-button" onClick={onClose}><Icon name="back"/></button><div><h2>AI 卡片</h2><p>用于语音输入和随身查看回答</p></div></div>
+    <section className="device-hero"><div className={`device-visual ${device.isConnected ? 'online' : ''}`}><Icon name="device" size={28}/><span/></div><div><h3>{device.isConnected ? device.pairedDeviceName ?? 'AI 卡片' : device.hasPairedDevice ? '正在等待已绑定卡片' : '尚未连接卡片'}</h3><p>{device.isConnected ? '已连接，可以开始对话' : device.detail}</p></div></section>
+    {device.isConnected && <section className="panel-section"><label>卡片当前对话</label><div className="bound-conversation"><Icon name="chat"/><span><b>{active?.title ?? 'Chat 对话'}</b><small>{device.followDesktop ? '正在跟随电脑' : '卡片独立对话'}</small></span></div><div className="panel-actions">{active && <button onClick={() => onOpenConversation(active.id)}>打开对话</button>}<button className="primary" disabled={device.followDesktop || bootstrap.activeConversation?.conversation.mode !== 'chat' || busy === 'device'} onClick={() => void follow()}>跟随当前对话</button></div></section>}
+    {!device.isConnected && <section className="panel-section"><div className="section-title"><label>附近的设备</label><button onClick={() => void run('device', () => invoke('devices.scan')).then(onRefresh)}>重新扫描</button></div><div className="device-list">{device.devices.length ? device.devices.map(item => <button key={item.address} disabled={busy === 'device'} onClick={() => void connect(item)}><span><b>{item.name}</b><small>{item.addressText}</small></span><em>{item.rssi} dBm</em></button>) : <div className="device-empty">正在查找附近的 AI 卡片…</div>}</div></section>}
+    <details className="diagnostics"><summary>高级诊断</summary><dl><div><dt>状态</dt><dd>{device.status}</dd></div><div><dt>详情</dt><dd>{device.detail}</dd></div><div><dt>PDU</dt><dd>{device.maxPduSize || '—'}</dd></div></dl></details>
+    {device.hasPairedDevice && <button className="text-danger" onClick={() => void forget()}>忘记这张卡片</button>}
+  </aside></div>;
+}
+
+function SettingsDialog({ settings, busy, run, onClose, onSaved }: { settings: PublicSettings; busy: boolean; run<T>(name: string, action: () => Promise<T>): Promise<T | undefined>; onClose(): void; onSaved(): void }) {
+  const [apiKey, setApiKey] = useState('');
+  const [chatModel, setChatModel] = useState(settings.chatModel);
+  const [asrModel, setAsrModel] = useState(settings.asrModel);
+  const [screenTimeout, setScreenTimeout] = useState(settings.screenTimeoutSeconds);
+  const [autoReconnect, setAutoReconnect] = useState(settings.autoReconnect);
+  const [webSearch, setWebSearch] = useState(settings.webSearchEnabled);
+  const save = async () => {
+    const result = await run('settings', () => invoke('settings.save', { apiKey: apiKey || undefined, chatModel, asrModel, screenTimeoutSeconds: screenTimeout, autoReconnect, webSearchEnabled: webSearch }));
+    if (result !== undefined) { onSaved(); onClose(); }
+  };
+  return <Modal onClose={onClose} width="680px"><div className="dialog-heading"><div><h2>设置</h2><p>AI 服务、联网搜索与卡片偏好</p></div><button className="icon-button" onClick={onClose}><Icon name="close"/></button></div>
+    <div className="settings-grid">
+      <section><h3>AI 服务</h3><label><span>DashScope API Key <em>{settings.hasApiKey ? '已安全配置' : '尚未配置'}</em></span><input type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} placeholder={settings.hasApiKey ? '留空表示不更改' : '输入 API Key'} autoComplete="off"/></label><label><span>Chat 模型</span><input value={chatModel} onChange={event => setChatModel(event.target.value)}/></label><label className="toggle-row"><span><b>联网搜索</b><small>需要最新信息时允许 AI 自动搜索</small></span><input type="checkbox" checked={webSearch} onChange={event => setWebSearch(event.target.checked)}/></label></section>
+      <section><h3>AI 卡片</h3><label><span>语音识别模型</span><input value={asrModel} onChange={event => setAsrModel(event.target.value)}/></label><label><span>屏幕休眠时间（秒）</span><input type="number" min="0" max="86400" value={screenTimeout} onChange={event => setScreenTimeout(Math.max(0, Math.min(86400, Number(event.target.value))))}/></label><label className="toggle-row"><span><b>自动重连</b><small>启动后连接已绑定的卡片</small></span><input type="checkbox" checked={autoReconnect} onChange={event => setAutoReconnect(event.target.checked)}/></label></section>
+    </div>
+    <div className="dialog-footer"><span>API Key 使用 Windows DPAPI 加密保存在本机。</span><button className="primary" disabled={busy} onClick={() => void save()}>{busy ? '保存中…' : '保存设置'}</button></div>
+  </Modal>;
+}
+
+function Modal({ children, onClose, width }: { children: React.ReactNode; onClose(): void; width: string }) {
+  return <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}><section className="modal" style={{ width }}>{children}</section></div>;
+}
+
+function Loading({ error }: { error?: string }) {
+  return <div className="loading-screen"><div className="brand-mark large"><span>CA</span></div><h1>Cat Assistant</h1><p>{error ?? '正在准备桌面 AI…'}</p></div>;
+}
+
+function groupConversations(items: ConversationSummary[]) {
+  const result = new Map<string, ConversationSummary[]>();
+  const now = new Date();
+  const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  for (const item of items) {
+    const updated = new Date(item.updatedAt).getTime();
+    const age = startToday - updated;
+    const label = updated >= startToday ? '今天' : age < 2 * 86400000 ? '昨天' : age < 7 * 86400000 ? '最近 7 天' : '更早';
+    result.set(label, [...(result.get(label) ?? []), item]);
+  }
+  return [...result].map(([label, groupItems]) => ({ label, items: groupItems }));
+}
+
+function errorText(reason: unknown) { return reason instanceof Error ? reason.message : String(reason); }
 
 createRoot(document.getElementById('root')!).render(<React.StrictMode><App/></React.StrictMode>);
