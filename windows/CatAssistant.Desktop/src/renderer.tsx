@@ -10,7 +10,7 @@ import type {
   ConversationSummary,
   PublicSettings
 } from './shared';
-import { initialState, reduceBackendEvent } from './state';
+import { deviceDiscoveryMessage, initialState, reduceBackendEvent } from './state';
 import './styles.css';
 
 type IconName = 'new' | 'search' | 'chat' | 'work' | 'device' | 'settings' | 'menu' | 'send' | 'copy' | 'close' | 'sidebar' | 'check' | 'back';
@@ -277,7 +277,7 @@ function DevicePanel({ bootstrap, busy, run, onClose, onOpenConversation, onRefr
     <div className="panel-header"><button className="icon-button" onClick={onClose}><Icon name="back"/></button><div><h2>AI 卡片</h2><p>用于语音输入和随身查看回答</p></div></div>
     <section className="device-hero"><div className={`device-visual ${device.isConnected ? 'online' : ''}`}><Icon name="device" size={28}/><span/></div><div><h3>{device.isConnected ? device.pairedDeviceName ?? 'AI 卡片' : device.hasPairedDevice ? '正在等待已绑定卡片' : '尚未连接卡片'}</h3><p>{device.isConnected ? '已连接，可以开始对话' : device.detail}</p></div></section>
     {device.isConnected && <section className="panel-section"><label>卡片当前对话</label><div className="bound-conversation"><Icon name="chat"/><span><b>{active?.title ?? 'Chat 对话'}</b><small>{device.followDesktop ? '正在跟随电脑' : '卡片独立对话'}</small></span></div><div className="panel-actions">{active && <button onClick={() => onOpenConversation(active.id)}>打开对话</button>}<button className="primary" disabled={device.followDesktop || bootstrap.activeConversation?.conversation.mode !== 'chat' || busy === 'device'} onClick={() => void follow()}>跟随当前对话</button></div></section>}
-    {!device.isConnected && <section className="panel-section"><div className="section-title"><label>附近的设备</label><button onClick={() => void run('device', () => invoke('devices.scan')).then(onRefresh)}>重新扫描</button></div><div className="device-list">{device.devices.length ? device.devices.map(item => <button key={item.address} disabled={busy === 'device'} onClick={() => void connect(item)}><span><b>{item.name}</b><small>{item.addressText}</small></span><em>{item.rssi} dBm</em></button>) : <div className="device-empty">正在查找附近的 AI 卡片…</div>}</div></section>}
+    {!device.isConnected && <section className="panel-section"><div className="section-title"><label>附近的设备</label><button onClick={() => void run('device', () => invoke('devices.scan')).then(onRefresh)}>重新扫描</button></div><div className="device-list">{device.devices.length ? device.devices.map(item => <button key={item.address} disabled={busy === 'device'} onClick={() => void connect(item)}><span><b>{item.name}</b><small>{item.addressText}</small></span><em>{item.rssi} dBm</em></button>) : <div className="device-empty">{deviceDiscoveryMessage(device)}</div>}</div></section>}
     <details className="diagnostics"><summary>高级诊断</summary><dl><div><dt>状态</dt><dd>{device.status}</dd></div><div><dt>详情</dt><dd>{device.detail}</dd></div><div><dt>PDU</dt><dd>{device.maxPduSize || '—'}</dd></div></dl></details>
     {device.hasPairedDevice && <button className="text-danger" onClick={() => void forget()}>忘记这张卡片</button>}
   </aside></div>;

@@ -6,6 +6,7 @@ using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.Advertisement;
 using Windows.Devices.Bluetooth.GenericAttributeProfile;
 using Windows.Devices.Enumeration;
+using Windows.Devices.Radios;
 using Windows.Storage.Streams;
 
 namespace CatAssistant.Backend.Services;
@@ -15,7 +16,7 @@ public sealed record CatDevice(ulong Address, string Name, short Rssi)
     public string AddressText => string.Join(":", Enumerable.Range(0, 6).Reverse().Select(i => ((Address >> (i * 8)) & 0xFF).ToString("X2")));
 }
 
-public enum LinkError { BluetoothUnavailable, DeviceUnavailable, Pairing, Encryption, ServiceMissing, CharacteristicMissing, Subscription, MtuTooSmall, Handshake, BoundDeviceMismatch, Disconnected, Write }
+public enum LinkError { BluetoothUnavailable, BluetoothDisabled, DeviceUnavailable, Pairing, Encryption, ServiceMissing, CharacteristicMissing, Subscription, MtuTooSmall, Handshake, BoundDeviceMismatch, Disconnected, Write }
 public sealed class LinkException(LinkError kind, string message) : Exception(message) { public LinkError Kind { get; } = kind; }
 
 public sealed class BleGateway : IAsyncDisposable
@@ -51,8 +52,7 @@ public sealed class BleGateway : IAsyncDisposable
 
     public async Task StartScanAsync()
     {
-        var radio = await BluetoothAdapter.GetDefaultAsync();
-        if (radio is null || !radio.IsLowEnergySupported) throw new LinkException(LinkError.BluetoothUnavailable, "此电脑没有可用的 Bluetooth LE 适配器。");
+        await GetReadyAdapterAsync();
         StopScan();
         _watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
         _watcher.AdvertisementFilter.Advertisement.ServiceUuids.Add(ServiceUuid);
@@ -69,7 +69,14 @@ public sealed class BleGateway : IAsyncDisposable
     }
 
     private void OnWatcherStopped(BluetoothLEAdvertisementWatcher sender, BluetoothLEAdvertisementWatcherStoppedEventArgs args)
-        => LinkStateChanged?.Invoke(this, args.Error == BluetoothError.Success ? "扫描已停止" : $"蓝牙扫描错误：{args.Error}");
+        => LinkStateChanged?.Invoke(this, ScanStoppedMessage(args.Error));
+
+    internal static string ScanStoppedMessage(BluetoothError error) => error switch
+    {
+        BluetoothError.Success => "扫描已停止",
+        BluetoothError.RadioNotAvailable => "Windows 蓝牙已关闭；请先在系统设置中打开蓝牙，然后重新扫描。",
+        _ => $"蓝牙扫描错误：{error}",
+    };
 
     private void OnAdvertisement(BluetoothLEAdvertisementWatcher sender, BluetoothLEAdvertisementReceivedEventArgs args)
     {
@@ -79,6 +86,7 @@ public sealed class BleGateway : IAsyncDisposable
 
     public async Task ConnectAsync(CatDevice selected, CancellationToken token)
     {
+        await GetReadyAdapterAsync();
         await DisconnectAsync(); StopScan();
         for (var setupAttempt = 1; setupAttempt <= ConnectionSetupAttempts; setupAttempt++)
         {
@@ -111,6 +119,31 @@ public sealed class BleGateway : IAsyncDisposable
 
         throw new LinkException(LinkError.DeviceUnavailable, "Windows 蓝牙连接多次初始化失败。");
     }
+
+    private static async Task<BluetoothAdapter> GetReadyAdapterAsync()
+    {
+        var adapter = await BluetoothAdapter.GetDefaultAsync();
+        if (adapter is null || !adapter.IsLowEnergySupported)
+            throw new LinkException(LinkError.BluetoothUnavailable, "此电脑没有可用的 Bluetooth LE 适配器。");
+
+        var radio = await adapter.GetRadioAsync();
+        if (RadioStateError(radio.State) is { } error) throw error;
+        return adapter;
+    }
+
+    internal static LinkException? RadioStateError(RadioState state) => state switch
+    {
+        RadioState.On => null,
+        RadioState.Off => new LinkException(
+            LinkError.BluetoothDisabled,
+            "Windows 蓝牙已关闭；请先在系统设置中打开蓝牙，然后重新扫描。"),
+        RadioState.Disabled => new LinkException(
+            LinkError.BluetoothUnavailable,
+            "Windows 蓝牙已被系统策略禁用；请先启用蓝牙，然后重新扫描。"),
+        _ => new LinkException(
+            LinkError.BluetoothUnavailable,
+            "无法确认 Windows 蓝牙状态；请检查蓝牙适配器后重新扫描。"),
+    };
 
     private async Task ConnectAttemptAsync(CatDevice selected, CancellationToken token)
     {

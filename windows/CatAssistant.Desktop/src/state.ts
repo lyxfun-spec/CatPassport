@@ -15,6 +15,15 @@ export type UiAction =
 
 export const initialState: UiState = {};
 
+export function deviceDiscoveryMessage(device: DeviceState): string {
+  const scanFailed = device.status.startsWith('蓝牙错误')
+    || device.detail.startsWith('Windows 蓝牙已关闭')
+    || device.detail.startsWith('蓝牙扫描错误');
+  return scanFailed && device.detail
+    ? device.detail
+    : '正在查找附近的 AI 卡片…';
+}
+
 export function reduceBackendEvent(state: UiState, action: UiAction): UiState {
   if (action.event === 'backend.ready' || action.event === 'ui.bootstrap') {
     const bootstrap = action.event === 'backend.ready' ? action.data.state : action.data;
