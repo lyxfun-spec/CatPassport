@@ -70,6 +70,22 @@ public sealed class ConversationServiceTests
         Assert.True(fixture.Service.DeviceFollowDesktop);
     }
 
+    [Fact]
+    public async Task StartCreatesConversationAndSendsFirstMessage()
+    {
+        await using var fixture = await ConversationFixture.CreateAsync();
+        var seed = fixture.Service.DesktopActiveConversationId!;
+
+        var detail = await fixture.Service.StartAsync("chat", "你好世界", "desktop");
+        await fixture.Provider.WaitForCallsAsync(1);
+
+        Assert.NotEqual(seed, detail.Conversation.Id);
+        Assert.Equal(detail.Conversation.Id, fixture.Service.DesktopActiveConversationId);
+        Assert.Equal("chat", detail.Conversation.Mode);
+        Assert.Contains(detail.Messages, message => message.Role == "user" && message.Content == "你好世界");
+        Assert.NotEqual("fallback", detail.Conversation.TitleSource);
+    }
+
     private sealed class ConversationFixture : IAsyncDisposable
     {
         private ConversationFixture(string path, ControlledProvider provider, ConversationService service)

@@ -47,6 +47,11 @@ internal static class Program
             case "conversations.get": return await coordinator.Conversations.GetAsync(Required<string>(request.Params, "id"));
             case "conversations.create":
                 return await coordinator.Conversations.CreateAsync(Optional<string>(request.Params, "mode") ?? "chat");
+            case "conversations.start":
+                return await coordinator.Conversations.StartAsync(
+                    Optional<string>(request.Params, "mode") ?? "chat",
+                    Required<string>(request.Params, "text"),
+                    "desktop");
             case "conversations.rename":
                 await coordinator.Conversations.RenameAsync(Required<string>(request.Params, "id"), Required<string>(request.Params, "title"));
                 return await coordinator.Conversations.GetAsync(Required<string>(request.Params, "id"));

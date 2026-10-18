@@ -7,7 +7,7 @@ declare const MAIN_WINDOW_VITE_NAME: string;
 
 const allowedMethods = new Set([
   'app.bootstrap', 'state.get',
-  'conversations.list', 'conversations.get', 'conversations.create', 'conversations.rename',
+  'conversations.list', 'conversations.get', 'conversations.create', 'conversations.start', 'conversations.rename',
   'conversations.delete', 'conversations.activate', 'conversations.send', 'conversations.cancel',
   'devices.scan', 'devices.connect', 'devices.forget', 'devices.followDesktop',
   'conversation.new', 'conversation.cancel', 'conversation.send', 'settings.save'

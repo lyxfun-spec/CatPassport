@@ -88,6 +88,12 @@ public sealed class ConversationService : IAsyncDisposable
         return created;
     }
 
+    public async Task<ConversationDetail> StartAsync(string mode, string text, string source)
+    {
+        var created = await CreateAsync(mode, activateDesktop: true);
+        return await SendAsync(created.Id, text, source);
+    }
+
     public async Task<ConversationSummary> CreateForDeviceAsync()
     {
         var created = await _repository.CreateConversationAsync("chat");

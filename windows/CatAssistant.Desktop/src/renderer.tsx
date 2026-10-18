@@ -41,7 +41,7 @@ function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
 }
 function invoke<T>(method: string, params?: Record<string, unknown>) { return window.catAssistant.invoke<T>(method, params); }
 interface NoticeState { id: number; text: string; tone?: 'default' | 'danger' }
-type AppView = 'conversation' | 'settings';
+type AppView = 'conversation' | 'compose' | 'settings';
 type ActionSurface = { kind: 'rename' | 'delete'; anchor: AnchorRect } | undefined;
 
 function useViewTransition(target: AppView) {
@@ -68,7 +68,7 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [requestedView, setRequestedView] = useState<AppView>('conversation');
   const { displayed: displayedView, phase: viewPhase } = useViewTransition(requestedView);
-  const [newDialog, setNewDialog] = useState<{ open: boolean; anchor?: AnchorRect }>({ open: false });
+  const [draftMode, setDraftMode] = useState<'chat' | 'work'>('chat');
   const [actionSurface, setActionSurface] = useState<ActionSurface>();
   const [deviceOpen, setDeviceOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -123,17 +123,23 @@ function App() {
     setRequestedView('conversation');
     void refresh().catch(reason => setLocalError(errorText(reason)));
   };
-  const createConversation = async (mode: 'chat' | 'work') => {
-    const created = await run('create', () => invoke<ConversationSummary>('conversations.create', { mode }));
-    if (!created) return;
-    setNewDialog(current => ({ ...current, open: false }));
-    await refresh();
-    setRequestedView('conversation');
+  const startCompose = () => {
+    setDraftMode('chat');
+    setRequestedView('compose');
     setComposerFocusSignal(value => value + 1);
   };
   const send = async () => {
     const text = draft.trim();
-    if (!text || !active || isBusy('send')) return;
+    if (!text || isBusy('send')) return;
+    if (requestedView === 'compose') {
+      if (draftMode !== 'chat') return;
+      setDraft('');
+      const detail = await run('send', () => invoke<ConversationDetail>('conversations.start', { mode: draftMode, text }));
+      if (detail) { dispatch({ event: 'ui.conversation', data: detail }); setRequestedView('conversation'); }
+      else setDraft(text);
+      return;
+    }
+    if (!active) return;
     setDraft('');
     const detail = await run('send', () => invoke<ConversationDetail>('conversations.send', { id: active.conversation.id, text }));
     if (detail) dispatch({ event: 'ui.conversation', data: detail });
@@ -167,8 +173,9 @@ function App() {
   return <>
     <div className={`app-frame ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
       <Sidebar bootstrap={bootstrap} query={query} onQuery={setQuery} collapsed={sidebarCollapsed}
-        onToggle={() => setSidebarCollapsed(value => !value)} onNew={anchor => setNewDialog({ open: true, anchor })}
+        onToggle={() => setSidebarCollapsed(value => !value)} onNew={startCompose}
         onSelect={id => void selectConversation(id)} onDevice={() => setDeviceOpen(true)}
+        composeActive={requestedView === 'compose'}
         settingsActive={requestedView === 'settings'} onSettings={() => setRequestedView('settings')}/>
       <main className={`content-pane view-${displayedView} view-phase-${viewPhase}`}>
         {(localError || state.backendError) && <GlobalAlert
@@ -177,13 +184,12 @@ function App() {
         }
         {displayedView === 'settings'
           ? <SettingsPage settings={bootstrap.settings} onboarding={!bootstrap.settings.hasApiKey} busy={isBusy('settings')} onBack={() => setRequestedView('conversation')} onSave={saveSettings}/>
-          : active
-            ? <><ConversationHeader conversation={active.conversation} onAction={(kind, anchor) => setActionSurface({ kind, anchor })}/><MessageList detail={active} runError={state.runError}/><Composer value={draft} onChange={setDraft} onSend={() => void send()} hasApiKey={bootstrap.settings.hasApiKey} sending={isBusy('send')} focusSignal={composerFocusSignal} onOpenSettings={() => setRequestedView('settings')}/></>
-            : <EmptyConversation onNew={anchor => setNewDialog({ open: true, anchor })}/>
+          : displayedView === 'compose' || !active
+            ? <DraftConversation mode={draftMode} onMode={setDraftMode} value={draft} onChange={setDraft} onSend={() => void send()} hasApiKey={bootstrap.settings.hasApiKey} sending={isBusy('send')} focusSignal={composerFocusSignal} onOpenSettings={() => setRequestedView('settings')}/>
+            : <><ConversationHeader conversation={active.conversation} onAction={(kind, anchor) => setActionSurface({ kind, anchor })}/><MessageList detail={active} runError={state.runError}/><Composer value={draft} onChange={setDraft} onSend={() => void send()} hasApiKey={bootstrap.settings.hasApiKey} sending={isBusy('send')} focusSignal={composerFocusSignal} onOpenSettings={() => setRequestedView('settings')}/></>
         }
       </main>
     </div>
-    <NewConversationDialog open={newDialog.open} anchor={newDialog.anchor} busy={isBusy('create')} onClose={() => setNewDialog(current => ({ ...current, open: false }))} onCreate={mode => void createConversation(mode)}/>
     <RenameDialog open={actionSurface?.kind === 'rename'} anchor={actionSurface?.anchor} conversation={active?.conversation} busy={isBusy('rename')} onClose={() => setActionSurface(undefined)} onRename={title => void rename(title)}/>
     <DeleteDialog open={actionSurface?.kind === 'delete'} anchor={actionSurface?.anchor} conversation={active?.conversation} busy={isBusy('delete')} onClose={() => setActionSurface(undefined)} onConfirm={() => void remove()}/>
     <DevicePanel open={deviceOpen} bootstrap={bootstrap} busy={isBusy('device')} run={run} onClose={() => setDeviceOpen(false)} onOpenConversation={id => { setDeviceOpen(false); void selectConversation(id); }} onRefresh={() => void refresh()} onNotice={showNotice}/>
@@ -195,19 +201,19 @@ function BrandMark({ large = false }: { large?: boolean }) {
   return <span className={`brand-mark ${large ? 'large' : ''}`} aria-hidden="true"><Icon name="cat" size={large ? 28 : 21}/></span>;
 }
 
-function Sidebar({ bootstrap, query, onQuery, collapsed, onToggle, onNew, onSelect, onDevice, settingsActive, onSettings }: {
+function Sidebar({ bootstrap, query, onQuery, collapsed, onToggle, onNew, onSelect, onDevice, composeActive, settingsActive, onSettings }: {
   bootstrap: BootstrapState; query: string; onQuery(value: string): void; collapsed: boolean; onToggle(): void;
-  onNew(anchor: AnchorRect): void; onSelect(id: string): void; onDevice(): void; settingsActive: boolean; onSettings(): void;
+  onNew(): void; onSelect(id: string): void; onDevice(): void; composeActive: boolean; settingsActive: boolean; onSettings(): void;
 }) {
   const filtered = useMemo(() => bootstrap.conversations.filter(item => item.title.toLocaleLowerCase().includes(query.toLocaleLowerCase())), [bootstrap.conversations, query]);
   const groups = groupConversations(filtered);
   const activeDeviceConversation = bootstrap.conversations.find(item => item.id === bootstrap.device.activeConversationId);
   return <aside className="sidebar" aria-label="会话导航">
     <div className="brand-row"><BrandMark/><strong className="brand-name">小猫助手</strong><button className="icon-button sidebar-toggle" onClick={onToggle} aria-label={collapsed ? '展开侧边栏' : '收起侧边栏'}><Icon name="sidebar"/></button></div>
-    <button className="new-conversation" onClick={event => onNew(rectOf(event.currentTarget))} aria-label="新建对话"><Icon name="new"/><span>新对话</span></button>
+    <button className={`new-conversation ${composeActive ? 'active' : ''}`} onClick={onNew} aria-label="新建对话" aria-current={composeActive ? 'true' : undefined}><Icon name="new"/><span>新对话</span></button>
     {!collapsed && <label className="search-box"><Icon name="search"/><input value={query} onChange={event => onQuery(event.target.value)} placeholder="搜索对话" aria-label="搜索对话"/></label>}
     <ScrollArea className="conversation-scroll" viewportClassName="conversation-list">
-      {groups.map(group => <section className="conversation-group" key={group.label} aria-label={group.label}><h2>{group.label}</h2>{group.items.map(item => <button key={item.id} className={`conversation-item ${!settingsActive && bootstrap.activeConversationId === item.id ? 'active' : ''}`} onClick={() => onSelect(item.id)} aria-current={!settingsActive && bootstrap.activeConversationId === item.id ? 'page' : undefined} title={item.title}><Icon name="chat" size={16}/><span>{item.title}</span></button>)}</section>)}
+      {groups.map(group => <section className="conversation-group" key={group.label} aria-label={group.label}><h2>{group.label}</h2>{group.items.map(item => <button key={item.id} className={`conversation-item ${!settingsActive && !composeActive && bootstrap.activeConversationId === item.id ? 'active' : ''}`} onClick={() => onSelect(item.id)} aria-current={!settingsActive && !composeActive && bootstrap.activeConversationId === item.id ? 'page' : undefined} title={item.title}><Icon name="chat" size={16}/><span>{item.title}</span></button>)}</section>)}
       {filtered.length === 0 && <div className="no-results">{query ? '没有匹配的对话' : '还没有对话'}</div>}
     </ScrollArea>
     <div className="sidebar-footer">
@@ -287,13 +293,13 @@ function MessageItem({ message, citations }: { message: ConversationMessage; cit
   return <article className={`message ${message.role} ${message.status}`}><div className="message-body">{message.role === 'assistant' ? <ReactMarkdown components={{ a: ({ href, children }) => safeHttpUrl(href) ? <a href={href} target="_blank" rel="noreferrer">{children}</a> : <span>{children}</span> }}>{message.content}</ReactMarkdown> : <p>{message.content}</p>}</div>{safeCitations.length > 0 && <div className="sources"><span>参考</span>{safeCitations.map(citation => <a key={citation.id} href={citation.url} target="_blank" rel="noreferrer"><b>{citation.ordinal}</b><span>{citation.title}</span></a>)}</div>}{message.role === 'assistant' && message.content && <div className="message-actions">{message.status === 'interrupted' && <span>已中断</span>}{message.status === 'failed' && <span className="failed-label">生成失败</span>}<button onClick={() => void copy()} aria-label="复制回复"><Icon name={copyState === 'copied' ? 'check' : 'copy'} size={15}/>{copyState === 'copied' ? '已复制' : copyState === 'failed' ? '复制失败' : '复制'}</button></div>}</article>;
 }
 
-function Composer({ value, onChange, onSend, hasApiKey, sending, focusSignal, onOpenSettings }: { value: string; onChange(value: string): void; onSend(): void; hasApiKey: boolean; sending: boolean; focusSignal: number; onOpenSettings(): void }) {
+function Composer({ value, onChange, onSend, hasApiKey, sending, disabled = false, focusSignal, onOpenSettings }: { value: string; onChange(value: string): void; onSend(): void; hasApiKey: boolean; sending: boolean; disabled?: boolean; focusSignal: number; onOpenSettings(): void }) {
   const textarea = useRef<HTMLTextAreaElement>(null);
   const rail = useRef<HTMLDivElement>(null);
   const [scrollActive, setScrollActive] = useState(false);
   const [thumb, setThumb] = useState({ visible: false, size: 0, offset: 0 });
   const hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const canSend = hasApiKey && Boolean(value.trim()) && !sending;
+  const canSend = hasApiKey && Boolean(value.trim()) && !sending && !disabled;
   const updateThumb = () => { const element = textarea.current, track = rail.current; if (element && track) setThumb(scrollThumbMetrics(element.scrollHeight, element.clientHeight, element.scrollTop, track.clientHeight, 18)); };
   const revealThumb = () => { setScrollActive(true); clearTimeout(hideTimer.current); hideTimer.current = setTimeout(() => setScrollActive(false), 820); };
   useEffect(() => { const element = textarea.current; if (!element) return; element.style.height = '0px'; element.style.height = `${clampTextareaHeight(element.scrollHeight)}px`; element.style.overflowY = element.scrollHeight > 152 ? 'auto' : 'hidden'; requestAnimationFrame(updateThumb); }, [value]);
@@ -302,23 +308,24 @@ function Composer({ value, onChange, onSend, hasApiKey, sending, focusSignal, on
   return <div className="composer-wrap"><div className="composer"><div className={`composer-editor ${scrollActive ? 'scroll-active' : ''}`}><textarea ref={textarea} value={value} rows={1} placeholder="输入消息" aria-label="输入消息" onScroll={() => { updateThumb(); revealThumb(); }} onChange={event => onChange(event.target.value)} onKeyDown={event => { if (shouldSubmitComposer(event.key, event.shiftKey, event.nativeEvent.isComposing)) { event.preventDefault(); if (canSend) onSend(); } }}/><div ref={rail} className={`textarea-rail ${thumb.visible ? 'has-overflow' : ''}`} aria-hidden="true"><i style={{ height: thumb.size, transform: `translateY(${thumb.offset}px)` }}/></div></div><button className={`send-button ${canSend ? 'ready' : ''}`} disabled={!canSend} onClick={onSend} aria-label={sending ? '正在发送' : '发送消息'}><Icon name="send"/></button></div>{!hasApiKey && value.trim() ? <button className="key-hint" onClick={onOpenSettings}><Icon name="key" size={14}/>配置 API Key 后即可发送</button> : <p>AI 生成的内容可能不准确，请核实重要信息。</p>}</div>;
 }
 
-function EmptyConversation({ onNew }: { onNew(anchor: AnchorRect): void }) {
-  return <div className="standalone-empty"><BrandMark large/><h1>{greetingForHour(new Date().getHours())}</h1><button className="quiet-action" onClick={event => onNew(rectOf(event.currentTarget))}><Icon name="new"/>开始新对话</button></div>;
-}
-function NewConversationDialog({ open, anchor, busy, onClose, onCreate }: { open: boolean; anchor?: AnchorRect; busy: boolean; onClose(): void; onCreate(mode: 'chat' | 'work'): void }) {
-  const [mode, setMode] = useState<'chat' | 'work'>('chat');
-  useEffect(() => { if (open) setMode('chat'); }, [open]);
+function DraftConversation({ mode, onMode, value, onChange, onSend, hasApiKey, sending, focusSignal, onOpenSettings }: {
+  mode: 'chat' | 'work'; onMode(mode: 'chat' | 'work'): void; value: string; onChange(value: string): void;
+  onSend(): void; hasApiKey: boolean; sending: boolean; focusSignal: number; onOpenSettings(): void;
+}) {
   const workSelected = mode === 'work';
-  return <AnchoredSurface open={open} anchor={anchor} onClose={onClose} titleId="new-conversation-title" className="compact-dialog new-dialog">
-    <div className="surface-heading"><div><h2 id="new-conversation-title">开始新对话</h2><p>选择这次对话使用的模式。</p></div><button className="icon-button" onClick={onClose} aria-label="关闭"><Icon name="close"/></button></div>
-    <div className={`mode-selector mode-${mode}`} role="group" aria-label="对话模式">
-      <span className="mode-slider" aria-hidden="true"/>
-      <button type="button" className={mode === 'chat' ? 'selected' : ''} onClick={() => setMode('chat')} aria-pressed={mode === 'chat'}><Icon name="chat"/><span><b>Chat</b><small>日常对话</small></span></button>
-      <button type="button" className={mode === 'work' ? 'selected' : ''} onClick={() => setMode('work')} aria-pressed={mode === 'work'}><Icon name="work"/><span><b>Work</b><small>本地任务</small></span></button>
+  return <div className="draft-conversation">
+    <div className="draft-hero">
+      <BrandMark large/>
+      <h1>{greetingForHour(new Date().getHours())}</h1>
+      <div className={`mode-selector mode-${mode}`} role="group" aria-label="对话模式">
+        <span className="mode-slider" aria-hidden="true"/>
+        <button type="button" className={mode === 'chat' ? 'selected' : ''} onClick={() => onMode('chat')} aria-pressed={mode === 'chat'}><Icon name="chat"/><span><b>Chat</b><small>日常对话</small></span></button>
+        <button type="button" className={mode === 'work' ? 'selected' : ''} onClick={() => onMode('work')} aria-pressed={mode === 'work'}><Icon name="work"/><span><b>Work</b><small>本地任务</small></span></button>
+      </div>
+      <p className="mode-note">{workSelected ? 'Work 模式即将推出。' : '适合问答、写作和日常交流。'}</p>
     </div>
-    <p className="mode-note">{workSelected ? 'Work 模式即将推出。' : '适合问答、写作和日常交流。'}</p>
-    <button className="primary-button wide" data-autofocus disabled={busy || workSelected} onClick={() => onCreate(mode)}>{busy ? '正在创建…' : workSelected ? '即将推出' : '开始 Chat'}</button>
-  </AnchoredSurface>;
+    <Composer value={value} onChange={onChange} onSend={onSend} hasApiKey={hasApiKey} sending={sending} disabled={workSelected} focusSignal={focusSignal} onOpenSettings={onOpenSettings}/>
+  </div>;
 }
 function RenameDialog({ open, anchor, conversation, busy, onClose, onRename }: { open: boolean; anchor?: AnchorRect; conversation?: ConversationSummary; busy: boolean; onClose(): void; onRename(title: string): void }) {
   const [title, setTitle] = useState('');
