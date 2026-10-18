@@ -21,6 +21,7 @@ public sealed class ConversationService : IAsyncDisposable
     private readonly Func<AppSettings> _settings;
     private readonly Func<string> _apiKey;
     private readonly CancellationToken _lifetime;
+    private readonly WorkWorkspaceService _workspaces;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new();
     private readonly ConcurrentDictionary<string, ActiveRun> _runs = new();
     private readonly object _stateLock = new();
@@ -33,13 +34,15 @@ public sealed class ConversationService : IAsyncDisposable
         IChatProvider provider,
         Func<AppSettings> settings,
         Func<string> apiKey,
-        CancellationToken lifetime)
+        CancellationToken lifetime,
+        WorkWorkspaceService? workspaces = null)
     {
         _repository = repository;
         _provider = provider;
         _settings = settings;
         _apiKey = apiKey;
         _lifetime = lifetime;
+        _workspaces = workspaces ?? new WorkWorkspaceService();
     }
 
     public event EventHandler<ConversationEvent>? Changed;
@@ -51,6 +54,8 @@ public sealed class ConversationService : IAsyncDisposable
     public async Task InitializeAsync()
     {
         var conversations = await _repository.ListConversationsAsync();
+        foreach (var workConversation in conversations.Where(item => item.Mode == "work"))
+            await _workspaces.EnsureAsync(workConversation.Id, _lifetime);
         if (conversations.Count == 0)
         {
             var created = await _repository.CreateConversationAsync();
@@ -81,8 +86,9 @@ public sealed class ConversationService : IAsyncDisposable
 
     public async Task<ConversationSummary> CreateAsync(string mode = "chat", bool activateDesktop = true)
     {
-        if (mode == "work") throw new InvalidOperationException("Work 模式即将推出。");
+        if (mode is not ("chat" or "work")) throw new ArgumentOutOfRangeException(nameof(mode));
         var created = await _repository.CreateConversationAsync(mode);
+        if (mode == "work") await _workspaces.EnsureAsync(created.Id, _lifetime);
         if (activateDesktop) await ActivateDesktopAsync(created.Id);
         Publish(new ConversationEvent("conversation.created", created.Id, Conversation: created));
         return created;
@@ -90,8 +96,22 @@ public sealed class ConversationService : IAsyncDisposable
 
     public async Task<ConversationDetail> StartAsync(string mode, string text, string source)
     {
+        if (mode == "work") throw new InvalidOperationException("Work Runtime 尚未启用。");
         var created = await CreateAsync(mode, activateDesktop: true);
         return await SendAsync(created.Id, text, source);
+    }
+
+    public async Task<WorkWorkspacePaths> GetWorkWorkspaceAsync(string conversationId)
+    {
+        var conversation = await _repository.GetConversationAsync(conversationId) ?? throw new KeyNotFoundException("对话不存在。");
+        if (conversation.Mode != "work") throw new InvalidOperationException("Chat 对话没有 Work 工作区。");
+        return await _workspaces.EnsureAsync(conversationId, _lifetime);
+    }
+
+    public async Task<string> CopyWorkInputAsync(string conversationId, string sourcePath)
+    {
+        await GetWorkWorkspaceAsync(conversationId);
+        return await _workspaces.CopyInputAsync(conversationId, sourcePath, _lifetime);
     }
 
     public async Task<ConversationSummary> CreateForDeviceAsync()
@@ -387,5 +407,6 @@ public sealed class ConversationService : IAsyncDisposable
         _runs.Clear();
         foreach (var gate in _gates.Values) gate.Dispose();
         _gates.Clear();
+        _workspaces.Dispose();
     }
 }

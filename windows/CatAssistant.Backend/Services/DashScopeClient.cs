@@ -5,10 +5,11 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using CatAssistant.Backend.Models;
+using CatAssistant.Backend.Services.Work;
 
 namespace CatAssistant.Backend.Services;
 
-public sealed class DashScopeClient : IChatProvider, IDisposable
+public sealed class DashScopeClient : IChatProvider, IWorkModelProvider, IDisposable
 {
     private const string AsrUrl = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation";
     private const string ChatUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
@@ -139,6 +140,123 @@ public sealed class DashScopeClient : IChatProvider, IDisposable
             choices[0].TryGetProperty("message", out var message) && message.TryGetProperty("content", out var content) &&
             !string.IsNullOrWhiteSpace(content.GetString())) return content.GetString()!;
         throw new CloudException(CloudError.Service, "DashScope 未返回对话标题。");
+    }
+
+    public async Task<WorkModelResponse> CompleteAsync(
+        IReadOnlyList<WorkContextItem> context,
+        IReadOnlyList<WorkToolDefinition> tools,
+        string model,
+        string apiKey,
+        CancellationToken cancellationToken)
+    {
+        EnsureKey(apiKey);
+        using var request = CreateRequest(ChatUrl, apiKey);
+        request.Content = JsonContent.Create(new
+        {
+            model,
+            messages = BuildWorkMessages(context),
+            tools = tools.Select(tool => new
+            {
+                type = "function",
+                function = new
+                {
+                    name = tool.Name,
+                    description = tool.Description,
+                    parameters = ParseJsonValue(tool.ParametersJson)
+                }
+            }).ToArray(),
+            tool_choice = "auto",
+            parallel_tool_calls = true,
+            stream = false
+        }, options: RequestJsonOptions);
+        using var response = await _http.SendAsync(request, cancellationToken);
+        EnsureSuccess(response, isAsrRequest: false);
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(cancellationToken));
+        return ParseWorkResponse(json.RootElement);
+    }
+
+    internal static IReadOnlyList<object> BuildWorkMessages(IReadOnlyList<WorkContextItem> context)
+    {
+        var messages = new List<object>
+        {
+            new
+            {
+                role = "system",
+                content = "你是小猫助手的 Work Agent。根据用户要求自主选择步骤和工具，只陈述真实完成的操作。工具失败时根据真实结果调整，不得声称获得未批准的权限，也不得把文本或任意 JSON 冒充工具调用。"
+            }
+        };
+        foreach (var item in context)
+        {
+            if (item.Kind == "message" && item.Role is "user" or "assistant" or "system")
+            {
+                messages.Add(new { role = item.Role, content = ReadContextContent(item.PayloadJson) });
+                continue;
+            }
+            if (item.Kind == "tool_call")
+            {
+                using var payload = JsonDocument.Parse(item.PayloadJson);
+                var root = payload.RootElement;
+                var content = root.TryGetProperty("content", out var contentElement) && contentElement.ValueKind == JsonValueKind.String
+                    ? contentElement.GetString()
+                    : null;
+                var calls = new List<object>();
+                if (root.TryGetProperty("toolCalls", out var toolCalls) && toolCalls.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var call in toolCalls.EnumerateArray())
+                    {
+                        var id = ReadString(call, "ToolCallId") ?? ReadString(call, "toolCallId");
+                        var name = ReadString(call, "Name") ?? ReadString(call, "name");
+                        var arguments = ReadString(call, "ArgumentsJson") ?? ReadString(call, "argumentsJson") ?? "{}";
+                        if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(name)) continue;
+                        calls.Add(new { id, type = "function", function = new { name, arguments } });
+                    }
+                }
+                messages.Add(new { role = "assistant", content, tool_calls = calls });
+                continue;
+            }
+            if (item.Kind == "tool_result" && !string.IsNullOrWhiteSpace(item.ToolCallId))
+                messages.Add(new { role = "tool", tool_call_id = item.ToolCallId, content = item.PayloadJson });
+        }
+        return messages;
+    }
+
+    internal static WorkModelResponse ParseWorkResponse(JsonElement root)
+    {
+        if (!root.TryGetProperty("choices", out var choices) || choices.ValueKind != JsonValueKind.Array || choices.GetArrayLength() == 0 ||
+            !choices[0].TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object)
+            throw new CloudException(CloudError.Service, "DashScope 未返回有效的 Work 响应。");
+        var content = ReadString(message, "content");
+        var calls = new List<WorkModelToolCall>();
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        if (message.TryGetProperty("tool_calls", out var toolCalls) && toolCalls.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in toolCalls.EnumerateArray())
+            {
+                var id = ReadString(item, "id");
+                if (string.IsNullOrWhiteSpace(id) || !ids.Add(id) ||
+                    !item.TryGetProperty("function", out var function) || function.ValueKind != JsonValueKind.Object) continue;
+                var name = ReadString(function, "name");
+                if (string.IsNullOrWhiteSpace(name)) continue;
+                calls.Add(new WorkModelToolCall(id, name, ReadString(function, "arguments") ?? "{}"));
+            }
+        }
+        if (string.IsNullOrWhiteSpace(content) && calls.Count == 0)
+            throw new CloudException(CloudError.Service, "DashScope Work 响应没有正文或工具调用。");
+        return new WorkModelResponse(content, calls);
+    }
+
+    private static string ReadContextContent(string payloadJson)
+    {
+        using var payload = JsonDocument.Parse(payloadJson);
+        return payload.RootElement.TryGetProperty("content", out var content) && content.ValueKind == JsonValueKind.String
+            ? content.GetString() ?? ""
+            : payloadJson;
+    }
+
+    private static JsonElement ParseJsonValue(string value)
+    {
+        using var document = JsonDocument.Parse(value);
+        return document.RootElement.Clone();
     }
 
     private static string LimitForTitle(string value, int maximumLength) =>
