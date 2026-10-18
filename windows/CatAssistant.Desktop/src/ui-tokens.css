@@ -1,0 +1,55 @@
+/* Cat Assistant consumes the approved UI system v1.0.1 light-theme tokens. */
+:root {
+  --ui-background: #ffffff;
+  --ui-surface: #f4f6f8;
+  --ui-surface-alt: #eef2f5;
+  --ui-text: #252c36;
+  --ui-muted: #657080;
+  --ui-border: #e7ebef;
+  --ui-accent: #466987;
+  --ui-accent-hover: #395a77;
+  --ui-accent-soft: #eaf1f7;
+  --ui-on-accent: #ffffff;
+  --ui-danger: #a94f49;
+  --ui-danger-soft: #fbefee;
+  --ui-success: #4e7663;
+  --ui-shadow: 0 10px 30px #23334718;
+
+  --ui-space-4: 4px;
+  --ui-space-8: 8px;
+  --ui-space-12: 12px;
+  --ui-space-16: 16px;
+  --ui-space-20: 20px;
+  --ui-space-24: 24px;
+  --ui-space-28: 28px;
+  --ui-space-32: 32px;
+  --ui-space-40: 40px;
+
+  --ui-radius-control: 10px;
+  --ui-radius-composer: 14px;
+  --ui-radius-dialog: 16px;
+  --ui-radius-sheet: 20px;
+  --ui-size-control: 40px;
+  --ui-size-touch: 44px;
+  --ui-size-icon: 18px;
+  --ui-size-textarea-min: 56px;
+
+  --ui-font-family: system-ui, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --ui-font-body: 14px;
+  --ui-font-meta: 12px;
+  --ui-font-heading: 18px;
+  --ui-font-page: 21px;
+  --ui-font-line: 1.65;
+  --ui-font-weight: 400;
+  --ui-font-weight-emphasis: 500;
+
+  --ui-motion-ease: cubic-bezier(.22, .75, .25, 1);
+  --ui-motion-state: 180ms;
+  --ui-motion-text-out: 160ms;
+  --ui-motion-text-in: 220ms;
+  --ui-motion-slide: 280ms;
+  --ui-motion-disclosure: 290ms;
+  --ui-motion-page: 290ms;
+  --ui-motion-menu: 270ms;
+  --ui-motion-sheet: 320ms;
+}

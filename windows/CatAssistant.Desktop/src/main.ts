@@ -30,8 +30,8 @@ function showWindow(): void {
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
-    width: 1080, height: 720, minWidth: 860, minHeight: 600, show: false,
-    backgroundColor: '#fbfaf8', title: 'Cat Assistant', icon: iconPath, autoHideMenuBar: true,
+    width: 1080, height: 720, minWidth: 720, minHeight: 600, show: false,
+    backgroundColor: '#ffffff', title: '小猫助手', icon: iconPath, autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true, nodeIntegration: false, sandbox: true
