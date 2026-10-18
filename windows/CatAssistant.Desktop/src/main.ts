@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, nativeImage, shell, Tray } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron';
 import path from 'node:path';
 import { BackendClient } from './backend-client';
 
@@ -9,6 +9,7 @@ const allowedMethods = new Set([
   'app.bootstrap', 'state.get',
   'conversations.list', 'conversations.get', 'conversations.create', 'conversations.start', 'conversations.rename', 'conversations.pin',
   'conversations.delete', 'conversations.activate', 'conversations.send', 'conversations.cancel',
+  'work.workspace.get', 'work.inputs.add', 'work.approvals.list', 'work.approvals.resolve', 'work.artifacts.revealPath',
   'devices.scan', 'devices.connect', 'devices.forget', 'devices.followDesktop',
   'conversation.new', 'conversation.cancel', 'conversation.send', 'settings.save'
 ]);
@@ -81,6 +82,14 @@ app.whenReady().then(() => {
   ipcMain.handle('backend:invoke', (_event, method: string, params?: Record<string, unknown>) => {
     if (!allowedMethods.has(method)) throw new Error(`不允许的后台方法：${method}`);
     return backend.invoke(method, params);
+  });
+  ipcMain.handle('work:select-files', async () => {
+    const result = await dialog.showOpenDialog(mainWindow!, { properties: ['openFile', 'multiSelections'] });
+    return result.canceled ? [] : result.filePaths;
+  });
+  ipcMain.handle('work:reveal-artifact', async (_event, conversationId: string, artifactId: string) => {
+    const result = await backend.invoke<{ path: string }>('work.artifacts.revealPath', { id: conversationId, artifactId });
+    shell.showItemInFolder(result.path);
   });
   createWindow(); createTray();
 });

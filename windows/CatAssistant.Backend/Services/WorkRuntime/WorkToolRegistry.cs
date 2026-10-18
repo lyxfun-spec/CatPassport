@@ -9,7 +9,7 @@ public sealed record WorkToolResult(bool Success, string OutputJson, string? Err
     public static WorkToolResult Error(string code, string message) => new(false, JsonSerializer.Serialize(new { error = message }), code, message);
 }
 
-public sealed record WorkToolExecutionContext(string ConversationId, string RunId, string WorkspaceRoot);
+public sealed record WorkToolExecutionContext(string ConversationId, string RunId, string WorkspaceRoot, string ToolCallId = "");
 
 public interface IWorkTool
 {

@@ -74,7 +74,24 @@ export interface BootstrapState {
   activeConversation?: ConversationDetail;
   device: DeviceState;
   settings: PublicSettings;
+  pendingApprovals?: WorkApproval[];
+  workToolCalls?: WorkToolCall[];
+  workArtifacts?: WorkArtifact[];
 }
+
+export interface WorkApproval {
+  id: string; conversationId: string; runId: string; toolCallId: string; operationJson: string;
+  scope: 'single' | 'task_directory'; targetPath?: string; capability: 'read' | 'write' | 'execute';
+  state: string; requestedAt: string; resolvedAt?: string;
+}
+
+export interface WorkToolCall {
+  id: string; runId: string; roundId: string; batchId: string; toolCallId: string; ordinal: number;
+  toolName: string; argumentsJson: string; state: string; resultJson?: string; errorCode?: string;
+  errorMessage?: string; createdAt: string; startedAt?: string; completedAt?: string; durationMilliseconds?: number;
+}
+
+export interface WorkArtifact { id: string; conversationId: string; runId?: string; path: string; label: string; createdAt: string; }
 
 export interface ConversationEvent {
   type: string;
@@ -99,7 +116,16 @@ export type ConversationEventName =
   | 'message.delta'
   | 'message.completed'
   | 'message.interrupted'
-  | 'run.failed';
+  | 'run.completed'
+  | 'run.stopped'
+  | 'run.failed'
+  | 'tool.created'
+  | 'tool.started'
+  | 'tool.completed'
+  | 'tool.failed'
+  | 'tool.cancelled'
+  | 'approval.requested'
+  | 'approval.resolved';
 
 export type BackendEvent =
   | { event: 'backend.ready'; data: { version: number; state: BootstrapState } }
@@ -110,6 +136,8 @@ export type BackendEvent =
 export interface BackendApi {
   invoke<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T>;
   onEvent(listener: (event: BackendEvent) => void): () => void;
+  selectWorkFiles(): Promise<string[]>;
+  revealArtifact(conversationId: string, artifactId: string): Promise<void>;
 }
 
 declare global {

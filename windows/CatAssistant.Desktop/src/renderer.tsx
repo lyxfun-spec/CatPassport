@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, us
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import ReactMarkdown, { type Components } from 'react-markdown';
-import type { BackendEvent, BootstrapState, CatDevice, Citation, ConversationDetail, ConversationMessage, ConversationSummary, PublicSettings } from './shared';
+import type { BackendEvent, BootstrapState, CatDevice, Citation, ConversationDetail, ConversationMessage, ConversationSummary, PublicSettings, WorkApproval, WorkArtifact, WorkToolCall } from './shared';
 import { citationOrdinal, hidePartialCitationMarker, remarkCitations, stripCitationMarkers } from './citations';
 import { deviceDiscoveryMessage, initialState, reduceBackendEvent } from './state';
 import { clampTextareaHeight, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldSubmitComposer } from './ui-behavior';
@@ -12,7 +12,7 @@ import './styles.css';
 
 type IconName = 'new' | 'search' | 'chat' | 'work' | 'device' | 'settings' | 'menu' | 'send'
   | 'copy' | 'close' | 'sidebar' | 'check' | 'back' | 'rename' | 'delete' | 'refresh'
-  | 'key' | 'shield' | 'info' | 'chevron' | 'pin' | 'cat' | 'external';
+  | 'key' | 'shield' | 'info' | 'chevron' | 'pin' | 'cat' | 'external' | 'attach' | 'stop' | 'file';
 
 const iconPaths: Record<IconName, React.ReactNode> = {
   new: <path d="M12 5v14M5 12h14"/>,
@@ -37,7 +37,10 @@ const iconPaths: Record<IconName, React.ReactNode> = {
   chevron: <path d="m9 18 6-6-6-6"/>,
   pin: <><path d="M12 17v5"/><path d="M5 17h14"/><path d="M6 3h12l-2 6v4l2 4H6l2-4V9Z"/></>,
   cat: <><path d="M6.5 8 4 4v9a8 8 0 0 0 16 0V4l-2.5 4"/><path d="M9 13h.01M15 13h.01M10 17c1.3 1 2.7 1 4 0"/></>,
-  external: <><path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></>
+  external: <><path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></>,
+  attach: <path d="M21.4 11.6 12 21a6 6 0 0 1-8.5-8.5l10-10a4 4 0 1 1 5.7 5.7l-10 10a2 2 0 0 1-2.9-2.8l9.3-9.3"/>,
+  stop: <rect x="7" y="7" width="10" height="10" rx="1"/>,
+  file: <><path d="M6 3h8l4 4v14H6Z"/><path d="M14 3v5h5"/></>
 };
 
 function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
@@ -138,7 +141,6 @@ function App() {
     const text = draft.trim();
     if (!text || isBusy('send')) return;
     if (requestedView === 'compose') {
-      if (draftMode !== 'chat') return;
       setDraft('');
       const detail = await run('send', () => invoke<ConversationDetail>('conversations.start', { mode: draftMode, text }));
       if (detail) { dispatch({ event: 'ui.conversation', data: detail }); setRequestedView('conversation'); }
@@ -149,6 +151,34 @@ function App() {
     setDraft('');
     const detail = await run('send', () => invoke<ConversationDetail>('conversations.send', { id: active.conversation.id, text }));
     if (detail) dispatch({ event: 'ui.conversation', data: detail });
+  };
+  const attachFiles = async () => {
+    const files = await window.catAssistant.selectWorkFiles();
+    if (!files.length) return;
+    let conversationId = active?.conversation.mode === 'work' && requestedView !== 'compose' ? active.conversation.id : undefined;
+    if (!conversationId)
+    {
+      const created = await run('attach', () => invoke<ConversationSummary>('conversations.create', { mode: 'work' }));
+      if (!created) return;
+      conversationId = created.id;
+    }
+    const id = conversationId;
+    const copied = await run('attach', async () => {
+      for (const sourcePath of files) await invoke('work.inputs.add', { id, sourcePath });
+      return invoke<ConversationDetail>('conversations.get', { id });
+    });
+    if (copied) { dispatch({ event: 'ui.conversation', data: copied }); setRequestedView('conversation'); showNotice(`已添加 ${files.length} 个文件`); }
+  };
+  const stopWork = async () => {
+    if (!active?.activeRunId) return;
+    const detail = await run('stop', () => invoke<ConversationDetail>('conversations.cancel', { id: active.conversation.id }));
+    if (detail) dispatch({ event: 'ui.conversation', data: detail });
+  };
+  const resolveApproval = async (approval: WorkApproval, approved: boolean) => {
+    const result = await run(`approval-${approval.id}`, () => invoke('work.approvals.resolve', {
+      id: approval.conversationId, approvalId: approval.id, approved
+    }));
+    if (result !== undefined) await refresh();
   };
   const rename = async (title: string) => {
     const target = actionSurface?.conversation;
@@ -200,8 +230,8 @@ function App() {
         {displayedView === 'settings'
           ? <SettingsPage settings={bootstrap.settings} onboarding={!bootstrap.settings.hasApiKey} busy={isBusy('settings')} onBack={() => setRequestedView('conversation')} onSave={saveSettings}/>
           : displayedView === 'compose' || !active
-            ? <DraftConversation mode={draftMode} onMode={setDraftMode} value={draft} onChange={setDraft} onSend={() => void send()} hasApiKey={bootstrap.settings.hasApiKey} sending={isBusy('send')} focusSignal={composerFocusSignal} onOpenSettings={() => setRequestedView('settings')}/>
-            : <><ConversationHeader conversation={active.conversation} onAction={(kind, anchor) => setActionSurface({ kind, anchor, conversation: active.conversation })}/><MessageList detail={active} runError={state.runError}/><Composer value={draft} onChange={setDraft} onSend={() => void send()} hasApiKey={bootstrap.settings.hasApiKey} sending={isBusy('send')} focusSignal={composerFocusSignal} onOpenSettings={() => setRequestedView('settings')}/></>
+            ? <DraftConversation mode={draftMode} onMode={setDraftMode} value={draft} onChange={setDraft} onSend={() => void send()} onAttach={() => void attachFiles()} hasApiKey={bootstrap.settings.hasApiKey} sending={isBusy('send')} focusSignal={composerFocusSignal} onOpenSettings={() => setRequestedView('settings')}/>
+            : <><ConversationHeader conversation={active.conversation} onAction={(kind, anchor) => setActionSurface({ kind, anchor, conversation: active.conversation })}/>{active.conversation.mode === 'work' ? <div className="work-content"><WorkActivity active={active} approvals={bootstrap.pendingApprovals ?? []} tools={bootstrap.workToolCalls ?? []} artifacts={bootstrap.workArtifacts ?? []} busy={busy} onResolve={(approval, approved) => void resolveApproval(approval, approved)} onReveal={artifactId => void window.catAssistant.revealArtifact(active.conversation.id, artifactId)}/><MessageList detail={active} runError={state.runError}/></div> : <MessageList detail={active} runError={state.runError}/>}<Composer value={draft} onChange={setDraft} onSend={() => void send()} onAttach={active.conversation.mode === 'work' ? () => void attachFiles() : undefined} onStop={active.conversation.mode === 'work' && active.activeRunId ? () => void stopWork() : undefined} hasApiKey={bootstrap.settings.hasApiKey} sending={isBusy('send')} focusSignal={composerFocusSignal} onOpenSettings={() => setRequestedView('settings')}/></>
         }
       </main>
     </div>
@@ -315,6 +345,46 @@ function ConversationHeader({ conversation, onAction }: { conversation: Conversa
   }, [menuOpen, keyboardOpen]);
   const choose = (kind: 'rename' | 'delete', element: HTMLButtonElement) => { const anchor = rectOf(element); closeMenu(true); onAction(kind, anchor); };
   return <header className="conversation-header"><h1>{conversation.title}</h1><div className="header-menu" ref={wrapper}><button ref={trigger} className="icon-button" onClick={toggleMenu} aria-label="对话选项" aria-haspopup="menu" aria-expanded={menuOpen}><Icon name="menu"/></button>{menuRendered && <div className={`popover-menu ${menuOpen ? 'is-open' : 'is-closing'}`} role="menu" aria-hidden={!menuOpen} inert={!menuOpen}><button ref={firstItem} role="menuitem" onClick={event => choose('rename', event.currentTarget)}><Icon name="rename"/>重命名</button><button role="menuitem" className="danger" onClick={event => choose('delete', event.currentTarget)}><Icon name="delete"/>删除</button></div>}</div></header>;
+}
+
+function WorkActivity({ active, approvals, tools, artifacts, busy, onResolve, onReveal }: {
+  active: ConversationDetail; approvals: WorkApproval[]; tools: WorkToolCall[]; artifacts: WorkArtifact[]; busy: Set<string>;
+  onResolve(approval: WorkApproval, approved: boolean): void; onReveal(path: string): void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const latest = tools.at(-1);
+  const status = approvals.length ? '等待你的批准' : active.activeRunId
+    ? latest ? `${toolStateLabel(latest.state)}：${latest.toolName}` : '正在分析任务'
+    : latest?.state === 'cancelled' ? '任务已停止' : '任务记录';
+  return <section className="work-activity" aria-label="Work 执行状态">
+    <div className="work-status-row"><span className={`work-status-dot ${active.activeRunId ? 'active' : ''}`}/><strong>{status}</strong>{tools.length > 0 && <button className="text-button" onClick={() => setExpanded(value => !value)} aria-expanded={expanded}>{expanded ? '收起详情' : `查看详情 (${tools.length})`}</button>}</div>
+    {approvals.map(approval => <div className="approval-card" key={approval.id}>
+      <div><Icon name="shield"/><span><b>{approval.capability === 'execute' ? '运行外部命令' : approval.capability === 'write' ? '修改外部文件' : '读取外部文件'}</b><small>{approval.targetPath}</small></span></div>
+      <pre>{maskSensitiveJson(approval.operationJson)}</pre>
+      <p>{approval.scope === 'task_directory' ? '批准后，本任务期间可在该目录内复用相同权限。' : '仅批准这一次明确操作。'}</p>
+      <div className="approval-actions"><button className="text-button" disabled={busy.has(`approval-${approval.id}`)} onClick={() => onResolve(approval, false)}>拒绝</button><button className="primary-button" disabled={busy.has(`approval-${approval.id}`)} onClick={() => onResolve(approval, true)}>批准</button></div>
+    </div>)}
+    {expanded && <div className="tool-history">{tools.map(tool => <details key={tool.id}><summary><span>{tool.toolName}</span><em className={`tool-state state-${tool.state}`}>{toolStateLabel(tool.state)}</em>{tool.durationMilliseconds !== undefined && <small>{tool.durationMilliseconds} ms</small>}</summary><div><b>参数</b><pre>{maskSensitiveJson(tool.argumentsJson)}</pre>{tool.resultJson && <><b>结果</b><pre>{maskSensitiveJson(tool.resultJson)}</pre></>}{tool.errorMessage && <p className="tool-error">{tool.errorMessage}</p>}</div></details>)}</div>}
+    {artifacts.length > 0 && <div className="artifact-list">{artifacts.map(artifact => <button key={artifact.id} onClick={() => onReveal(artifact.id)} title={artifact.label}><Icon name="file"/><span><b>{artifact.label}</b><small>在文件资源管理器中显示</small></span><Icon name="external" size={14}/></button>)}</div>}
+  </section>;
+}
+
+function toolStateLabel(state: string): string {
+  return ({ pending: '等待中', running: '执行中', completed: '已完成', failed: '失败', cancelled: '已取消', rejected: '已拒绝' } as Record<string, string>)[state] ?? state;
+}
+
+function maskSensitiveJson(value: string): string {
+  try {
+    const redact = (item: unknown): unknown => {
+      if (Array.isArray(item)) return item.map(redact);
+      if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item).map(([key, child]) => [key,
+        /(?:api.?key|token|password|secret|authorization)/i.test(key) ? '••••••'
+          : /(?:content|body|binary|base64)/i.test(key) && typeof child === 'string' ? `[内容已隐藏，${child.length} 字符]`
+          : redact(child)]));
+      return item;
+    };
+    return JSON.stringify(redact(JSON.parse(value)), null, 2);
+  } catch { return value.length > 2000 ? `${value.slice(0, 2000)}…` : value; }
 }
 
 function MessageList({ detail, runError }: { detail: ConversationDetail; runError?: string }) {
@@ -480,7 +550,7 @@ function SourceMenu({ state, open, onClose, onOpen }: { state: SourceMenuState; 
   </div>, document.body);
 }
 
-function Composer({ value, onChange, onSend, hasApiKey, sending, disabled = false, focusSignal, onOpenSettings }: { value: string; onChange(value: string): void; onSend(): void; hasApiKey: boolean; sending: boolean; disabled?: boolean; focusSignal: number; onOpenSettings(): void }) {
+function Composer({ value, onChange, onSend, onAttach, onStop, hasApiKey, sending, disabled = false, focusSignal, onOpenSettings }: { value: string; onChange(value: string): void; onSend(): void; onAttach?: () => void; onStop?: () => void; hasApiKey: boolean; sending: boolean; disabled?: boolean; focusSignal: number; onOpenSettings(): void }) {
   const textarea = useRef<HTMLTextAreaElement>(null);
   const rail = useRef<HTMLDivElement>(null);
   const [scrollActive, setScrollActive] = useState(false);
@@ -492,12 +562,12 @@ function Composer({ value, onChange, onSend, hasApiKey, sending, disabled = fals
   useEffect(() => { const element = textarea.current; if (!element) return; element.style.height = '0px'; element.style.height = `${clampTextareaHeight(element.scrollHeight)}px`; element.style.overflowY = element.scrollHeight > 152 ? 'auto' : 'hidden'; requestAnimationFrame(updateThumb); }, [value]);
   useEffect(() => { if (focusSignal) textarea.current?.focus({ preventScroll: true }); }, [focusSignal]);
   useEffect(() => () => clearTimeout(hideTimer.current), []);
-  return <div className="composer-wrap"><div className="composer"><div className={`composer-editor ${scrollActive ? 'scroll-active' : ''}`}><textarea ref={textarea} value={value} rows={1} placeholder="输入消息" aria-label="输入消息" onScroll={() => { updateThumb(); revealThumb(); }} onChange={event => onChange(event.target.value)} onKeyDown={event => { if (shouldSubmitComposer(event.key, event.shiftKey, event.nativeEvent.isComposing)) { event.preventDefault(); if (canSend) onSend(); } }}/><div ref={rail} className={`textarea-rail ${thumb.visible ? 'has-overflow' : ''}`} aria-hidden="true"><i style={{ height: thumb.size, transform: `translateY(${thumb.offset}px)` }}/></div></div><button className={`send-button ${canSend ? 'ready' : ''}`} disabled={!canSend} onClick={onSend} aria-label={sending ? '正在发送' : '发送消息'}><Icon name="send"/></button></div>{!hasApiKey && value.trim() ? <button className="key-hint" onClick={onOpenSettings}><Icon name="key" size={14}/>配置 API Key 后即可发送</button> : <p>AI 生成的内容可能不准确，请核实重要信息。</p>}</div>;
+  return <div className="composer-wrap"><div className="composer">{onAttach && <button className="composer-tool" onClick={onAttach} aria-label="添加本地文件" title="添加本地文件"><Icon name="attach"/></button>}<div className={`composer-editor ${scrollActive ? 'scroll-active' : ''}`}><textarea ref={textarea} value={value} rows={1} placeholder="输入消息" aria-label="输入消息" onScroll={() => { updateThumb(); revealThumb(); }} onChange={event => onChange(event.target.value)} onKeyDown={event => { if (shouldSubmitComposer(event.key, event.shiftKey, event.nativeEvent.isComposing)) { event.preventDefault(); if (canSend) onSend(); } }}/><div ref={rail} className={`textarea-rail ${thumb.visible ? 'has-overflow' : ''}`} aria-hidden="true"><i style={{ height: thumb.size, transform: `translateY(${thumb.offset}px)` }}/></div></div>{onStop && <button className="stop-button" onClick={onStop} aria-label="停止任务" title="停止任务"><Icon name="stop"/></button>}<button className={`send-button ${canSend ? 'ready' : ''}`} disabled={!canSend} onClick={onSend} aria-label={sending ? '正在发送' : '发送消息'}><Icon name="send"/></button></div>{!hasApiKey && value.trim() ? <button className="key-hint" onClick={onOpenSettings}><Icon name="key" size={14}/>配置 API Key 后即可发送</button> : <p>AI 生成的内容可能不准确，请核实重要信息。</p>}</div>;
 }
 
-function DraftConversation({ mode, onMode, value, onChange, onSend, hasApiKey, sending, focusSignal, onOpenSettings }: {
+function DraftConversation({ mode, onMode, value, onChange, onSend, onAttach, hasApiKey, sending, focusSignal, onOpenSettings }: {
   mode: 'chat' | 'work'; onMode(mode: 'chat' | 'work'): void; value: string; onChange(value: string): void;
-  onSend(): void; hasApiKey: boolean; sending: boolean; focusSignal: number; onOpenSettings(): void;
+  onSend(): void; onAttach(): void; hasApiKey: boolean; sending: boolean; focusSignal: number; onOpenSettings(): void;
 }) {
   const workSelected = mode === 'work';
   return <div className="draft-conversation">
@@ -509,9 +579,9 @@ function DraftConversation({ mode, onMode, value, onChange, onSend, hasApiKey, s
         <button type="button" className={mode === 'chat' ? 'selected' : ''} onClick={() => onMode('chat')} aria-pressed={mode === 'chat'}><Icon name="chat"/><span><b>Chat</b><small>日常对话</small></span></button>
         <button type="button" className={mode === 'work' ? 'selected' : ''} onClick={() => onMode('work')} aria-pressed={mode === 'work'}><Icon name="work"/><span><b>Work</b><small>本地任务</small></span></button>
       </div>
-      <p className="mode-note">{workSelected ? 'Work 模式即将推出。' : '适合问答、写作和日常交流。'}</p>
+      <p className="mode-note">{workSelected ? '处理本地文件、运行受隔离的工具，并交付成果。' : '适合问答、写作和日常交流。'}</p>
     </div>
-    <Composer value={value} onChange={onChange} onSend={onSend} hasApiKey={hasApiKey} sending={sending} disabled={workSelected} focusSignal={focusSignal} onOpenSettings={onOpenSettings}/>
+    <Composer value={value} onChange={onChange} onSend={onSend} onAttach={workSelected ? onAttach : undefined} hasApiKey={hasApiKey} sending={sending} focusSignal={focusSignal} onOpenSettings={onOpenSettings}/>
   </div>;
 }
 function RenameDialog({ open, anchor, conversation, busy, onClose, onRename }: { open: boolean; anchor?: AnchorRect; conversation?: ConversationSummary; busy: boolean; onClose(): void; onRename(title: string): void }) {

@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text;
 using CatAssistant.Backend.Models;
+using CatAssistant.Backend.Services.Sandbox;
 using CatAssistant.Backend.Services.Work;
 
 namespace CatAssistant.Backend.Services;
@@ -24,6 +25,7 @@ public sealed class ConversationService : IAsyncDisposable
     private readonly CancellationToken _lifetime;
     private readonly WorkWorkspaceService _workspaces;
     private readonly WorkAgentService? _workAgent;
+    private readonly WorkApprovalService? _workApprovals;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new();
     private readonly ConcurrentDictionary<string, ActiveRun> _runs = new();
     private readonly object _stateLock = new();
@@ -38,7 +40,8 @@ public sealed class ConversationService : IAsyncDisposable
         Func<string> apiKey,
         CancellationToken lifetime,
         WorkWorkspaceService? workspaces = null,
-        WorkAgentService? workAgent = null)
+        WorkAgentService? workAgent = null,
+        WorkApprovalService? workApprovals = null)
     {
         _repository = repository;
         _provider = provider;
@@ -47,7 +50,9 @@ public sealed class ConversationService : IAsyncDisposable
         _lifetime = lifetime;
         _workspaces = workspaces ?? new WorkWorkspaceService();
         _workAgent = workAgent;
+        _workApprovals = workApprovals;
         if (_workAgent is not null) _workAgent.Changed += OnWorkChanged;
+        if (_workApprovals is not null) _workApprovals.Changed += OnWorkChanged;
     }
 
     public event EventHandler<ConversationEvent>? Changed;
@@ -117,6 +122,32 @@ public sealed class ConversationService : IAsyncDisposable
     {
         await GetWorkWorkspaceAsync(conversationId);
         return await _workspaces.CopyInputAsync(conversationId, sourcePath, _lifetime);
+    }
+
+    public Task<IReadOnlyList<WorkApprovalRecord>> ListPendingWorkApprovalsAsync(string conversationId) =>
+        _workApprovals?.ListPendingAsync(conversationId) ?? Task.FromResult<IReadOnlyList<WorkApprovalRecord>>([]);
+
+    public Task ResolveWorkApprovalAsync(string conversationId, string approvalId, bool approved) =>
+        _workApprovals?.ResolveAsync(conversationId, approvalId, approved) ?? throw new InvalidOperationException("Work Runtime 尚未启用。");
+
+    public Task<IReadOnlyList<WorkToolCallRecord>> ListWorkToolCallsAsync(string conversationId) =>
+        _repository.ListWorkToolCallsAsync(conversationId);
+
+    public Task<IReadOnlyList<WorkArtifactRecord>> ListWorkArtifactsAsync(string conversationId) =>
+        _repository.ListWorkArtifactsAsync(conversationId);
+
+    public async Task<string> GetWorkArtifactRevealPathAsync(string conversationId, string artifactId)
+    {
+        var workspace = await GetWorkWorkspaceAsync(conversationId);
+        var artifact = (await _repository.ListWorkArtifactsAsync(conversationId))
+            .SingleOrDefault(item => item.Id == artifactId)
+            ?? throw new KeyNotFoundException("成果文件不存在或不属于该对话。");
+        var path = Path.GetFullPath(artifact.Path);
+        WindowsSandboxController.EnsureContained(workspace.Outputs, path);
+        var file = new FileInfo(path);
+        if (!file.Exists || (file.Attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+            throw new FileNotFoundException("成果文件不存在或不是普通文件。", path);
+        return path;
     }
 
     public async Task<ConversationSummary> CreateForDeviceAsync()
@@ -424,6 +455,7 @@ public sealed class ConversationService : IAsyncDisposable
             _workAgent.Changed -= OnWorkChanged;
             await _workAgent.DisposeAsync();
         }
+        if (_workApprovals is not null) _workApprovals.Changed -= OnWorkChanged;
         foreach (var run in _runs.Values) run.Cancellation.Cancel();
         await Task.WhenAll(_runs.Values.Select(async run =>
         {

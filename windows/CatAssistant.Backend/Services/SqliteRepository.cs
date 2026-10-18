@@ -607,6 +607,28 @@ public sealed class SqliteRepository
         if (await command.ExecuteNonQueryAsync() == 0) throw new KeyNotFoundException("工具调用不存在。");
     }
 
+    public async Task<IReadOnlyList<WorkToolCallRecord>> ListWorkToolCallsAsync(string conversationId)
+    {
+        var result = new List<WorkToolCallRecord>();
+        await using var db = await OpenAsync();
+        var command = db.CreateCommand();
+        command.CommandText = """
+            SELECT id,conversation_id,run_id,round_id,batch_id,tool_call_id,ordinal,tool_name,arguments_json,state,
+                   result_json,error_code,error_message,created_utc,started_utc,completed_utc,duration_ms
+            FROM work_tool_calls WHERE conversation_id=$conversation ORDER BY created_utc,ordinal
+            """;
+        command.Parameters.AddWithValue("$conversation", conversationId);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+            result.Add(new WorkToolCallRecord(
+                reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetString(5),
+                reader.GetInt32(6), reader.GetString(7), reader.GetString(8), reader.GetString(9),
+                reader.IsDBNull(10) ? null : reader.GetString(10), reader.IsDBNull(11) ? null : reader.GetString(11), reader.IsDBNull(12) ? null : reader.GetString(12),
+                Parse(reader.GetString(13)), reader.IsDBNull(14) ? null : Parse(reader.GetString(14)), reader.IsDBNull(15) ? null : Parse(reader.GetString(15)),
+                reader.IsDBNull(16) ? null : reader.GetInt64(16)));
+        return result;
+    }
+
     public async Task<WorkApprovalRecord> CreateWorkApprovalAsync(
         string conversationId,
         string runId,
@@ -759,6 +781,13 @@ public sealed class SqliteRepository
             WHERE state IN ('starting','searching','generating') AND completed_utc IS NULL;
             """;
         await runs.ExecuteNonQueryAsync();
+        var approvals = db.CreateCommand();
+        approvals.Transaction = (SqliteTransaction)transaction;
+        approvals.CommandText = """
+            UPDATE work_approvals SET state='cancelled',resolved_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+            WHERE state='pending';
+            """;
+        await approvals.ExecuteNonQueryAsync();
         await transaction.CommitAsync();
     }
 

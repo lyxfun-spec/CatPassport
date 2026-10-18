@@ -7,7 +7,9 @@ const api: BackendApi = {
     const handler = (_event: Electron.IpcRendererEvent, value: BackendEvent) => listener(value);
     ipcRenderer.on('backend:event', handler);
     return () => ipcRenderer.removeListener('backend:event', handler);
-  }
+  },
+  selectWorkFiles: () => ipcRenderer.invoke('work:select-files'),
+  revealArtifact: (conversationId, artifactId) => ipcRenderer.invoke('work:reveal-artifact', conversationId, artifactId)
 };
 
 contextBridge.exposeInMainWorld('catAssistant', api);

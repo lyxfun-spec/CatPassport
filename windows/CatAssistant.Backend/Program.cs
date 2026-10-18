@@ -70,6 +70,20 @@ internal static class Program
             case "conversations.cancel":
                 await coordinator.Conversations.CancelAsync(Required<string>(request.Params, "id"));
                 return await coordinator.Conversations.GetAsync(Required<string>(request.Params, "id"));
+            case "work.workspace.get":
+                return await coordinator.Conversations.GetWorkWorkspaceAsync(Required<string>(request.Params, "id"));
+            case "work.inputs.add":
+                return new { path = await coordinator.Conversations.CopyWorkInputAsync(
+                    Required<string>(request.Params, "id"), Required<string>(request.Params, "sourcePath")) };
+            case "work.approvals.list":
+                return await coordinator.Conversations.ListPendingWorkApprovalsAsync(Required<string>(request.Params, "id"));
+            case "work.approvals.resolve":
+                await coordinator.Conversations.ResolveWorkApprovalAsync(
+                    Required<string>(request.Params, "id"), Required<string>(request.Params, "approvalId"), Required<bool>(request.Params, "approved"));
+                return await coordinator.Conversations.ListPendingWorkApprovalsAsync(Required<string>(request.Params, "id"));
+            case "work.artifacts.revealPath":
+                return new { path = await coordinator.Conversations.GetWorkArtifactRevealPathAsync(
+                    Required<string>(request.Params, "id"), Required<string>(request.Params, "artifactId")) };
             case "devices.scan": await coordinator.ScanAsync(); return coordinator.Snapshot();
             case "devices.connect":
                 await coordinator.ConnectAsync(Required<ulong>(request.Params, "address"), Optional<string>(request.Params, "name"));
@@ -100,7 +114,11 @@ internal static class Program
         var conversations = await coordinator.Conversations.ListAsync();
         var activeId = coordinator.Conversations.DesktopActiveConversationId;
         var active = activeId is null ? null : await coordinator.Conversations.GetAsync(activeId);
-        return new BootstrapState(conversations, activeId, active, coordinator.Snapshot(), coordinator.PublicSettings());
+        var isWork = active?.Conversation.Mode == "work";
+        var approvals = isWork ? await coordinator.Conversations.ListPendingWorkApprovalsAsync(activeId!) : [];
+        var toolCalls = isWork ? await coordinator.Conversations.ListWorkToolCallsAsync(activeId!) : [];
+        var artifacts = isWork ? await coordinator.Conversations.ListWorkArtifactsAsync(activeId!) : [];
+        return new BootstrapState(conversations, activeId, active, coordinator.Snapshot(), coordinator.PublicSettings(), approvals, toolCalls, artifacts);
     }
 
     private static T Required<T>(JsonElement? parameters, string name)

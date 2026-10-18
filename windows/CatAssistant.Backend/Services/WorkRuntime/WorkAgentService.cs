@@ -25,6 +25,7 @@ public sealed class WorkAgentService : IAsyncDisposable
     private readonly Func<string> _apiKey;
     private readonly CancellationToken _lifetime;
     private readonly int _contextCharacterLimit;
+    private readonly WorkApprovalService? _approvals;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ActiveWorkRun> _runs = new(StringComparer.Ordinal);
 
@@ -36,7 +37,8 @@ public sealed class WorkAgentService : IAsyncDisposable
         Func<AppSettings> settings,
         Func<string> apiKey,
         CancellationToken lifetime,
-        int contextCharacterLimit = 96_000)
+        int contextCharacterLimit = 96_000,
+        WorkApprovalService? approvals = null)
     {
         _repository = repository;
         _workspaces = workspaces;
@@ -47,6 +49,7 @@ public sealed class WorkAgentService : IAsyncDisposable
         _lifetime = lifetime;
         if (contextCharacterLimit <= 0) throw new ArgumentOutOfRangeException(nameof(contextCharacterLimit));
         _contextCharacterLimit = contextCharacterLimit;
+        _approvals = approvals;
     }
 
     public event EventHandler<ConversationEvent>? Changed;
@@ -114,6 +117,7 @@ public sealed class WorkAgentService : IAsyncDisposable
             if (_runs.TryGetValue(conversationId, out var current) && ReferenceEquals(current, run))
                 _runs.TryRemove(conversationId, out _);
             await _repository.FinishRunAsync(run.Id, "interrupted", "interrupted");
+            _approvals?.EndRun(run.Id);
             Publish(new ConversationEvent("run.stopped", conversationId, RunId: run.Id, Status: "stopped"));
         }
         finally
@@ -177,6 +181,7 @@ public sealed class WorkAgentService : IAsyncDisposable
                 var call = response.ToolCalls[index];
                 persistedCalls[index] = await _repository.CreateWorkToolCallAsync(
                     run.ConversationId, run.Id, roundId, batchId, call.ToolCallId, index, call.Name, StorableArguments(call.ArgumentsJson));
+                Publish(new ConversationEvent("tool.created", run.ConversationId, RunId: run.Id, Status: "pending"));
             }
 
             var workspace = await _workspaces.EnsureAsync(run.ConversationId, run.Cancellation.Token);
@@ -207,9 +212,10 @@ public sealed class WorkAgentService : IAsyncDisposable
     {
         var stopwatch = Stopwatch.StartNew();
         await _repository.UpdateWorkToolCallAsync(persisted.Id, "running");
+        Publish(new ConversationEvent("tool.started", run.ConversationId, RunId: run.Id, Status: "running"));
         try
         {
-            var result = await _tools.ExecuteAsync(call.Name, new WorkToolExecutionContext(run.ConversationId, run.Id, workspace.Root), call.ArgumentsJson, run.Cancellation.Token);
+            var result = await _tools.ExecuteAsync(call.Name, new WorkToolExecutionContext(run.ConversationId, run.Id, workspace.Root, call.ToolCallId), call.ArgumentsJson, run.Cancellation.Token);
             stopwatch.Stop();
             await _repository.UpdateWorkToolCallAsync(
                 persisted.Id,
@@ -218,6 +224,8 @@ public sealed class WorkAgentService : IAsyncDisposable
                 result.ErrorCode,
                 result.ErrorMessage,
                 stopwatch.ElapsedMilliseconds);
+            Publish(new ConversationEvent(result.Success ? "tool.completed" : "tool.failed", run.ConversationId, RunId: run.Id,
+                Status: result.Success ? "completed" : "failed", Error: result.ErrorMessage));
             return result;
         }
         catch (OperationCanceledException) when (run.Cancellation.IsCancellationRequested)
@@ -225,6 +233,7 @@ public sealed class WorkAgentService : IAsyncDisposable
             stopwatch.Stop();
             var result = WorkToolResult.Error("cancelled", "操作已取消。");
             await _repository.UpdateWorkToolCallAsync(persisted.Id, "cancelled", result.OutputJson, result.ErrorCode, result.ErrorMessage, stopwatch.ElapsedMilliseconds);
+            Publish(new ConversationEvent("tool.cancelled", run.ConversationId, RunId: run.Id, Status: "cancelled"));
             return result;
         }
         catch (Exception error)
@@ -232,6 +241,7 @@ public sealed class WorkAgentService : IAsyncDisposable
             stopwatch.Stop();
             var result = WorkToolResult.Error("tool_error", error.Message);
             await _repository.UpdateWorkToolCallAsync(persisted.Id, "failed", result.OutputJson, result.ErrorCode, result.ErrorMessage, stopwatch.ElapsedMilliseconds);
+            Publish(new ConversationEvent("tool.failed", run.ConversationId, RunId: run.Id, Status: "failed", Error: error.Message));
             return result;
         }
     }
@@ -255,8 +265,9 @@ public sealed class WorkAgentService : IAsyncDisposable
         {
             if (!_runs.TryGetValue(run.ConversationId, out var current) || !ReferenceEquals(current, run) || run.Stopping) return false;
             if (await DrainPendingMessagesAsync(run)) return true;
-            _runs.TryRemove(run.ConversationId, out _);
             await _repository.FinishRunAsync(run.Id, "completed", "stop");
+            _approvals?.EndRun(run.Id);
+            _runs.TryRemove(run.ConversationId, out _);
             Publish(new ConversationEvent("run.completed", run.ConversationId, RunId: run.Id, Status: "completed"));
             return false;
         }
@@ -311,8 +322,9 @@ public sealed class WorkAgentService : IAsyncDisposable
         try
         {
             if (!_runs.TryGetValue(run.ConversationId, out var current) || !ReferenceEquals(current, run) || run.Stopping) return;
-            _runs.TryRemove(run.ConversationId, out _);
             await _repository.FinishRunAsync(run.Id, state, reason, error?.GetType().Name);
+            _approvals?.EndRun(run.Id);
+            _runs.TryRemove(run.ConversationId, out _);
             Publish(new ConversationEvent(error is null ? "run.completed" : "run.failed", run.ConversationId, RunId: run.Id, Status: state, Error: error?.Message));
         }
         finally
@@ -335,7 +347,11 @@ public sealed class WorkAgentService : IAsyncDisposable
         var runs = _runs.Values.ToArray();
         foreach (var run in runs) run.Cancellation.Cancel();
         await Task.WhenAll(runs.Select(run => run.Execution ?? Task.CompletedTask));
-        foreach (var run in runs) await _repository.FinishRunAsync(run.Id, "interrupted", "interrupted");
+        foreach (var run in runs)
+        {
+            await _repository.FinishRunAsync(run.Id, "interrupted", "interrupted");
+            _approvals?.EndRun(run.Id);
+        }
         _runs.Clear();
         foreach (var gate in _gates.Values) gate.Dispose();
         _gates.Clear();

@@ -75,7 +75,10 @@ public sealed record BootstrapState(
     string? ActiveConversationId,
     ConversationDetail? ActiveConversation,
     DeviceState Device,
-    PublicSettings Settings);
+    PublicSettings Settings,
+    IReadOnlyList<WorkApprovalRecord>? PendingApprovals = null,
+    IReadOnlyList<WorkToolCallRecord>? WorkToolCalls = null,
+    IReadOnlyList<WorkArtifactRecord>? WorkArtifacts = null);
 
 public sealed record ConversationEvent(
     string Type,
@@ -86,7 +89,9 @@ public sealed record ConversationEvent(
     ConversationMessage? Message = null,
     ConversationSummary? Conversation = null,
     string? Status = null,
-    string? Error = null);
+    string? Error = null,
+    WorkApprovalRecord? Approval = null,
+    WorkArtifactRecord? Artifact = null);
 
 // Retained for the provider boundary and legacy database compatibility.
 public sealed record ChatMessage(string Role, string Content, DateTimeOffset CreatedAt);

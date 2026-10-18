@@ -16,4 +16,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="CatAssistant.Backend.Tests" />
   </ItemGroup>
+  <ItemGroup>
+    <Content Include="Skills\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

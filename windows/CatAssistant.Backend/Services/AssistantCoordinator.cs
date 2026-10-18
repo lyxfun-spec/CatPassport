@@ -60,18 +60,26 @@ public sealed class AssistantCoordinator : IAsyncDisposable
     public AssistantCoordinator(BleGateway ble, DashScopeClient cloud, SqliteRepository repository, SecureApiKeyStore secureStore, AppSettings settings)
     {
         _ble = ble; _cloud = cloud; _repository = repository; _secureStore = secureStore; Settings = settings;
-        _workSandbox = new WindowsSandboxController();
+        var workPython = WorkRuntimeLocator.FindPython();
+        if (workPython is not null) Environment.SetEnvironmentVariable("CATASSISTANT_PYTHON", workPython);
+        _workSandbox = new WindowsSandboxController(workPython is null ? null : [Path.GetDirectoryName(workPython)!]);
         var workspaces = new WorkWorkspaceService(conversationRoot: id =>
             Path.Combine(_workSandbox.GetPrivateStorageRoot(id), "Workspace"));
+        var workApprovals = new WorkApprovalService(repository);
         var workTools = new WorkToolRegistry();
-        workTools.Register(new ExecuteCommandTool(_workSandbox));
-        workTools.Register(new ReadFileTool(_workSandbox));
-        workTools.Register(new WriteFileTool(_workSandbox));
-        workTools.Register(new ListDirectoryTool(_workSandbox));
+        workTools.Register(new ExecuteCommandTool(_workSandbox, workApprovals));
+        workTools.Register(new ReadFileTool(_workSandbox, workApprovals));
+        workTools.Register(new WriteFileTool(_workSandbox, workApprovals));
+        workTools.Register(new ListDirectoryTool(_workSandbox, workApprovals));
+        workTools.Register(new DeliverFilesTool(repository));
+        workTools.Register(new WebSearchTool(cloud, () => Settings, () => _secureStore.Load() ?? ""));
+        var skills = new BuiltInSkillCatalog();
+        workTools.Register(new ListSkillsTool(skills));
+        workTools.Register(new LoadSkillTool(skills));
         var workAgent = new WorkAgentService(
-            repository, workspaces, cloud, workTools, () => Settings, () => _secureStore.Load() ?? "", _lifetime.Token);
+            repository, workspaces, cloud, workTools, () => Settings, () => _secureStore.Load() ?? "", _lifetime.Token, approvals: workApprovals);
         _conversations = new ConversationService(
-            repository, cloud, () => Settings, () => _secureStore.Load() ?? "", _lifetime.Token, workspaces, workAgent);
+            repository, cloud, () => Settings, () => _secureStore.Load() ?? "", _lifetime.Token, workspaces, workAgent, workApprovals);
         _turns = new InteractionTurns(_lifetime.Token);
         _ble.DeviceFound += OnDeviceFound; _ble.ControlMessageReceived += OnControlMessage; _ble.AudioFrameReceived += OnAudioFrame;
         _ble.LinkStateChanged += OnLinkStateChanged;

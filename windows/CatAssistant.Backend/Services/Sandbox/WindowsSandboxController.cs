@@ -34,7 +34,14 @@ public sealed class WindowsSandboxController : IDisposable
     private sealed record Profile(string Name, SecurityIdentifier Sid, string PrivateStorageRoot);
 
     private readonly ConcurrentDictionary<string, Lazy<Profile>> _profiles = new(StringComparer.Ordinal);
+    private readonly IReadOnlyList<string> _readOnlyRuntimeRoots;
+    private readonly ConcurrentDictionary<string, byte> _preparedRuntimeRoots = new(StringComparer.OrdinalIgnoreCase);
     private bool _disposed;
+
+    public WindowsSandboxController(IEnumerable<string>? readOnlyRuntimeRoots = null)
+    {
+        _readOnlyRuntimeRoots = readOnlyRuntimeRoots?.Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).ToArray() ?? [];
+    }
 
     public async Task<SandboxCommandResult> ExecuteAsync(
         string conversationId,
@@ -72,6 +79,10 @@ public sealed class WindowsSandboxController : IDisposable
         ValidateConversationId(conversationId);
         return GetProfile(conversationId).PrivateStorageRoot;
     }
+
+    internal Task<SandboxCommandResult> ExecuteApprovedExternalAsync(
+        SandboxCommand command,
+        CancellationToken cancellationToken) => LaunchAsync(null, command, cancellationToken);
 
     public void DeleteProfile(string conversationId)
     {
@@ -125,8 +136,44 @@ public sealed class WindowsSandboxController : IDisposable
     private Profile PrepareWorkspace(string conversationId, string workspace)
     {
         var profile = GetProfile(conversationId);
-        lock (profile) GrantWorkspaceAccess(workspace, profile.Sid);
+        lock (profile)
+        {
+            GrantWorkspaceAccess(workspace, profile.Sid);
+            foreach (var runtimeRoot in _readOnlyRuntimeRoots)
+                if (_preparedRuntimeRoots.TryAdd(runtimeRoot, 0)) GrantReadOnlyRuntime(runtimeRoot);
+        }
         return profile;
+    }
+
+    private static void GrantReadOnlyRuntime(string root)
+    {
+        if (!Directory.Exists(root)) throw new DirectoryNotFoundException($"Work 基础运行环境不存在：{root}");
+        var marker = Path.Combine(root, ".appcontainer-read-ready");
+        if (File.Exists(marker)) return;
+        var allApplicationPackages = new SecurityIdentifier("S-1-15-2-1");
+        var directoryRule = new FileSystemAccessRule(allApplicationPackages,
+            FileSystemRights.ReadAndExecute | FileSystemRights.ListDirectory,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow);
+        var pending = new Stack<DirectoryInfo>();
+        pending.Push(new DirectoryInfo(root));
+        while (pending.TryPop(out var directory))
+        {
+            var security = directory.GetAccessControl(AccessControlSections.Access);
+            security.AddAccessRule(directoryRule);
+            directory.SetAccessControl(security);
+            foreach (var entry in directory.EnumerateFileSystemInfos())
+            {
+                if ((entry.Attributes & FileAttributes.ReparsePoint) != 0) continue;
+                if (entry is DirectoryInfo childDirectory) pending.Push(childDirectory);
+                else if (entry is FileInfo file)
+                {
+                    var fileSecurity = file.GetAccessControl(AccessControlSections.Access);
+                    fileSecurity.AddAccessRule(new FileSystemAccessRule(allApplicationPackages, FileSystemRights.ReadAndExecute, AccessControlType.Allow));
+                    file.SetAccessControl(fileSecurity);
+                }
+            }
+        }
+        File.WriteAllText(marker, "read-only AppContainer ACL prepared");
     }
 
     private static void GrantWorkspaceAccess(string workspace, SecurityIdentifier sid)
@@ -192,7 +239,7 @@ public sealed class WindowsSandboxController : IDisposable
     }
 
     private static async Task<SandboxCommandResult> LaunchAsync(
-        SecurityIdentifier appContainerSid,
+        SecurityIdentifier? appContainerSid,
         SandboxCommand command,
         CancellationToken cancellationToken)
     {
@@ -200,14 +247,19 @@ public sealed class WindowsSandboxController : IDisposable
         using var stderr = new AnonymousPipeServerStream(PipeDirection.In, HandleInheritability.Inheritable);
         using var stdin = new AnonymousPipeServerStream(PipeDirection.Out, HandleInheritability.Inheritable);
         var attributeListSize = IntPtr.Zero;
-        NativeMethods.InitializeProcThreadAttributeList(IntPtr.Zero, 2, 0, ref attributeListSize);
+        var attributeCount = appContainerSid is null ? 1 : 2;
+        NativeMethods.InitializeProcThreadAttributeList(IntPtr.Zero, attributeCount, 0, ref attributeListSize);
         var attributeList = Marshal.AllocHGlobal(attributeListSize);
-        var capabilitiesPointer = Marshal.AllocHGlobal(Marshal.SizeOf<NativeMethods.SecurityCapabilities>());
+        var capabilitiesPointer = appContainerSid is null ? IntPtr.Zero : Marshal.AllocHGlobal(Marshal.SizeOf<NativeMethods.SecurityCapabilities>());
         var inheritedHandlesPointer = Marshal.AllocHGlobal(IntPtr.Size * 3);
-        var sidBytes = new byte[appContainerSid.BinaryLength];
-        appContainerSid.GetBinaryForm(sidBytes, 0);
-        var appContainerSidPointer = Marshal.AllocHGlobal(sidBytes.Length);
-        Marshal.Copy(sidBytes, 0, appContainerSidPointer, sidBytes.Length);
+        var appContainerSidPointer = IntPtr.Zero;
+        if (appContainerSid is not null)
+        {
+            var sidBytes = new byte[appContainerSid.BinaryLength];
+            appContainerSid.GetBinaryForm(sidBytes, 0);
+            appContainerSidPointer = Marshal.AllocHGlobal(sidBytes.Length);
+            Marshal.Copy(sidBytes, 0, appContainerSidPointer, sidBytes.Length);
+        }
         IntPtr capabilitySid = IntPtr.Zero;
         IntPtr capabilityArray = IntPtr.Zero;
         IntPtr processHandle = IntPtr.Zero;
@@ -216,23 +268,26 @@ public sealed class WindowsSandboxController : IDisposable
         var stopwatch = Stopwatch.StartNew();
         try
         {
-            if (!NativeMethods.InitializeProcThreadAttributeList(attributeList, 2, 0, ref attributeListSize))
+            if (!NativeMethods.InitializeProcThreadAttributeList(attributeList, attributeCount, 0, ref attributeListSize))
                 throw new Win32Exception(Marshal.GetLastWin32Error());
-            var capabilities = new NativeMethods.SecurityCapabilities { AppContainerSid = appContainerSidPointer };
-            if (command.AllowNetwork)
+            if (appContainerSid is not null)
             {
-                if (!NativeMethods.ConvertStringSidToSid("S-1-15-3-1", out capabilitySid))
+                var capabilities = new NativeMethods.SecurityCapabilities { AppContainerSid = appContainerSidPointer };
+                if (command.AllowNetwork)
+                {
+                    if (!NativeMethods.ConvertStringSidToSid("S-1-15-3-1", out capabilitySid))
+                        throw new Win32Exception(Marshal.GetLastWin32Error());
+                    capabilityArray = Marshal.AllocHGlobal(Marshal.SizeOf<NativeMethods.SidAndAttributes>());
+                    Marshal.StructureToPtr(new NativeMethods.SidAndAttributes { Sid = capabilitySid, Attributes = 4 }, capabilityArray, false);
+                    capabilities.Capabilities = capabilityArray;
+                    capabilities.CapabilityCount = 1;
+                }
+                Marshal.StructureToPtr(capabilities, capabilitiesPointer, false);
+                if (!NativeMethods.UpdateProcThreadAttribute(
+                        attributeList, 0, (IntPtr)NativeMethods.ProcThreadAttributeSecurityCapabilities,
+                        capabilitiesPointer, (IntPtr)Marshal.SizeOf<NativeMethods.SecurityCapabilities>(), IntPtr.Zero, IntPtr.Zero))
                     throw new Win32Exception(Marshal.GetLastWin32Error());
-                capabilityArray = Marshal.AllocHGlobal(Marshal.SizeOf<NativeMethods.SidAndAttributes>());
-                Marshal.StructureToPtr(new NativeMethods.SidAndAttributes { Sid = capabilitySid, Attributes = 4 }, capabilityArray, false);
-                capabilities.Capabilities = capabilityArray;
-                capabilities.CapabilityCount = 1;
             }
-            Marshal.StructureToPtr(capabilities, capabilitiesPointer, false);
-            if (!NativeMethods.UpdateProcThreadAttribute(
-                    attributeList, 0, (IntPtr)NativeMethods.ProcThreadAttributeSecurityCapabilities,
-                    capabilitiesPointer, (IntPtr)Marshal.SizeOf<NativeMethods.SecurityCapabilities>(), IntPtr.Zero, IntPtr.Zero))
-                throw new Win32Exception(Marshal.GetLastWin32Error());
             Marshal.WriteIntPtr(inheritedHandlesPointer, 0, stdin.ClientSafePipeHandle.DangerousGetHandle());
             Marshal.WriteIntPtr(inheritedHandlesPointer, IntPtr.Size, stdout.ClientSafePipeHandle.DangerousGetHandle());
             Marshal.WriteIntPtr(inheritedHandlesPointer, IntPtr.Size * 2, stderr.ClientSafePipeHandle.DangerousGetHandle());
@@ -304,9 +359,9 @@ public sealed class WindowsSandboxController : IDisposable
                 NativeMethods.DeleteProcThreadAttributeList(attributeList);
                 Marshal.FreeHGlobal(attributeList);
             }
-            Marshal.FreeHGlobal(capabilitiesPointer);
+            if (capabilitiesPointer != IntPtr.Zero) Marshal.FreeHGlobal(capabilitiesPointer);
             Marshal.FreeHGlobal(inheritedHandlesPointer);
-            Marshal.FreeHGlobal(appContainerSidPointer);
+            if (appContainerSidPointer != IntPtr.Zero) Marshal.FreeHGlobal(appContainerSidPointer);
             if (capabilityArray != IntPtr.Zero) Marshal.FreeHGlobal(capabilityArray);
             if (capabilitySid != IntPtr.Zero) NativeMethods.LocalFree(capabilitySid);
         }

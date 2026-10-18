@@ -151,6 +151,45 @@ button:disabled, input:disabled { cursor: not-allowed; }
 .source-menu-info b { overflow: hidden; color: var(--ui-text); font-size: 12px; font-weight: 560; text-overflow: ellipsis; white-space: nowrap; }
 .source-menu-info small { overflow: hidden; color: #9aa5ae; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .run-error { display: flex; align-items: flex-start; gap: 8px; margin: -6px 0 22px; padding: 10px 0; border-block: 1px solid #edd4d1; color: var(--ui-danger); font-size: 13px; }
+.work-content { min-height: 0; display: flex; flex-direction: column; }
+.work-content .message-scroll { flex: 1; }
+.work-activity { z-index: 3; width: min(calc(100% - 56px), 790px); flex: 0 0 auto; max-height: 45vh; margin: 10px auto 0; overflow: auto; border: 1px solid #dfe5e9; border-radius: 10px; background: #fbfcfc; box-shadow: 0 3px 12px rgba(42,57,69,.04); }
+.work-status-row { min-height: 42px; display: flex; align-items: center; gap: 9px; padding: 5px 11px; }
+.work-status-row strong { min-width: 0; flex: 1; overflow: hidden; color: #4b5c69; font-size: 12px; font-weight: 560; text-overflow: ellipsis; white-space: nowrap; }
+.work-status-row .text-button { min-height: 30px; font-size: 11px; }
+.work-status-dot { width: 8px; height: 8px; border-radius: 50%; background: #aeb6bd; }
+.work-status-dot.active { background: var(--ui-accent); box-shadow: 0 0 0 4px var(--ui-accent-soft); animation: work-pulse 1.7s ease-in-out infinite; }
+@keyframes work-pulse { 50% { opacity: .5; } }
+.approval-card { margin: 0 10px 10px; padding: 13px; border: 1px solid #e2cda9; border-radius: 9px; background: #fffaf1; }
+.approval-card > div:first-child { display: flex; align-items: flex-start; gap: 9px; color: #68583d; }
+.approval-card > div:first-child span { min-width: 0; }
+.approval-card b, .approval-card small { display: block; }
+.approval-card b { font-size: 13px; }
+.approval-card small { margin-top: 3px; overflow-wrap: anywhere; color: #86765c; font-size: 11px; }
+.approval-card pre, .tool-history pre { max-height: 150px; overflow: auto; margin: 10px 0 0; padding: 8px; border-radius: 6px; color: #42515d; background: rgba(239,242,244,.75); font: 11px/1.5 "Cascadia Code", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.approval-card > p { margin: 8px 0 0; color: #84755f; font-size: 11px; }
+.approval-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px; }
+.approval-actions .primary-button, .approval-actions .text-button { min-height: 32px; }
+.tool-history { border-top: 1px solid #e8ecef; }
+.tool-history details + details { border-top: 1px solid #edf0f2; }
+.tool-history summary { min-height: 38px; display: flex; align-items: center; gap: 9px; padding: 0 12px; cursor: pointer; list-style: none; }
+.tool-history summary::-webkit-details-marker { display: none; }
+.tool-history summary span { min-width: 0; flex: 1; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.tool-history summary small { color: var(--ui-muted); font-size: 10px; }
+.tool-history details > div { padding: 0 12px 12px; }
+.tool-history details > div > b { display: block; margin-top: 8px; color: var(--ui-muted); font-size: 10px; font-weight: 560; text-transform: uppercase; }
+.tool-state { font-size: 10px; font-style: normal; }
+.tool-state.state-completed { color: var(--ui-success); }
+.tool-state.state-failed, .tool-state.state-cancelled { color: var(--ui-danger); }
+.tool-state.state-running { color: var(--ui-accent); }
+.tool-error { color: var(--ui-danger); font-size: 11px; }
+.artifact-list { display: flex; flex-wrap: wrap; gap: 7px; padding: 10px; border-top: 1px solid #e8ecef; }
+.artifact-list > button { min-width: 190px; max-width: 280px; display: flex; align-items: center; gap: 9px; padding: 9px 10px; border: 1px solid #dce3e8; border-radius: 8px; color: #40576a; background: #fff; cursor: pointer; text-align: left; }
+.artifact-list > button:hover { border-color: #adbecb; background: #f7fafb; }
+.artifact-list > button span { min-width: 0; flex: 1; }
+.artifact-list b, .artifact-list small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-list b { font-size: 12px; }
+.artifact-list small { margin-top: 2px; color: var(--ui-muted); font-size: 10px; }
 .empty-chat { display: grid; place-items: center; }
 .empty-greeting { display: grid; justify-items: center; gap: 15px; padding-bottom: 7vh; text-align: center; }
 .empty-greeting h2 { margin: 0; font-size: 21px; font-weight: 530; }
@@ -169,6 +208,10 @@ button:disabled, input:disabled { cursor: not-allowed; }
 .send-button { width: 38px; height: 38px; display: grid; place-items: center; flex: 0 0 auto; padding: 0; border: 0; border-radius: 8px; color: #929ca5; background: transparent; transition: color 170ms, background 170ms; }
 .send-button.ready { color: #fff; background: var(--ui-accent); cursor: pointer; }
 .send-button.ready:hover { background: var(--ui-accent-hover); }
+.composer-tool, .stop-button { width: 36px; height: 38px; display: grid; place-items: center; flex: 0 0 auto; padding: 0; border: 0; border-radius: 8px; color: #7c8790; background: transparent; cursor: pointer; }
+.composer-tool:hover { color: var(--ui-accent); background: var(--ui-accent-soft); }
+.stop-button { color: var(--ui-danger); background: #fbefed; }
+.stop-button:hover { background: #f5dedb; }
 .composer-wrap > p { margin: 6px 0 0; color: #949ba3; font-size: 11px; text-align: center; }
 .key-hint { min-height: 30px; display: flex; align-items: center; gap: 5px; margin: 5px auto 0; padding: 0 7px; border: 0; color: var(--ui-accent); background: transparent; font-size: 11px; cursor: pointer; }
 

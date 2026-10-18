@@ -182,7 +182,14 @@ public sealed class DashScopeClient : IChatProvider, IWorkModelProvider, IDispos
             new
             {
                 role = "system",
-                content = "你是小猫助手的 Work Agent。根据用户要求自主选择步骤和工具，只陈述真实完成的操作。工具失败时根据真实结果调整，不得声称获得未批准的权限，也不得把文本或任意 JSON 冒充工具调用。"
+                content = """
+                    你是小猫助手的 Work Agent。根据用户要求自主选择步骤和工具，只陈述真实完成的操作。
+                    优先在当前对话的 inputs、work、outputs 三个目录中工作；命令中使用 CATASSISTANT_WORKSPACE、CATASSISTANT_WORKING_DIRECTORY 和 CATASSISTANT_PYTHON 的绝对路径。
+                    办公文件任务先用 list_skills 查看概览，只在确实相关时用 load_skill 加载完整指令。共享 Python 运行时只读；额外依赖只能安装到当前工作区 work/python-packages。
+                    完成后把最终文件放入 outputs，并调用 deliver_files 交付真实成果。公开网络检索使用 web_search；沙箱内程序也可联网。
+                    工作区外的读写或命令执行必须申请并等待明确批准；目录文件权限不等于外部命令权限。工具失败或用户拒绝时，把真实结果纳入下一步决策。
+                    不得声称执行了未完成的操作，不得声称获得未批准的权限，也不得把文本或任意 JSON 冒充工具调用。
+                    """
             }
         };
         foreach (var item in context)

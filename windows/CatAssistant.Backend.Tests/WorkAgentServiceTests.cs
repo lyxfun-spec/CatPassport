@@ -81,6 +81,43 @@ public sealed class WorkAgentServiceTests
         Assert.Empty(fixture.Provider.Contexts);
     }
 
+    [Fact]
+    public async Task DifferentConversationsRunConcurrentlyWithoutSharingWorkspaces()
+    {
+        await using var fixture = await WorkAgentFixture.CreateAsync();
+        var secondConversation = await fixture.Repository.CreateConversationAsync("work");
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var bothStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var starts = 0;
+        fixture.Tools.Register(new BlockingTool("shared-wait", () =>
+        {
+            if (Interlocked.Increment(ref starts) == 2) bothStarted.TrySetResult();
+        }, release.Task));
+        fixture.Provider.Enqueue(new WorkModelResponse(null, [new WorkModelToolCall("call-a", "shared-wait", "{}") ]));
+        fixture.Provider.Enqueue(new WorkModelResponse(null, [new WorkModelToolCall("call-b", "shared-wait", "{}") ]));
+        fixture.Provider.Enqueue(new WorkModelResponse("完成", []));
+        fixture.Provider.Enqueue(new WorkModelResponse("完成", []));
+
+        await fixture.Agent.SendAsync(fixture.ConversationId, "任务 A", "desktop");
+        await fixture.Agent.SendAsync(secondConversation.Id, "任务 B", "desktop");
+        await bothStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.NotNull(fixture.Agent.ActiveRunId(fixture.ConversationId));
+        Assert.NotNull(fixture.Agent.ActiveRunId(secondConversation.Id));
+
+        release.TrySetResult();
+        await fixture.Provider.WaitForCallsAsync(4);
+        await WaitUntilAsync(() => fixture.Agent.ActiveRunId(fixture.ConversationId) is null && fixture.Agent.ActiveRunId(secondConversation.Id) is null);
+        var firstWorkspace = await fixture.Workspaces.EnsureAsync(fixture.ConversationId);
+        var secondWorkspace = await fixture.Workspaces.EnsureAsync(secondConversation.Id);
+        Assert.NotEqual(firstWorkspace.Root, secondWorkspace.Root);
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        for (var attempt = 0; attempt < 100 && !condition(); attempt++) await Task.Delay(20);
+        Assert.True(condition());
+    }
+
     private static string? JsonContent(WorkContextItem item)
     {
         using var json = JsonDocument.Parse(item.PayloadJson);
@@ -163,11 +200,12 @@ public sealed class WorkAgentServiceTests
         private readonly string _workspaceRoot;
         private readonly WorkWorkspaceService _workspaces;
 
-        private WorkAgentFixture(string databasePath, string workspaceRoot, WorkWorkspaceService workspaces, ControlledWorkProvider provider, WorkToolRegistry tools, WorkAgentService agent, string conversationId)
+        private WorkAgentFixture(string databasePath, string workspaceRoot, SqliteRepository repository, WorkWorkspaceService workspaces, ControlledWorkProvider provider, WorkToolRegistry tools, WorkAgentService agent, string conversationId)
         {
             _databasePath = databasePath;
             _workspaceRoot = workspaceRoot;
             _workspaces = workspaces;
+            Repository = repository;
             Provider = provider;
             Tools = tools;
             Agent = agent;
@@ -176,6 +214,8 @@ public sealed class WorkAgentServiceTests
         }
 
         public ControlledWorkProvider Provider { get; }
+        public SqliteRepository Repository { get; }
+        public WorkWorkspaceService Workspaces => _workspaces;
         public WorkToolRegistry Tools { get; }
         public WorkAgentService Agent { get; }
         public string ConversationId { get; }
@@ -194,7 +234,7 @@ public sealed class WorkAgentServiceTests
             var provider = new ControlledWorkProvider();
             var tools = new WorkToolRegistry();
             var agent = new WorkAgentService(repository, workspaces, provider, tools, () => new AppSettings(), () => "key", CancellationToken.None, contextCharacterLimit);
-            return new WorkAgentFixture(databasePath, workspaceRoot, workspaces, provider, tools, agent, conversation.Id);
+            return new WorkAgentFixture(databasePath, workspaceRoot, repository, workspaces, provider, tools, agent, conversation.Id);
         }
 
         private void OnChanged(object? sender, ConversationEvent update)

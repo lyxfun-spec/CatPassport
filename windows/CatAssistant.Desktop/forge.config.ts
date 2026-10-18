@@ -9,13 +9,15 @@ import { fileURLToPath } from 'node:url';
 const desktopDirectory = path.dirname(fileURLToPath(import.meta.url));
 const backendProject = path.resolve(desktopDirectory, '..', 'CatAssistant.Backend', 'CatAssistant.Backend.csproj');
 const backendOutput = path.resolve(desktopDirectory, '.artifacts', 'backend');
+const workRuntimeOutput = path.resolve(desktopDirectory, '.artifacts', 'work-runtime');
+const prepareWorkRuntime = path.resolve(desktopDirectory, 'scripts', 'Prepare-WorkRuntime.ps1');
 const iconPath = path.resolve(desktopDirectory, '..', '..', 'assets', 'branding', 'cat-assistant-icon-transparent.png');
 
 const config: ForgeConfig = {
   packagerConfig: {
     asar: true,
     executableName: 'CatAssistant',
-    extraResource: [backendOutput, iconPath],
+    extraResource: [backendOutput, workRuntimeOutput, iconPath],
     download: {
       // Pin the official Electron release checksums so packaging remains verifiable
       // when GitHub's checksum endpoint is unavailable from the build environment.
@@ -30,6 +32,8 @@ const config: ForgeConfig = {
     prePackage: async (_config, platform, arch) => {
       if (platform !== 'win32') throw new Error('小猫助手桌面版目前只支持 Windows 打包。');
       const rid = arch === 'arm64' ? 'win-arm64' : 'win-x64';
+      execFileSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', prepareWorkRuntime,
+        '-OutputDirectory', workRuntimeOutput, '-Architecture', arch === 'arm64' ? 'arm64' : 'x64'], { stdio: 'inherit' });
       execFileSync('dotnet', ['publish', backendProject, '-c', 'Release', '-r', rid, '--self-contained', 'true', '-o', backendOutput], { stdio: 'inherit' });
     }
   },

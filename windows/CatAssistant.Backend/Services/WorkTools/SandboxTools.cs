@@ -4,20 +4,20 @@ using CatAssistant.Backend.Services.Work;
 
 namespace CatAssistant.Backend.Services.WorkTools;
 
-public sealed class ExecuteCommandTool(WindowsSandboxController sandbox) : IWorkTool
+public sealed class ExecuteCommandTool(WindowsSandboxController sandbox, WorkApprovalService? approvals = null) : IWorkTool
 {
     public WorkToolDefinition Definition { get; } = new(
         "execute_command",
-        "Run a PowerShell or cmd command inside the current conversation's Windows OS sandbox. The process and all children can access only this workspace and may access the network.",
+        "Run a PowerShell or cmd command inside the current conversation's Windows OS sandbox. The process and all children can access only this workspace and may access the network. Use $env:CATASSISTANT_WORKSPACE and $env:CATASSISTANT_WORKING_DIRECTORY for absolute paths. A bundled Python with office libraries is at $env:CATASSISTANT_PYTHON; install extras with pip --target under the workspace.",
         """
-        {"type":"object","properties":{"command":{"type":"string"},"shell":{"type":"string","enum":["powershell","cmd"]},"working_directory":{"type":"string","description":"Workspace-relative directory; defaults to work"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":3600}},"required":["command"],"additionalProperties":false}
+        {"type":"object","properties":{"command":{"type":"string"},"shell":{"type":"string","enum":["powershell","cmd"]},"working_directory":{"type":"string","description":"Workspace-relative directory; defaults to work"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":3600},"outside_sandbox":{"type":"boolean","description":"Request explicit approval to run this exact command outside the sandbox"}},"required":["command"],"additionalProperties":false}
         """);
 
     public async Task<WorkToolResult> ExecuteAsync(WorkToolExecutionContext context, string argumentsJson, CancellationToken cancellationToken)
     {
         var arguments = WorkToolArguments.Parse<Arguments>(argumentsJson);
         if (string.IsNullOrWhiteSpace(arguments.Command)) return WorkToolResult.Error("invalid_arguments", "command 不能为空。");
-        var workingDirectory = WorkspaceToolPaths.Resolve(context.WorkspaceRoot, arguments.WorkingDirectory ?? "work");
+        var workingDirectory = WorkspaceToolPaths.FullPath(context.WorkspaceRoot, arguments.WorkingDirectory ?? "work");
         if (!Directory.Exists(workingDirectory)) return WorkToolResult.Error("directory_not_found", "工作目录不存在。");
         var timeoutSeconds = Math.Clamp(arguments.TimeoutSeconds ?? 300, 1, 3600);
         var useCmd = string.Equals(arguments.Shell, "cmd", StringComparison.OrdinalIgnoreCase);
@@ -27,15 +27,23 @@ public sealed class ExecuteCommandTool(WindowsSandboxController sandbox) : IWork
             ? Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe"
             : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
         var processArguments = useCmd
-            ? $"/d /q /c chcp 65001>nul & {arguments.Command}"
-            : $"-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command [Console]::OutputEncoding=[Text.Encoding]::UTF8; {arguments.Command}";
+            ? $"/d /q /c chcp 65001>nul & set \"CATASSISTANT_WORKSPACE={context.WorkspaceRoot}\" & set \"CATASSISTANT_WORKING_DIRECTORY={workingDirectory}\" & {arguments.Command}"
+            : $"-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes($"[Console]::OutputEncoding=[Text.Encoding]::UTF8; $ErrorActionPreference='Stop'; $env:CATASSISTANT_WORKSPACE='{ReadFileTool.PowerShellLiteral(context.WorkspaceRoot)}'; $env:CATASSISTANT_WORKING_DIRECTORY='{ReadFileTool.PowerShellLiteral(workingDirectory)}'; {arguments.Command}; if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}"))}";
         try
         {
-            var result = await sandbox.ExecuteAsync(
-                context.ConversationId,
-                context.WorkspaceRoot,
-                new SandboxCommand(executable, processArguments, workingDirectory, TimeSpan.FromSeconds(timeoutSeconds)),
-                cancellationToken);
+            var command = new SandboxCommand(executable, processArguments, workingDirectory, TimeSpan.FromSeconds(timeoutSeconds));
+            SandboxCommandResult result;
+            if (arguments.OutsideSandbox == true || !WorkspaceToolPaths.IsInside(context.WorkspaceRoot, workingDirectory))
+            {
+                if (approvals is null) return WorkToolResult.Error("approval_unavailable", "外部命令需要用户审批。");
+                var approval = await approvals.RequestAsync(context, argumentsJson, "single", workingDirectory, "execute", cancellationToken);
+                if (!approval.Approved) return WorkToolResult.Error("permission_rejected", "用户拒绝了外部命令执行请求。");
+                result = await sandbox.ExecuteApprovedExternalAsync(command, cancellationToken);
+            }
+            else
+            {
+                result = await sandbox.ExecuteAsync(context.ConversationId, context.WorkspaceRoot, command, cancellationToken);
+            }
             var payload = new
             {
                 exit_code = result.ExitCode,
@@ -52,26 +60,41 @@ public sealed class ExecuteCommandTool(WindowsSandboxController sandbox) : IWork
         catch (UnauthorizedAccessException error) { return WorkToolResult.Error("access_denied", error.Message); }
     }
 
-    private sealed record Arguments(string Command, string? Shell, string? WorkingDirectory, int? TimeoutSeconds);
+    private sealed record Arguments(string Command, string? Shell, string? WorkingDirectory, int? TimeoutSeconds, bool? OutsideSandbox);
 }
 
-public sealed class ReadFileTool(WindowsSandboxController sandbox) : IWorkTool
+public sealed class ReadFileTool(WindowsSandboxController sandbox, WorkApprovalService? approvals = null) : IWorkTool
 {
     public WorkToolDefinition Definition { get; } = new(
         "read_file",
         "Read a UTF-8 text file through the current conversation's OS sandbox.",
-        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"additionalProperties\":false}");
+        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"approval_scope\":{\"type\":\"string\",\"enum\":[\"single\",\"task_directory\"]}},\"required\":[\"path\"],\"additionalProperties\":false}");
 
     public async Task<WorkToolResult> ExecuteAsync(WorkToolExecutionContext context, string argumentsJson, CancellationToken cancellationToken)
     {
         var arguments = WorkToolArguments.Parse<PathArguments>(argumentsJson);
-        var path = WorkspaceToolPaths.Resolve(context.WorkspaceRoot, arguments.Path);
+        var path = WorkspaceToolPaths.FullPath(context.WorkspaceRoot, arguments.Path);
+        if (!WorkspaceToolPaths.IsInside(context.WorkspaceRoot, path))
+        {
+            try { ExternalPathPolicy.RejectReparsePoints(path); }
+            catch (UnauthorizedAccessException error) { return WorkToolResult.Error("unsafe_external_path", error.Message); }
+            if (approvals is null) return WorkToolResult.Error("approval_unavailable", "读取工作区外文件需要用户审批。");
+            var approval = await approvals.RequestAsync(context, argumentsJson, Scope(arguments.ApprovalScope), path, "read", cancellationToken);
+            if (!approval.Approved) return WorkToolResult.Error("permission_rejected", "用户拒绝了文件读取请求。");
+            try
+            {
+                ExternalPathPolicy.RejectReparsePoints(path);
+                return WorkToolResult.Ok(new { path = arguments.Path, content = await File.ReadAllTextAsync(path, cancellationToken) });
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return WorkToolResult.Error("file_operation_failed", error.Message); }
+        }
         var command = $"[Console]::OutputEncoding=[Text.Encoding]::UTF8; [Console]::Write([IO.File]::ReadAllText('{PowerShellLiteral(path)}'))";
         return await RunPowerShellAsync(sandbox, context, command, cancellationToken, result => new { path = arguments.Path, content = result.StandardOutput });
     }
 
     internal static string PowerShellLiteral(string value) => value.Replace("'", "''", StringComparison.Ordinal);
-    private sealed record PathArguments(string Path);
+    internal static string Scope(string? value) => value is null or "single" ? "single" : value == "task_directory" ? value : throw new ArgumentException("approval_scope 无效。");
+    private sealed record PathArguments(string Path, string? ApprovalScope);
 
     internal static async Task<WorkToolResult> RunPowerShellAsync(
         WindowsSandboxController sandbox,
@@ -89,17 +112,33 @@ public sealed class ReadFileTool(WindowsSandboxController sandbox) : IWorkTool
     }
 }
 
-public sealed class WriteFileTool(WindowsSandboxController sandbox) : IWorkTool
+public sealed class WriteFileTool(WindowsSandboxController sandbox, WorkApprovalService? approvals = null) : IWorkTool
 {
     public WorkToolDefinition Definition { get; } = new(
         "write_file",
         "Create or replace a UTF-8 text file through the current conversation's OS sandbox.",
-        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"],\"additionalProperties\":false}");
+        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"},\"approval_scope\":{\"type\":\"string\",\"enum\":[\"single\",\"task_directory\"]}},\"required\":[\"path\",\"content\"],\"additionalProperties\":false}");
 
     public async Task<WorkToolResult> ExecuteAsync(WorkToolExecutionContext context, string argumentsJson, CancellationToken cancellationToken)
     {
         var arguments = WorkToolArguments.Parse<Arguments>(argumentsJson);
-        var destination = WorkspaceToolPaths.Resolve(context.WorkspaceRoot, arguments.Path);
+        var destination = WorkspaceToolPaths.FullPath(context.WorkspaceRoot, arguments.Path);
+        if (!WorkspaceToolPaths.IsInside(context.WorkspaceRoot, destination))
+        {
+            try { ExternalPathPolicy.RejectReparsePoints(destination); }
+            catch (UnauthorizedAccessException error) { return WorkToolResult.Error("unsafe_external_path", error.Message); }
+            if (approvals is null) return WorkToolResult.Error("approval_unavailable", "写入工作区外文件需要用户审批。");
+            var approval = await approvals.RequestAsync(context, argumentsJson, ReadFileTool.Scope(arguments.ApprovalScope), destination, "write", cancellationToken);
+            if (!approval.Approved) return WorkToolResult.Error("permission_rejected", "用户拒绝了文件写入请求。");
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(destination) ?? throw new ArgumentException("目标路径无效。"));
+                ExternalPathPolicy.RejectReparsePoints(destination);
+                await File.WriteAllTextAsync(destination, arguments.Content, cancellationToken);
+                return WorkToolResult.Ok(new { path = arguments.Path, bytes = System.Text.Encoding.UTF8.GetByteCount(arguments.Content) });
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return WorkToolResult.Error("file_operation_failed", error.Message); }
+        }
         sandbox.Prepare(context.ConversationId, context.WorkspaceRoot);
         var runtime = Path.Combine(context.WorkspaceRoot, ".runtime");
         Directory.CreateDirectory(runtime);
@@ -115,36 +154,61 @@ public sealed class WriteFileTool(WindowsSandboxController sandbox) : IWorkTool
         finally { try { File.Delete(staging); } catch { } }
     }
 
-    private sealed record Arguments(string Path, string Content);
+    private sealed record Arguments(string Path, string Content, string? ApprovalScope);
 }
 
-public sealed class ListDirectoryTool(WindowsSandboxController sandbox) : IWorkTool
+public sealed class ListDirectoryTool(WindowsSandboxController sandbox, WorkApprovalService? approvals = null) : IWorkTool
 {
     public WorkToolDefinition Definition { get; } = new(
         "list_directory",
         "List files and directories through the current conversation's OS sandbox.",
-        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"additionalProperties\":false}");
+        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"approval_scope\":{\"type\":\"string\",\"enum\":[\"single\",\"task_directory\"]}},\"additionalProperties\":false}");
 
     public async Task<WorkToolResult> ExecuteAsync(WorkToolExecutionContext context, string argumentsJson, CancellationToken cancellationToken)
     {
         var arguments = WorkToolArguments.Parse<Arguments>(argumentsJson);
-        var path = WorkspaceToolPaths.Resolve(context.WorkspaceRoot, arguments.Path ?? ".");
+        var path = WorkspaceToolPaths.FullPath(context.WorkspaceRoot, arguments.Path ?? ".");
+        if (!WorkspaceToolPaths.IsInside(context.WorkspaceRoot, path))
+        {
+            try { ExternalPathPolicy.RejectReparsePoints(path); }
+            catch (UnauthorizedAccessException error) { return WorkToolResult.Error("unsafe_external_path", error.Message); }
+            if (approvals is null) return WorkToolResult.Error("approval_unavailable", "列出工作区外目录需要用户审批。");
+            var approval = await approvals.RequestAsync(context, argumentsJson, ReadFileTool.Scope(arguments.ApprovalScope), path, "read", cancellationToken);
+            if (!approval.Approved) return WorkToolResult.Error("permission_rejected", "用户拒绝了目录读取请求。");
+            try
+            {
+                ExternalPathPolicy.RejectReparsePoints(path);
+                var entries = new DirectoryInfo(path).EnumerateFileSystemInfos().Select(entry => new
+                {
+                    entry.Name,
+                    Length = entry is FileInfo file ? file.Length : (long?)null,
+                    Attributes = entry.Attributes.ToString(),
+                    entry.LastWriteTimeUtc
+                }).ToArray();
+                return WorkToolResult.Ok(new { path = arguments.Path ?? ".", entries });
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return WorkToolResult.Error("file_operation_failed", error.Message); }
+        }
         var command = $"Get-ChildItem -LiteralPath '{ReadFileTool.PowerShellLiteral(path)}' -Force | Select-Object Name,Length,Attributes,LastWriteTimeUtc | ConvertTo-Json -Compress";
         return await ReadFileTool.RunPowerShellAsync(sandbox, context, command, cancellationToken,
             result => new { path = arguments.Path ?? ".", entries_json = string.IsNullOrWhiteSpace(result.StandardOutput) ? "[]" : result.StandardOutput.Trim() });
     }
 
-    private sealed record Arguments(string? Path);
+    private sealed record Arguments(string? Path, string? ApprovalScope);
 }
 
 internal static class WorkspaceToolPaths
 {
-    internal static string Resolve(string workspaceRoot, string path)
+    internal static string FullPath(string workspaceRoot, string path)
     {
         if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("path 不能为空。");
-        var candidate = Path.GetFullPath(Path.IsPathRooted(path) ? path : Path.Combine(workspaceRoot, path));
-        WindowsSandboxController.EnsureContained(workspaceRoot, candidate);
-        return candidate;
+        return Path.GetFullPath(Path.IsPathRooted(path) ? path : Path.Combine(workspaceRoot, path));
+    }
+
+    internal static bool IsInside(string workspaceRoot, string path)
+    {
+        try { WindowsSandboxController.EnsureContained(workspaceRoot, path); return true; }
+        catch (UnauthorizedAccessException) { return false; }
     }
 }
 
@@ -154,4 +218,23 @@ internal static class WorkToolArguments
 
     internal static T Parse<T>(string json) where T : class =>
         JsonSerializer.Deserialize<T>(json, Options) ?? throw new ArgumentException("工具参数无效。");
+}
+
+internal static class ExternalPathPolicy
+{
+    internal static void RejectReparsePoints(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        var root = Path.GetPathRoot(fullPath) ?? throw new ArgumentException("外部路径无效。", nameof(path));
+        var relative = fullPath[root.Length..];
+        var current = root;
+        foreach (var segment in relative.Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            if (!File.Exists(current) && !Directory.Exists(current)) continue;
+            var attributes = File.GetAttributes(current);
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+                throw new UnauthorizedAccessException($"为避免授权范围被重解析点绕过，拒绝访问：{current}");
+        }
+    }
 }
