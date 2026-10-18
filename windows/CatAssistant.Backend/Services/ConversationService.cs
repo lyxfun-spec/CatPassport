@@ -220,7 +220,7 @@ public sealed class ConversationService : IAsyncDisposable
     {
         var history = await _repository.LoadMessagesAsync(run.ConversationId);
         var context = BuildContext(history.Where(message => message.Id != run.AssistantMessageId).ToArray());
-        var citations = new Dictionary<string, CitationRecord>(StringComparer.OrdinalIgnoreCase);
+        var citations = new Dictionary<int, CitationRecord>();
         var settings = _settings();
         await foreach (var chunk in _provider.StreamAsync(context, settings.ChatModel, _apiKey(), settings.WebSearchEnabled, run.Cancellation.Token))
         {
@@ -237,7 +237,7 @@ public sealed class ConversationService : IAsyncDisposable
                 Publish(new ConversationEvent("message.delta", run.ConversationId, run.AssistantMessageId, run.Id, chunk.Delta));
             }
             if (chunk.Citations is not null)
-                foreach (var citation in chunk.Citations) citations[citation.Url] = citation;
+                foreach (var citation in chunk.Citations) citations.TryAdd(citation.Ordinal, citation);
         }
         var gate = Gate(run.ConversationId);
         await gate.WaitAsync(_lifetime);
@@ -250,12 +250,15 @@ public sealed class ConversationService : IAsyncDisposable
             await _repository.UpdateMessageAsync(run.AssistantMessageId, content, "complete");
             if (citations.Count > 0)
             {
-                var normalized = citations.Values.Select((item, index) => item with { MessageId = run.AssistantMessageId, Ordinal = index + 1 }).ToArray();
+                var normalized = citations.Values.OrderBy(item => item.Ordinal).Select(item => item with { MessageId = run.AssistantMessageId }).ToArray();
                 await _repository.ReplaceCitationsAsync(run.AssistantMessageId, normalized);
             }
             await _repository.FinishRunAsync(run.Id, "completed", "stop");
             var message = (await _repository.LoadMessagesAsync(run.ConversationId)).Single(item => item.Id == run.AssistantMessageId);
             Publish(new ConversationEvent("message.completed", run.ConversationId, run.AssistantMessageId, run.Id, Message: message, Status: "completed"));
+            var userMessages = history.Where(item => item.Role == "user").Take(2).ToArray();
+            if (userMessages.Length == 1 && !string.IsNullOrWhiteSpace(content))
+                _ = GenerateTitleObservedAsync(run.ConversationId, userMessages[0].Content, CitationMarkers.Strip(content));
         }
         finally
         {
@@ -307,11 +310,39 @@ public sealed class ConversationService : IAsyncDisposable
             if (message.Role == "assistant" && message.Status is not ("complete" or "interrupted")) continue;
             if (message.Role == "user" && message.Status != "complete") continue;
             if (selected.Count > 0 && used + message.Content.Length > characterBudget) break;
-            selected.Add(message);
+            selected.Add(message.Role == "assistant" ? message with { Content = CitationMarkers.Strip(message.Content) } : message);
             used += message.Content.Length;
         }
         selected.Reverse();
         return selected;
+    }
+
+    private async Task GenerateTitleObservedAsync(string conversationId, string userMessage, string assistantMessage)
+    {
+        try
+        {
+            var conversation = await _repository.GetConversationAsync(conversationId);
+            if (conversation is null || conversation.TitleSource == "user") return;
+            var settings = _settings();
+            var candidate = await _provider.GenerateTitleAsync(userMessage, assistantMessage, settings.ChatModel, _apiKey(), _lifetime);
+            var title = NormalizeGeneratedTitle(candidate);
+            if (title is null || !await _repository.TrySetGeneratedTitleAsync(conversationId, title)) return;
+            conversation = await _repository.GetConversationAsync(conversationId);
+            Publish(new ConversationEvent("conversation.updated", conversationId, Conversation: conversation));
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch { }
+    }
+
+    internal static string? NormalizeGeneratedTitle(string value)
+    {
+        var title = string.Join(' ', value.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        title = title.Trim('"', '\'', '“', '”', '‘', '’', '#', '*', '`', ' ');
+        foreach (var prefix in new[] { "标题：", "标题:", "Title:", "Title：" })
+            if (title.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) title = title[prefix.Length..].Trim();
+        title = title.Trim('"', '\'', '“', '”', '‘', '’', '#', '*', '`', ' ', '。');
+        if (title.Length == 0) return null;
+        return title.Length <= 36 ? title : title[..36];
     }
 
     private bool IsCurrent(ActiveRun run) => _runs.TryGetValue(run.ConversationId, out var current) && ReferenceEquals(current, run);

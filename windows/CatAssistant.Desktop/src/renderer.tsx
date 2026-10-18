@@ -1,7 +1,9 @@
-import React, { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
-import ReactMarkdown from 'react-markdown';
-import type { BackendEvent, BootstrapState, CatDevice, ConversationDetail, ConversationMessage, ConversationSummary, PublicSettings } from './shared';
+import ReactMarkdown, { type Components } from 'react-markdown';
+import type { BackendEvent, BootstrapState, CatDevice, Citation, ConversationDetail, ConversationMessage, ConversationSummary, PublicSettings } from './shared';
+import { citationOrdinal, hidePartialCitationMarker, remarkCitations, stripCitationMarkers } from './citations';
 import { deviceDiscoveryMessage, initialState, reduceBackendEvent } from './state';
 import { clampTextareaHeight, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldSubmitComposer } from './ui-behavior';
 import { AnchorRect, AnchoredSurface, rectOf, ScrollArea } from './ui-primitives';
@@ -238,6 +240,35 @@ function Sidebar({ bootstrap, query, onQuery, collapsed, onToggle, onNew, onSele
   </aside>;
 }
 
+function ConversationContextMenu({ value, onClose, onPin, onAction }: {
+  value: ConversationContext; onClose(): void; onPin(conversation: ConversationSummary): void;
+  onAction(kind: 'rename' | 'delete', anchor: AnchorRect, conversation: ConversationSummary): void;
+}) {
+  const menu = useRef<HTMLDivElement>(null);
+  const firstItem = useRef<HTMLButtonElement>(null);
+  useLayoutEffect(() => {
+    if (!value || !menu.current) return;
+    const box = menu.current.getBoundingClientRect();
+    menu.current.style.left = `${Math.max(8, Math.min(value.left, window.innerWidth - box.width - 8))}px`;
+    menu.current.style.top = `${Math.max(8, Math.min(value.top, window.innerHeight - box.height - 8))}px`;
+    firstItem.current?.focus({ preventScroll: true });
+  }, [value]);
+  useEffect(() => {
+    if (!value) return;
+    const closeOnPointer = (event: PointerEvent) => { if (!menu.current?.contains(event.target as Node)) onClose(); };
+    const closeOnKey = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
+    window.addEventListener('resize', onClose); document.addEventListener('pointerdown', closeOnPointer); document.addEventListener('keydown', closeOnKey);
+    return () => { window.removeEventListener('resize', onClose); document.removeEventListener('pointerdown', closeOnPointer); document.removeEventListener('keydown', closeOnKey); };
+  }, [value, onClose]);
+  if (!value) return null;
+  const choose = (kind: 'rename' | 'delete', element: HTMLButtonElement) => onAction(kind, rectOf(element), value.conversation);
+  return <div ref={menu} className="conversation-context-menu" role="menu" aria-label="对话操作" style={{ left: value.left, top: value.top }}>
+    <button ref={firstItem} role="menuitem" onClick={() => onPin(value.conversation)}><Icon name="pin"/>{value.conversation.isPinned ? '取消置顶' : '置顶'}</button>
+    <button role="menuitem" onClick={event => choose('rename', event.currentTarget)}><Icon name="rename"/>重命名</button>
+    <button role="menuitem" className="danger" onClick={event => choose('delete', event.currentTarget)}><Icon name="delete"/>删除</button>
+  </div>;
+}
+
 function ConversationHeader({ conversation, onAction }: { conversation: ConversationSummary; onAction(kind: 'rename' | 'delete', anchor: AnchorRect): void }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuRendered, setMenuRendered] = useState(false);
@@ -302,10 +333,151 @@ function MessageItem({ message, citations }: { message: ConversationMessage; cit
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(copyTimer.current), []);
-  const copy = async () => { clearTimeout(copyTimer.current); try { await navigator.clipboard.writeText(message.content); setCopyState('copied'); } catch { setCopyState('failed'); } copyTimer.current = setTimeout(() => setCopyState('idle'), 1650); };
+  const [sourcesOpen, setSourcesOpen] = useState(false);
+  const [sourceTarget, setSourceTarget] = useState<SourceTarget>();
+  const sourcesOpenRef = useRef(sourcesOpen);
+  sourcesOpenRef.current = sourcesOpen;
+  const revealSource = useCallback((ordinal: number) => {
+    setSourceTarget({ ordinal, nonce: Date.now(), delay: sourcesOpenRef.current ? 0 : 300 });
+    setSourcesOpen(true);
+  }, []);
+  const copy = async () => { clearTimeout(copyTimer.current); try { await navigator.clipboard.writeText(stripCitationMarkers(message.content)); setCopyState('copied'); } catch { setCopyState('failed'); } copyTimer.current = setTimeout(() => setCopyState('idle'), 1650); };
   if (message.role === 'assistant' && message.status === 'streaming' && !message.content) return <article className="message assistant"><div className="thinking" role="status"><i/><i/><i/><span className="sr-only">正在生成回复</span></div></article>;
   const safeCitations = citations.filter(citation => safeHttpUrl(citation.url));
-  return <article className={`message ${message.role} ${message.status}`}><div className="message-body">{message.role === 'assistant' ? <ReactMarkdown components={{ a: ({ href, children }) => safeHttpUrl(href) ? <a href={href} target="_blank" rel="noreferrer">{children}</a> : <span>{children}</span> }}>{message.content}</ReactMarkdown> : <p>{message.content}</p>}</div>{safeCitations.length > 0 && <div className="sources"><span>参考</span>{safeCitations.map(citation => <a key={citation.id} href={citation.url} target="_blank" rel="noreferrer"><b>{citation.ordinal}</b><span>{citation.title}</span></a>)}</div>}{message.role === 'assistant' && message.content && <div className="message-actions">{message.status === 'interrupted' && <span>已中断</span>}{message.status === 'failed' && <span className="failed-label">生成失败</span>}<button onClick={() => void copy()} aria-label="复制回复"><Icon name={copyState === 'copied' ? 'check' : 'copy'} size={15}/>{copyState === 'copied' ? '已复制' : copyState === 'failed' ? '复制失败' : '复制'}</button></div>}</article>;
+  return <article className={`message ${message.role} ${message.status}`}><div className="message-body">{message.role === 'assistant' ? <AssistantMarkdown content={message.content} streaming={message.status === 'streaming'} citations={safeCitations} onCite={revealSource}/> : <p>{message.content}</p>}</div>{safeCitations.length > 0 && <SourceList messageId={message.id} citations={safeCitations} open={sourcesOpen} onToggle={() => setSourcesOpen(value => !value)} target={sourceTarget}/>}{message.role === 'assistant' && message.content && <div className="message-actions">{message.status === 'interrupted' && <span>已中断</span>}{message.status === 'failed' && <span className="failed-label">生成失败</span>}<button onClick={() => void copy()} aria-label="复制回复"><Icon name={copyState === 'copied' ? 'check' : 'copy'} size={15}/>{copyState === 'copied' ? '已复制' : copyState === 'failed' ? '复制失败' : '复制'}</button></div>}</article>;
+}
+
+const markdownPlugins = [remarkCitations];
+function AssistantMarkdown({ content, streaming, citations, onCite }: { content: string; streaming: boolean; citations: Citation[]; onCite(ordinal: number): void }) {
+  const components = useMemo<Components>(() => {
+    const byOrdinal = new Map(citations.map(citation => [citation.ordinal, citation]));
+    return {
+      a: ({ href, children }) => {
+        const ordinal = citationOrdinal(href);
+        if (ordinal === undefined) return safeHttpUrl(href) ? <a href={href} target="_blank" rel="noreferrer">{children}</a> : <span>{children}</span>;
+        const citation = byOrdinal.get(ordinal);
+        if (citation) return <span className="citation-ref"><button type="button" onClick={() => onCite(ordinal)} title={citation.sourceName ? `${citation.title} · ${citation.sourceName}` : citation.title} aria-label={`查看来源 ${ordinal}：${citation.title}`}>{ordinal}</button></span>;
+        return streaming ? <span className="citation-ref pending" aria-hidden="true"><span>{ordinal}</span></span> : null;
+      }
+    };
+  }, [citations, streaming, onCite]);
+  return <ReactMarkdown remarkPlugins={markdownPlugins} components={components}>{streaming ? hidePartialCitationMarker(content) : content}</ReactMarkdown>;
+}
+
+interface SourceTarget { ordinal: number; nonce: number; delay: number }
+interface SourceMenuState { citation: Citation; anchor: AnchorRect; trigger: HTMLButtonElement; keyboard: boolean }
+
+function SourceList({ messageId, citations, open, onToggle, target }: { messageId: string; citations: Citation[]; open: boolean; onToggle(): void; target?: SourceTarget }) {
+  const items = useRef(new Map<number, HTMLButtonElement>());
+  const [highlighted, setHighlighted] = useState<number>();
+  const [menu, setMenu] = useState<SourceMenuState>();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuCloseTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const menuOpenFrames = useRef<{ first?: number; second?: number }>({});
+  const contentId = `sources-${messageId}`;
+  const cancelMenuOpen = () => {
+    if (menuOpenFrames.current.first !== undefined) cancelAnimationFrame(menuOpenFrames.current.first);
+    if (menuOpenFrames.current.second !== undefined) cancelAnimationFrame(menuOpenFrames.current.second);
+    menuOpenFrames.current = {};
+  };
+  const closeMenu = (restoreFocus = false) => {
+    cancelMenuOpen();
+    clearTimeout(menuCloseTimer.current);
+    setMenuOpen(false);
+    menuCloseTimer.current = setTimeout(() => setMenu(undefined), 260);
+    if (restoreFocus) menu?.trigger.focus({ preventScroll: true });
+  };
+  const chooseSource = (event: React.MouseEvent<HTMLButtonElement>, citation: Citation) => {
+    if (menuOpen && menu?.citation.id === citation.id) { closeMenu(); return; }
+    cancelMenuOpen();
+    clearTimeout(menuCloseTimer.current);
+    setMenuOpen(false);
+    setMenu({ citation, anchor: rectOf(event.currentTarget), trigger: event.currentTarget, keyboard: event.detail === 0 });
+    menuOpenFrames.current.first = requestAnimationFrame(() => {
+      menuOpenFrames.current.second = requestAnimationFrame(() => {
+        menuOpenFrames.current = {};
+        setMenuOpen(true);
+      });
+    });
+  };
+  const openSource = () => {
+    if (!menu) return;
+    window.open(menu.citation.url, '_blank', 'noopener,noreferrer');
+    closeMenu(true);
+  };
+  useEffect(() => () => { cancelMenuOpen(); clearTimeout(menuCloseTimer.current); }, []);
+  useEffect(() => {
+    if (!target) return;
+    setHighlighted(target.ordinal);
+    const reveal = setTimeout(() => {
+      const item = items.current.get(target.ordinal);
+      item?.focus({ preventScroll: true });
+      item?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }, target.delay);
+    const fade = setTimeout(() => setHighlighted(undefined), target.delay + 1400);
+    return () => { clearTimeout(reveal); clearTimeout(fade); };
+  }, [target]);
+  return <section className={`sources ${open ? 'is-open' : ''}`}>
+    <button type="button" className="sources-toggle" onClick={onToggle} aria-expanded={open} aria-controls={contentId}>
+      <span>参考来源</span><Icon name="chevron" size={13}/>
+    </button>
+    <div className="sources-disclosure" id={contentId} inert={!open}><div><div className="sources-list">{citations.map(citation => <button type="button" key={citation.id}
+      ref={element => { if (element) items.current.set(citation.ordinal, element); else items.current.delete(citation.ordinal); }}
+      className={`source-item ${highlighted === citation.ordinal ? 'is-targeted' : ''} ${menuOpen && menu?.citation.id === citation.id ? 'is-active' : ''}`}
+      onClick={event => chooseSource(event, citation)} title={citation.url} aria-haspopup="menu" aria-expanded={menuOpen && menu?.citation.id === citation.id}>
+      <b>{citation.ordinal}</b><span>{citation.title}</span>{citation.sourceName && <small>{citation.sourceName}</small>}
+    </button>)}</div></div></div>
+    {menu && <SourceMenu state={menu} open={menuOpen} onClose={closeMenu} onOpen={openSource}/>}
+  </section>;
+}
+
+function SourceMenu({ state, open, onClose, onOpen }: { state: SourceMenuState; open: boolean; onClose(restoreFocus?: boolean): void; onOpen(): void }) {
+  const menu = useRef<HTMLDivElement>(null);
+  const firstItem = useRef<HTMLButtonElement>(null);
+  const host = new URL(state.citation.url).hostname;
+  useLayoutEffect(() => {
+    const element = menu.current;
+    if (!element) return;
+    const { anchor } = state;
+    const gap = 6;
+    const width = element.offsetWidth;
+    const height = element.offsetHeight;
+    const left = Math.max(8, Math.min(anchor.left, window.innerWidth - width - 8));
+    const below = anchor.top + anchor.height + gap;
+    const above = below + height > window.innerHeight - 8 && anchor.top - gap - height >= 8;
+    const top = above ? anchor.top - gap - height : Math.min(below, window.innerHeight - height - 8);
+    const originX = anchor.left + Math.min(anchor.width / 2, 20) - left;
+    const originY = above ? height + gap + anchor.height / 2 : -(gap + anchor.height / 2);
+    element.style.left = `${left}px`;
+    element.style.top = `${top}px`;
+    element.style.transformOrigin = `${originX}px ${originY}px`;
+  }, [state]);
+  useEffect(() => {
+    if (!open) return;
+    if (state.keyboard) requestAnimationFrame(() => firstItem.current?.focus({ preventScroll: true }));
+    const onPointer = (event: PointerEvent) => {
+      const node = event.target as Node;
+      if (!menu.current?.contains(node) && !state.trigger.contains(node)) onClose();
+    };
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(true); };
+    const onViewportChange = () => onClose();
+    document.addEventListener('pointerdown', onPointer);
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('scroll', onViewportChange, true);
+    window.addEventListener('resize', onViewportChange);
+    return () => {
+      document.removeEventListener('pointerdown', onPointer);
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('scroll', onViewportChange, true);
+      window.removeEventListener('resize', onViewportChange);
+    };
+  }, [open, state]);
+  return createPortal(<div ref={menu} className={`popover-menu source-menu ${open ? 'is-open' : 'is-closing'}`} role="menu"
+    aria-label={`来源 ${state.citation.ordinal}：${state.citation.title}`} aria-hidden={!open} inert={!open}>
+    <div className="source-menu-info" aria-hidden="true"><b>{state.citation.title}</b><small>{state.citation.sourceName ? `${state.citation.sourceName} · ${host}` : host}</small></div>
+    <button ref={firstItem} role="menuitem" onClick={onOpen}><Icon name="external"/>打开网页</button>
+    <button role="menuitem" onClick={() => onClose(true)}><Icon name="close"/>取消</button>
+  </div>, document.body);
 }
 
 function Composer({ value, onChange, onSend, hasApiKey, sending, disabled = false, focusSignal, onOpenSettings }: { value: string; onChange(value: string): void; onSend(): void; hasApiKey: boolean; sending: boolean; disabled?: boolean; focusSignal: number; onOpenSettings(): void }) {
@@ -427,7 +599,7 @@ function Diagnostics({ device }: { device: BootstrapState['device'] }) {
 function GlobalAlert({ text, onClose }: { text: string; onClose(): void }) { return <div className="global-alert" role="alert"><span>{text}</span><button className="icon-button" onClick={onClose} aria-label="关闭错误提示"><Icon name="close"/></button></div>; }
 function Notice({ notice }: { notice?: NoticeState }) { return <div className={`notice ${notice ? 'visible' : ''} ${notice?.tone === 'danger' ? 'danger' : ''}`} role="status" aria-live="polite"><Icon name={notice?.tone === 'danger' ? 'info' : 'check'}/><span>{notice?.text ?? ''}</span></div>; }
 function Loading({ error }: { error?: string }) { return <div className="loading-screen"><BrandMark large/><h1>小猫助手</h1><p>{error ?? '正在准备…'}</p></div>; }
-function groupConversations(items: ConversationSummary[]) { const result = new Map<string, ConversationSummary[]>(), now = new Date(), startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime(); for (const item of items) { const updated = new Date(item.updatedAt).getTime(), age = startToday - updated, label = updated >= startToday ? '今天' : age < 2 * 86400000 ? '昨天' : age < 7 * 86400000 ? '最近 7 天' : '更早'; result.set(label, [...(result.get(label) ?? []), item]); } return [...result].map(([label, groupItems]) => ({ label, items: groupItems })); }
+function groupConversations(items: ConversationSummary[]) { const result = new Map<string, ConversationSummary[]>(), now = new Date(), startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime(); for (const item of items) { const updated = new Date(item.updatedAt).getTime(), age = startToday - updated, label = item.isPinned ? '已置顶' : updated >= startToday ? '今天' : age < 2 * 86400000 ? '昨天' : age < 7 * 86400000 ? '最近 7 天' : '更早'; result.set(label, [...(result.get(label) ?? []), item]); } return [...result].map(([label, groupItems]) => ({ label, items: groupItems })); }
 function safeHttpUrl(value?: string): value is string { if (!value) return false; try { return ['http:', 'https:'].includes(new URL(value).protocol); } catch { return false; } }
 function errorText(reason: unknown) { return reason instanceof Error ? reason.message : String(reason); }
 

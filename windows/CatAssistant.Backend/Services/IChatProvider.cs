@@ -12,5 +12,12 @@ public interface IChatProvider
         string apiKey,
         bool enableWebSearch,
         CancellationToken cancellationToken);
+
+    Task<string> GenerateTitleAsync(
+        string userMessage,
+        string assistantMessage,
+        string model,
+        string apiKey,
+        CancellationToken cancellationToken);
 }
 

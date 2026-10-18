@@ -23,6 +23,7 @@ public sealed class AssistantCoordinator : IAsyncDisposable
     private readonly SemaphoreSlim _connectionGate = new(1, 1);
     private readonly Dictionary<ulong, CatDevice> _devices = [];
     private readonly Dictionary<string, int> _cardRunBytes = [];
+    private readonly Dictionary<string, CitationMarkerStreamFilter> _cardRunMarkerFilters = [];
     private readonly object _stateLock = new();
     private readonly object _audioLock = new();
     private readonly SemaphoreSlim _audioArrived = new(0);
@@ -259,24 +260,28 @@ public sealed class AssistantCoordinator : IAsyncDisposable
             switch (update.Type)
             {
                 case "run.started" when update.RunId is not null:
-                    lock (_stateLock) _cardRunBytes[update.RunId] = 0;
+                    lock (_stateLock) { _cardRunBytes[update.RunId] = 0; _cardRunMarkerFilters[update.RunId] = new CitationMarkerStreamFilter(); }
                     await _ble.SendAsync(MessageType.ChatStarted, ReadOnlyMemory<byte>.Empty, _lifetime.Token);
                     SetStatus("AI 正在回答", "正在生成回复");
                     break;
                 case "message.delta" when update.RunId is not null && update.Delta is not null:
-                    var filtered = DisplayText.Filter(update.Delta);
-                    if (filtered.Length == 0) break;
-                    int used;
-                    lock (_stateLock) used = _cardRunBytes.GetValueOrDefault(update.RunId);
-                    var remaining = CatProtocol.AnswerMaxBytes - used;
-                    if (remaining <= 0) break;
-                    var payload = Utf8Prefix(filtered, remaining);
-                    if (payload.Length == 0) break;
-                    lock (_stateLock) _cardRunBytes[update.RunId] = used + payload.Length;
-                    await _ble.SendAsync(MessageType.ChatDelta, payload, _lifetime.Token);
+                    string visible;
+                    lock (_stateLock)
+                    {
+                        if (!_cardRunMarkerFilters.TryGetValue(update.RunId, out var markerFilter))
+                            _cardRunMarkerFilters[update.RunId] = markerFilter = new CitationMarkerStreamFilter();
+                        visible = markerFilter.Push(update.Delta);
+                    }
+                    await SendCardDeltaAsync(update.RunId, visible);
                     break;
                 case "message.completed" when update.RunId is not null:
                 case "message.interrupted" when update.RunId is not null:
+                    string tail = "";
+                    lock (_stateLock)
+                    {
+                        if (_cardRunMarkerFilters.Remove(update.RunId, out var markerFilter)) tail = markerFilter.Flush();
+                    }
+                    await SendCardDeltaAsync(update.RunId, tail);
                     int count;
                     lock (_stateLock)
                     {
@@ -289,6 +294,7 @@ public sealed class AssistantCoordinator : IAsyncDisposable
                     SetStatus(update.Type == "message.interrupted" ? "回答已打断" : "回答完成", "可继续提问");
                     break;
                 case "run.failed":
+                    if (update.RunId is not null) lock (_stateLock) _cardRunMarkerFilters.Remove(update.RunId);
                     await _ble.SendAsync(MessageType.ChatError, CatProtocol.Utf8("服务暂时不可用，请稍后重试", 256), _lifetime.Token);
                     SetStatus("AI 服务错误", update.Error ?? "服务暂时不可用");
                     break;
@@ -301,6 +307,23 @@ public sealed class AssistantCoordinator : IAsyncDisposable
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
         catch (Exception error) { Console.Error.WriteLine($"{DateTimeOffset.Now:O} card relay failed: {error.Message}"); }
+    }
+
+    private Task SendCardDeltaAsync(string runId, string text)
+    {
+        var filtered = DisplayText.Filter(text);
+        if (filtered.Length == 0) return Task.CompletedTask;
+        byte[] payload;
+        lock (_stateLock)
+        {
+            var used = _cardRunBytes.GetValueOrDefault(runId);
+            var remaining = CatProtocol.AnswerMaxBytes - used;
+            if (remaining <= 0) return Task.CompletedTask;
+            payload = Utf8Prefix(filtered, remaining);
+            if (payload.Length == 0) return Task.CompletedTask;
+            _cardRunBytes[runId] = used + payload.Length;
+        }
+        return _ble.SendAsync(MessageType.ChatDelta, payload, _lifetime.Token);
     }
 
     private static byte[] Utf8Prefix(string value, int maximumBytes)

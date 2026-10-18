@@ -86,6 +86,114 @@ public sealed class ConversationServiceTests
         Assert.NotEqual("fallback", detail.Conversation.TitleSource);
     }
 
+    [Fact]
+    public async Task FirstMessageAutomaticallyGeneratesAStableConversationTitle()
+    {
+        await using var fixture = await ConversationFixture.CreateAsync();
+        var generated = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Service.Changed += (_, update) =>
+        {
+            if (update.Type == "conversation.updated" && update.Conversation?.TitleSource == "generated")
+                generated.TrySetResult(update.Conversation.Title);
+        };
+        fixture.Provider.CompleteTitle("秋日随笔");
+
+        var detail = await fixture.Service.StartAsync("chat", "帮我写一首关于秋天的诗", "desktop");
+        await fixture.Provider.WaitForCallsAsync(1);
+        await fixture.Provider.EmitAsync(0, new ChatStreamChunk(Delta: "秋天来了，落叶纷飞。"));
+        fixture.Provider.CompleteStream(0);
+
+        var title = await generated.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal("秋日随笔", title);
+        Assert.Equal("秋日随笔", (await fixture.Service.GetAsync(detail.Conversation.Id)).Conversation.Title);
+    }
+
+    [Theory]
+    [InlineData("  秋日随笔  ", "秋日随笔")]
+    [InlineData("标题：秋日随笔", "秋日随笔")]
+    [InlineData("Title: Autumn Notes", "Autumn Notes")]
+    [InlineData("\" quoted \"", "quoted")]
+    [InlineData("   ", null)]
+    public void GeneratedTitlesAreNormalized(string input, string? expected)
+    {
+        Assert.Equal(expected, ConversationService.NormalizeGeneratedTitle(input));
+    }
+
+    [Fact]
+    public async Task GeneratedTitleCannotOverwriteAUserRename()
+    {
+        await using var fixture = await ConversationFixture.CreateAsync();
+        var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Service.Changed += (_, update) =>
+        {
+            if (update.Type == "message.completed") completed.TrySetResult();
+        };
+
+        var detail = await fixture.Service.StartAsync("chat", "帮我写一首关于秋天的诗", "desktop");
+        var id = detail.Conversation.Id;
+        await fixture.Service.RenameAsync(id, "我的自定义名称");
+        await fixture.Provider.WaitForCallsAsync(1);
+        fixture.Provider.CompleteTitle("秋日随笔");
+        await fixture.Provider.EmitAsync(0, new ChatStreamChunk(Delta: "秋天来了。"));
+        fixture.Provider.CompleteStream(0);
+        await completed.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        await Task.Delay(250);
+
+        var conversation = (await fixture.Service.GetAsync(id)).Conversation;
+        Assert.Equal("我的自定义名称", conversation.Title);
+        Assert.Equal("user", conversation.TitleSource);
+    }
+
+    [Fact]
+    public async Task PinnedConversationsArePersistedAndSortedFirst()
+    {
+        await using var fixture = await ConversationFixture.CreateAsync();
+        var first = fixture.Service.DesktopActiveConversationId!;
+        var second = await fixture.Service.CreateAsync("chat");
+
+        await fixture.Service.SetPinnedAsync(first, true);
+        var list = await fixture.Service.ListAsync();
+        Assert.Equal(first, list[0].Id);
+        Assert.True(list[0].IsPinned);
+        Assert.False(list.Single(item => item.Id == second.Id).IsPinned);
+
+        await fixture.Service.SetPinnedAsync(first, false);
+        list = await fixture.Service.ListAsync();
+        Assert.False(list.Single(item => item.Id == first).IsPinned);
+    }
+
+    [Fact]
+    public async Task CitationsKeepProviderOrdinalsAndMarkersStayOutOfModelContext()
+    {
+        await using var fixture = await ConversationFixture.CreateAsync();
+        var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Service.Changed += (_, update) =>
+        {
+            if (update.Type == "message.completed") completed.TrySetResult();
+        };
+        var id = fixture.Service.DesktopActiveConversationId!;
+
+        await fixture.Service.SendAsync(id, "杭州天气", "desktop");
+        await fixture.Provider.WaitForCallsAsync(1);
+        await fixture.Provider.EmitAsync(0, new ChatStreamChunk(Citations:
+        [
+            new CitationRecord("a", "", 5, "五号来源", "https://example.com/5", null, "站点五"),
+            new CitationRecord("b", "", 2, "二号来源", "https://example.com/2", null, null)
+        ]));
+        await fixture.Provider.EmitAsync(0, new ChatStreamChunk(Delta: "明天降温[ref_5][ref_2]。"));
+        fixture.Provider.CompleteStream(0);
+        await completed.Task.WaitAsync(TimeSpan.FromSeconds(3));
+
+        var detail = await fixture.Service.GetAsync(id);
+        Assert.Equal(new[] { 2, 5 }, detail.Citations.Select(item => item.Ordinal));
+        Assert.Equal("五号来源", detail.Citations.Single(item => item.Ordinal == 5).Title);
+        Assert.Contains(detail.Messages, message => message.Content == "明天降温[ref_5][ref_2]。");
+
+        await fixture.Service.SendAsync(id, "后天呢", "desktop");
+        await fixture.Provider.WaitForCallsAsync(2);
+        Assert.Equal(new[] { "杭州天气", "明天降温。", "后天呢" }, fixture.Provider.Histories[1].Select(message => message.Content));
+    }
+
     private sealed class ConversationFixture : IAsyncDisposable
     {
         private ConversationFixture(string path, ControlledProvider provider, ConversationService service)
@@ -125,7 +233,10 @@ public sealed class ConversationServiceTests
         private readonly object _lock = new();
         private readonly List<Channel<ChatStreamChunk>> _streams = [];
         private readonly List<IReadOnlyList<ConversationMessage>> _histories = [];
+        private readonly List<(string User, string Assistant)> _titles = [];
         private TaskCompletionSource _changed = NewSignal();
+        private TaskCompletionSource _titleChanged = NewSignal();
+        private string _titleResult = "自动生成的标题";
 
         public IReadOnlyList<IReadOnlyList<ConversationMessage>> Histories { get { lock (_lock) return _histories.ToArray(); } }
 
@@ -148,11 +259,36 @@ public sealed class ConversationServiceTests
             await foreach (var chunk in stream.Reader.ReadAllAsync(cancellationToken)) yield return chunk;
         }
 
+        public Task<string> GenerateTitleAsync(
+            string userMessage,
+            string assistantMessage,
+            string model,
+            string apiKey,
+            CancellationToken cancellationToken)
+        {
+            lock (_lock)
+            {
+                _titles.Add((userMessage, assistantMessage));
+                _titleChanged.TrySetResult();
+                _titleChanged = NewSignal();
+                return Task.FromResult(_titleResult);
+            }
+        }
+
+        public void CompleteTitle(string value) { lock (_lock) _titleResult = value; }
+
         public async Task EmitAsync(int index, ChatStreamChunk chunk)
         {
             Channel<ChatStreamChunk> stream;
             lock (_lock) stream = _streams[index];
             await stream.Writer.WriteAsync(chunk);
+        }
+
+        public void CompleteStream(int index)
+        {
+            Channel<ChatStreamChunk> stream;
+            lock (_lock) stream = _streams[index];
+            stream.Writer.TryComplete();
         }
 
         public async Task WaitForCallsAsync(int count)
@@ -164,6 +300,20 @@ public sealed class ConversationServiceTests
                 {
                     if (_streams.Count >= count) return;
                     signal = _changed.Task;
+                }
+                await signal.WaitAsync(TimeSpan.FromSeconds(2));
+            }
+        }
+
+        public async Task WaitForTitleCallsAsync(int count)
+        {
+            while (true)
+            {
+                Task signal;
+                lock (_lock)
+                {
+                    if (_titles.Count >= count) return;
+                    signal = _titleChanged.Task;
                 }
                 await signal.WaitAsync(TimeSpan.FromSeconds(2));
             }

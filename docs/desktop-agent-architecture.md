@@ -252,13 +252,13 @@ The Card presentation layer may still use `DisplayText.Filter` to convert Markdo
 
 ### 6.3 Alibaba Cloud model and search
 
-Version one continues to use a DashScope API key through a provider adapter and Qwen-compatible endpoint. The default follows the configured chat model, initially `qwen-plus`.
+Version one continues to use a DashScope API key. Streaming chat calls the native DashScope `text-generation` endpoint, because only the native protocol returns search sources (`output.search_info.search_results`); title generation still uses the Qwen-compatible endpoint. The default follows the configured chat model, initially `qwen-plus`.
 
 Web-search policy:
 
 - The model decides automatically when to search; no permission dialog is shown.
 - Requests enable Alibaba Cloud built-in web search.
-- Requests ask for sources and citations; structured sources become Citation records.
+- Requests ask for sources and citations; structured sources become Citation records whose ordinal is the source `index`, matching the inline `[ref_N]` markers. The desktop renders markers as clickable numbers; the card, copied text, title generation, and later model context strip them.
 - If search fails but an ordinary answer is safe, respond with a clear no-search degradation. If current data is required, return a clear error instead of fabricating freshness.
 - AliyunChatProvider hides Chat Completions and future Responses API differences. Provider-specific response objects do not escape into the application layer.
 
