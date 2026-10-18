@@ -6,13 +6,15 @@ namespace CatAssistant.Backend.Services;
 public sealed class WorkWorkspaceService : IDisposable
 {
     private readonly string _root;
+    private readonly Func<string, string>? _conversationRoot;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new(StringComparer.Ordinal);
 
-    public WorkWorkspaceService(string? root = null)
+    public WorkWorkspaceService(string? root = null, Func<string, string>? conversationRoot = null)
     {
         _root = Path.GetFullPath(root ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "FoloToy", "CatAssistant", "Workspaces"));
+        _conversationRoot = conversationRoot;
     }
 
     public async Task<WorkWorkspacePaths> EnsureAsync(string conversationId, CancellationToken cancellationToken = default)
@@ -98,10 +100,15 @@ public sealed class WorkWorkspaceService : IDisposable
 
     private WorkWorkspacePaths Paths(string conversationId)
     {
-        var root = Path.GetFullPath(Path.Combine(_root, conversationId));
-        var expectedPrefix = _root.EndsWith(Path.DirectorySeparatorChar) ? _root : _root + Path.DirectorySeparatorChar;
-        if (!root.StartsWith(expectedPrefix, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("工作区路径越界。");
+        var root = _conversationRoot is null
+            ? Path.GetFullPath(Path.Combine(_root, conversationId))
+            : Path.GetFullPath(_conversationRoot(conversationId));
+        if (_conversationRoot is null)
+        {
+            var expectedPrefix = _root.EndsWith(Path.DirectorySeparatorChar) ? _root : _root + Path.DirectorySeparatorChar;
+            if (!root.StartsWith(expectedPrefix, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("工作区路径越界。");
+        }
         return new WorkWorkspacePaths(root, Path.Combine(root, "inputs"), Path.Combine(root, "work"), Path.Combine(root, "outputs"));
     }
 

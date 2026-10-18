@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text;
 using CatAssistant.Backend.Models;
+using CatAssistant.Backend.Services.Work;
 
 namespace CatAssistant.Backend.Services;
 
@@ -22,6 +23,7 @@ public sealed class ConversationService : IAsyncDisposable
     private readonly Func<string> _apiKey;
     private readonly CancellationToken _lifetime;
     private readonly WorkWorkspaceService _workspaces;
+    private readonly WorkAgentService? _workAgent;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new();
     private readonly ConcurrentDictionary<string, ActiveRun> _runs = new();
     private readonly object _stateLock = new();
@@ -35,7 +37,8 @@ public sealed class ConversationService : IAsyncDisposable
         Func<AppSettings> settings,
         Func<string> apiKey,
         CancellationToken lifetime,
-        WorkWorkspaceService? workspaces = null)
+        WorkWorkspaceService? workspaces = null,
+        WorkAgentService? workAgent = null)
     {
         _repository = repository;
         _provider = provider;
@@ -43,6 +46,8 @@ public sealed class ConversationService : IAsyncDisposable
         _apiKey = apiKey;
         _lifetime = lifetime;
         _workspaces = workspaces ?? new WorkWorkspaceService();
+        _workAgent = workAgent;
+        if (_workAgent is not null) _workAgent.Changed += OnWorkChanged;
     }
 
     public event EventHandler<ConversationEvent>? Changed;
@@ -96,7 +101,7 @@ public sealed class ConversationService : IAsyncDisposable
 
     public async Task<ConversationDetail> StartAsync(string mode, string text, string source)
     {
-        if (mode == "work") throw new InvalidOperationException("Work Runtime 尚未启用。");
+        if (mode == "work" && _workAgent is null) throw new InvalidOperationException("Work Runtime 尚未启用。");
         var created = await CreateAsync(mode, activateDesktop: true);
         return await SendAsync(created.Id, text, source);
     }
@@ -190,6 +195,17 @@ public sealed class ConversationService : IAsyncDisposable
         if (text.Length == 0) throw new ArgumentException("消息不能为空。", nameof(text));
         if (source is not ("desktop" or "device")) throw new ArgumentOutOfRangeException(nameof(source));
         var conversation = await _repository.GetConversationAsync(conversationId) ?? throw new KeyNotFoundException("对话不存在。");
+        if (conversation.Mode == "work")
+        {
+            if (_workAgent is null) throw new InvalidOperationException("Work Runtime 尚未启用。");
+            if (source != "desktop") throw new InvalidOperationException("Work 第一版只接受桌面消息。");
+            if (conversation.TitleSource == "fallback")
+            {
+                await _repository.RenameConversationAsync(conversationId, SqliteRepository.FallbackTitle(text), "generated");
+                Publish(new ConversationEvent("conversation.updated", conversationId, Conversation: await _repository.GetConversationAsync(conversationId)));
+            }
+            return await _workAgent.SendAsync(conversationId, text, source);
+        }
         if (conversation.Mode != "chat") throw new InvalidOperationException("该对话不使用 Chat Runtime。");
         var gate = Gate(conversationId);
         ActiveRun run;
@@ -220,13 +236,21 @@ public sealed class ConversationService : IAsyncDisposable
 
     public async Task CancelAsync(string conversationId)
     {
+        if (_workAgent?.ActiveRunId(conversationId) is not null)
+        {
+            await _workAgent.StopAsync(conversationId);
+            return;
+        }
         var gate = Gate(conversationId);
         await gate.WaitAsync(_lifetime);
         try { await InterruptLockedAsync(conversationId); }
         finally { gate.Release(); }
     }
 
-    public string? ActiveRunId(string conversationId) => _runs.TryGetValue(conversationId, out var run) ? run.Id : null;
+    public string? ActiveRunId(string conversationId) =>
+        _workAgent?.ActiveRunId(conversationId) ?? (_runs.TryGetValue(conversationId, out var run) ? run.Id : null);
+
+    private void OnWorkChanged(object? sender, ConversationEvent update) => Publish(update);
 
     private async Task ExecuteRunObservedAsync(ActiveRun run)
     {
@@ -395,6 +419,11 @@ public sealed class ConversationService : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        if (_workAgent is not null)
+        {
+            _workAgent.Changed -= OnWorkChanged;
+            await _workAgent.DisposeAsync();
+        }
         foreach (var run in _runs.Values) run.Cancellation.Cancel();
         await Task.WhenAll(_runs.Values.Select(async run =>
         {

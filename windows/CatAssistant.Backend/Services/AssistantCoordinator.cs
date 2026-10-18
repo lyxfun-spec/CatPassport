@@ -5,6 +5,9 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 using CatAssistant.Backend.Models;
+using CatAssistant.Backend.Services.Sandbox;
+using CatAssistant.Backend.Services.Work;
+using CatAssistant.Backend.Services.WorkTools;
 using CatAssistant.Core.Audio;
 using CatAssistant.Core.Protocol;
 using Microsoft.Win32;
@@ -19,6 +22,7 @@ public sealed class AssistantCoordinator : IAsyncDisposable
     private readonly SqliteRepository _repository;
     private readonly SecureApiKeyStore _secureStore;
     private readonly ConversationService _conversations;
+    private readonly WindowsSandboxController _workSandbox;
     private readonly PeriodicTimer _reconnectTimer = new(TimeSpan.FromSeconds(1));
     private readonly SemaphoreSlim _connectionGate = new(1, 1);
     private readonly Dictionary<ulong, CatDevice> _devices = [];
@@ -56,7 +60,18 @@ public sealed class AssistantCoordinator : IAsyncDisposable
     public AssistantCoordinator(BleGateway ble, DashScopeClient cloud, SqliteRepository repository, SecureApiKeyStore secureStore, AppSettings settings)
     {
         _ble = ble; _cloud = cloud; _repository = repository; _secureStore = secureStore; Settings = settings;
-        _conversations = new ConversationService(repository, cloud, () => Settings, () => _secureStore.Load() ?? "", _lifetime.Token);
+        _workSandbox = new WindowsSandboxController();
+        var workspaces = new WorkWorkspaceService(conversationRoot: id =>
+            Path.Combine(_workSandbox.GetPrivateStorageRoot(id), "Workspace"));
+        var workTools = new WorkToolRegistry();
+        workTools.Register(new ExecuteCommandTool(_workSandbox));
+        workTools.Register(new ReadFileTool(_workSandbox));
+        workTools.Register(new WriteFileTool(_workSandbox));
+        workTools.Register(new ListDirectoryTool(_workSandbox));
+        var workAgent = new WorkAgentService(
+            repository, workspaces, cloud, workTools, () => Settings, () => _secureStore.Load() ?? "", _lifetime.Token);
+        _conversations = new ConversationService(
+            repository, cloud, () => Settings, () => _secureStore.Load() ?? "", _lifetime.Token, workspaces, workAgent);
         _turns = new InteractionTurns(_lifetime.Token);
         _ble.DeviceFound += OnDeviceFound; _ble.ControlMessageReceived += OnControlMessage; _ble.AudioFrameReceived += OnAudioFrame;
         _ble.LinkStateChanged += OnLinkStateChanged;
@@ -713,6 +728,6 @@ public sealed class AssistantCoordinator : IAsyncDisposable
         _lifetime.Cancel(); _controlMessages.Writer.TryComplete(); _turns.CancelAll(); _reconnectTimer.Dispose();
         try { await Task.WhenAll(_controlPump, _linkHealthPump); } catch (OperationCanceledException) { }
         await _conversations.DisposeAsync();
-        await _ble.DisposeAsync(); _cloud.Dispose(); _turns.Dispose(); _lifetime.Dispose(); _audioArrived.Dispose(); _connectionGate.Dispose();
+        await _ble.DisposeAsync(); _cloud.Dispose(); _workSandbox.Dispose(); _turns.Dispose(); _lifetime.Dispose(); _audioArrived.Dispose(); _connectionGate.Dispose();
     }
 }
