@@ -225,19 +225,34 @@ function ConversationHeader({ conversation, onAction }: { conversation: Conversa
   const trigger = useRef<HTMLButtonElement>(null);
   const firstItem = useRef<HTMLButtonElement>(null);
   const menuCloseTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const menuOpenFrames = useRef<{ first?: number; second?: number }>({});
+  const cancelMenuOpen = () => {
+    if (menuOpenFrames.current.first !== undefined) cancelAnimationFrame(menuOpenFrames.current.first);
+    if (menuOpenFrames.current.second !== undefined) cancelAnimationFrame(menuOpenFrames.current.second);
+    menuOpenFrames.current = {};
+  };
   const closeMenu = (restoreFocus = false) => {
+    cancelMenuOpen();
     clearTimeout(menuCloseTimer.current);
     setMenuOpen(false);
-    menuCloseTimer.current = setTimeout(() => setMenuRendered(false), 190);
+    menuCloseTimer.current = setTimeout(() => setMenuRendered(false), 260);
     if (restoreFocus) trigger.current?.focus({ preventScroll: true });
   };
   const toggleMenu = (event: React.MouseEvent<HTMLButtonElement>) => {
     if (menuOpen) { closeMenu(); return; }
     const fromKeyboard = event.detail === 0;
+    cancelMenuOpen();
     clearTimeout(menuCloseTimer.current);
-    setKeyboardOpen(fromKeyboard); setMenuRendered(true); requestAnimationFrame(() => setMenuOpen(true));
+    setKeyboardOpen(fromKeyboard);
+    setMenuRendered(true);
+    menuOpenFrames.current.first = requestAnimationFrame(() => {
+      menuOpenFrames.current.second = requestAnimationFrame(() => {
+        menuOpenFrames.current = {};
+        setMenuOpen(true);
+      });
+    });
   };
-  useEffect(() => () => clearTimeout(menuCloseTimer.current), []);
+  useEffect(() => () => { cancelMenuOpen(); clearTimeout(menuCloseTimer.current); }, []);
   useEffect(() => {
     if (!menuOpen) return;
     if (keyboardOpen) requestAnimationFrame(() => firstItem.current?.focus({ preventScroll: true }));
@@ -246,8 +261,8 @@ function ConversationHeader({ conversation, onAction }: { conversation: Conversa
     document.addEventListener('pointerdown', onPointer); document.addEventListener('keydown', onKey);
     return () => { document.removeEventListener('pointerdown', onPointer); document.removeEventListener('keydown', onKey); };
   }, [menuOpen, keyboardOpen]);
-  const choose = (kind: 'rename' | 'delete', element: HTMLButtonElement) => { const anchor = rectOf(element); closeMenu(); onAction(kind, anchor); };
-  return <header className="conversation-header"><h1>{conversation.title}</h1><div className="header-menu" ref={wrapper}><button ref={trigger} className="icon-button" onClick={toggleMenu} aria-label="对话选项" aria-haspopup="menu" aria-expanded={menuOpen}><Icon name="menu"/></button>{menuRendered && <div className={`popover-menu ${menuOpen ? 'is-open' : 'is-closing'}`} role="menu"><button ref={firstItem} role="menuitem" onClick={event => choose('rename', event.currentTarget)}><Icon name="rename"/>重命名</button><button role="menuitem" className="danger" onClick={event => choose('delete', event.currentTarget)}><Icon name="delete"/>删除</button></div>}</div></header>;
+  const choose = (kind: 'rename' | 'delete', element: HTMLButtonElement) => { const anchor = rectOf(element); closeMenu(true); onAction(kind, anchor); };
+  return <header className="conversation-header"><h1>{conversation.title}</h1><div className="header-menu" ref={wrapper}><button ref={trigger} className="icon-button" onClick={toggleMenu} aria-label="对话选项" aria-haspopup="menu" aria-expanded={menuOpen}><Icon name="menu"/></button>{menuRendered && <div className={`popover-menu ${menuOpen ? 'is-open' : 'is-closing'}`} role="menu" aria-hidden={!menuOpen} inert={!menuOpen}><button ref={firstItem} role="menuitem" onClick={event => choose('rename', event.currentTarget)}><Icon name="rename"/>重命名</button><button role="menuitem" className="danger" onClick={event => choose('delete', event.currentTarget)}><Icon name="delete"/>删除</button></div>}</div></header>;
 }
 
 function MessageList({ detail, runError }: { detail: ConversationDetail; runError?: string }) {

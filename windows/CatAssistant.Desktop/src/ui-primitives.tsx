@@ -20,6 +20,12 @@ export function rectOf(element: Element): AnchorRect {
   return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
 }
 
+export function anchoredTransformOrigin(anchor: AnchorRect, surface: AnchorRect): string {
+  const x = anchor.left + anchor.width / 2 - surface.left;
+  const y = anchor.top + anchor.height / 2 - surface.top;
+  return `${x}px ${y}px`;
+}
+
 interface ScrollAreaProps {
   className?: string;
   viewportClassName?: string;
@@ -122,7 +128,7 @@ export function AnchoredSurface({ open, anchor, titleId, className = '', onClose
   const previousFocus = useRef<HTMLElement | null>(null);
   const retainedAnchor = useRef<AnchorRect | undefined>(anchor);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const [origin, setOrigin] = useState({ x: 0, y: 8 });
+  const [origin, setOrigin] = useState('50% 50%');
 
   useEffect(() => {
     if (anchor) retainedAnchor.current = anchor;
@@ -132,7 +138,7 @@ export function AnchoredSurface({ open, anchor, titleId, className = '', onClose
       return;
     }
     setVisible(false);
-    closeTimer.current = setTimeout(() => setRendered(false), 230);
+    closeTimer.current = setTimeout(() => setRendered(false), 280);
     return () => clearTimeout(closeTimer.current);
   }, [open, anchor]);
 
@@ -141,12 +147,14 @@ export function AnchoredSurface({ open, anchor, titleId, className = '', onClose
     const box = panel.current.getBoundingClientRect();
     const source = retainedAnchor.current;
     if (source) {
-      setOrigin({
-        x: source.left + source.width / 2 - (box.left + box.width / 2),
-        y: source.top + source.height / 2 - (box.top + box.height / 2)
-      });
+      setOrigin(anchoredTransformOrigin(source, {
+        left: box.left,
+        top: box.top,
+        width: box.width,
+        height: box.height
+      }));
     } else {
-      setOrigin({ x: 0, y: 8 });
+      setOrigin('50% 50%');
     }
     let secondFrame = 0;
     const firstFrame = requestAnimationFrame(() => {
@@ -160,22 +168,27 @@ export function AnchoredSurface({ open, anchor, titleId, className = '', onClose
     previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const app = document.querySelector<HTMLElement>('.app-frame');
     app?.setAttribute('inert', '');
-    const frame = requestAnimationFrame(() => panel.current?.querySelector<HTMLElement>('[data-autofocus], input, button')?.focus({ preventScroll: true }));
     const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
     document.addEventListener('keydown', onKey);
     return () => {
-      cancelAnimationFrame(frame);
       document.removeEventListener('keydown', onKey);
       app?.removeAttribute('inert');
       previousFocus.current?.focus({ preventScroll: true });
     };
   }, [rendered, open]);
 
+  useEffect(() => {
+    if (!visible || !open) return;
+    const frame = requestAnimationFrame(() => panel.current?.querySelector<HTMLElement>('[data-autofocus], input, button')?.focus({ preventScroll: true }));
+    return () => cancelAnimationFrame(frame);
+  }, [visible, open]);
+
   if (!rendered) return null;
   return <div className={`anchor-backdrop ${visible ? 'is-open' : 'is-closing'} ${className}`}
+    aria-hidden={!visible} inert={!visible}
     onPointerDown={event => { if (event.target === event.currentTarget) onClose(); }}>
     <section ref={panel} className="anchor-surface" role="dialog" aria-modal="true" aria-labelledby={titleId}
-      style={{ '--origin-x': `${origin.x}px`, '--origin-y': `${origin.y}px` } as React.CSSProperties}>
+      style={{ '--modal-origin': origin } as React.CSSProperties}>
       {children}
     </section>
   </div>;
