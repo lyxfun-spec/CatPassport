@@ -10,7 +10,7 @@ import './styles.css';
 
 type IconName = 'new' | 'search' | 'chat' | 'work' | 'device' | 'settings' | 'menu' | 'send'
   | 'copy' | 'close' | 'sidebar' | 'check' | 'back' | 'rename' | 'delete' | 'refresh'
-  | 'key' | 'shield' | 'info' | 'chevron' | 'cat';
+  | 'key' | 'shield' | 'info' | 'chevron' | 'pin' | 'cat' | 'external';
 
 const iconPaths: Record<IconName, React.ReactNode> = {
   new: <path d="M12 5v14M5 12h14"/>,
@@ -33,7 +33,9 @@ const iconPaths: Record<IconName, React.ReactNode> = {
   shield: <><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></>,
   info: <><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></>,
   chevron: <path d="m9 18 6-6-6-6"/>,
-  cat: <><path d="M6.5 8 4 4v9a8 8 0 0 0 16 0V4l-2.5 4"/><path d="M9 13h.01M15 13h.01M10 17c1.3 1 2.7 1 4 0"/></>
+  pin: <><path d="M12 17v5"/><path d="M5 17h14"/><path d="M6 3h12l-2 6v4l2 4H6l2-4V9Z"/></>,
+  cat: <><path d="M6.5 8 4 4v9a8 8 0 0 0 16 0V4l-2.5 4"/><path d="M9 13h.01M15 13h.01M10 17c1.3 1 2.7 1 4 0"/></>,
+  external: <><path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></>
 };
 
 function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
@@ -42,7 +44,8 @@ function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
 function invoke<T>(method: string, params?: Record<string, unknown>) { return window.catAssistant.invoke<T>(method, params); }
 interface NoticeState { id: number; text: string; tone?: 'default' | 'danger' }
 type AppView = 'conversation' | 'compose' | 'settings';
-type ActionSurface = { kind: 'rename' | 'delete'; anchor: AnchorRect } | undefined;
+type ActionSurface = { kind: 'rename' | 'delete'; anchor: AnchorRect; conversation: ConversationSummary } | undefined;
+type ConversationContext = { conversation: ConversationSummary; left: number; top: number } | undefined;
 
 function useViewTransition(target: AppView) {
   const [displayed, setDisplayed] = useState(target);
@@ -70,6 +73,7 @@ function App() {
   const { displayed: displayedView, phase: viewPhase } = useViewTransition(requestedView);
   const [draftMode, setDraftMode] = useState<'chat' | 'work'>('chat');
   const [actionSurface, setActionSurface] = useState<ActionSurface>();
+  const [conversationContext, setConversationContext] = useState<ConversationContext>();
   const [deviceOpen, setDeviceOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [draft, setDraft] = useState('');
@@ -145,16 +149,24 @@ function App() {
     if (detail) dispatch({ event: 'ui.conversation', data: detail });
   };
   const rename = async (title: string) => {
-    if (!active || title === active.conversation.title) { setActionSurface(undefined); return; }
-    const result = await run('rename', () => invoke('conversations.rename', { id: active.conversation.id, title }));
+    const target = actionSurface?.conversation;
+    if (!target || title === target.title) { setActionSurface(undefined); return; }
+    const result = await run('rename', () => invoke('conversations.rename', { id: target.id, title }));
     if (result === undefined) return;
     setActionSurface(undefined); await refresh(); showNotice('对话名称已更新');
   };
   const remove = async () => {
-    if (!active) return;
-    const result = await run('delete', () => invoke('conversations.delete', { id: active.conversation.id }));
+    const target = actionSurface?.conversation;
+    if (!target) return;
+    const result = await run('delete', () => invoke('conversations.delete', { id: target.id }));
     if (result === undefined) return;
     setActionSurface(undefined); await refresh(); showNotice('对话已删除');
+  };
+  const setPinned = async (conversation: ConversationSummary) => {
+    setConversationContext(undefined);
+    const result = await run('pin', () => invoke('conversations.pin', { id: conversation.id, pinned: !conversation.isPinned }));
+    if (result === undefined) return;
+    await refresh(); showNotice(conversation.isPinned ? '已取消置顶' : '对话已置顶');
   };
   const saveSettings = async (patch: Partial<PublicSettings> & { apiKey?: string }, successText: string) => {
     const current = bootstrap.settings;
@@ -175,6 +187,7 @@ function App() {
       <Sidebar bootstrap={bootstrap} query={query} onQuery={setQuery} collapsed={sidebarCollapsed}
         onToggle={() => setSidebarCollapsed(value => !value)} onNew={startCompose}
         onSelect={id => void selectConversation(id)} onDevice={() => setDeviceOpen(true)}
+        onContext={(conversation, left, top) => setConversationContext({ conversation, left, top })}
         composeActive={requestedView === 'compose'}
         settingsActive={requestedView === 'settings'} onSettings={() => setRequestedView('settings')}/>
       <main className={`content-pane view-${displayedView} view-phase-${viewPhase}`}>
@@ -186,12 +199,13 @@ function App() {
           ? <SettingsPage settings={bootstrap.settings} onboarding={!bootstrap.settings.hasApiKey} busy={isBusy('settings')} onBack={() => setRequestedView('conversation')} onSave={saveSettings}/>
           : displayedView === 'compose' || !active
             ? <DraftConversation mode={draftMode} onMode={setDraftMode} value={draft} onChange={setDraft} onSend={() => void send()} hasApiKey={bootstrap.settings.hasApiKey} sending={isBusy('send')} focusSignal={composerFocusSignal} onOpenSettings={() => setRequestedView('settings')}/>
-            : <><ConversationHeader conversation={active.conversation} onAction={(kind, anchor) => setActionSurface({ kind, anchor })}/><MessageList detail={active} runError={state.runError}/><Composer value={draft} onChange={setDraft} onSend={() => void send()} hasApiKey={bootstrap.settings.hasApiKey} sending={isBusy('send')} focusSignal={composerFocusSignal} onOpenSettings={() => setRequestedView('settings')}/></>
+            : <><ConversationHeader conversation={active.conversation} onAction={(kind, anchor) => setActionSurface({ kind, anchor, conversation: active.conversation })}/><MessageList detail={active} runError={state.runError}/><Composer value={draft} onChange={setDraft} onSend={() => void send()} hasApiKey={bootstrap.settings.hasApiKey} sending={isBusy('send')} focusSignal={composerFocusSignal} onOpenSettings={() => setRequestedView('settings')}/></>
         }
       </main>
     </div>
-    <RenameDialog open={actionSurface?.kind === 'rename'} anchor={actionSurface?.anchor} conversation={active?.conversation} busy={isBusy('rename')} onClose={() => setActionSurface(undefined)} onRename={title => void rename(title)}/>
-    <DeleteDialog open={actionSurface?.kind === 'delete'} anchor={actionSurface?.anchor} conversation={active?.conversation} busy={isBusy('delete')} onClose={() => setActionSurface(undefined)} onConfirm={() => void remove()}/>
+    <ConversationContextMenu value={conversationContext} onClose={() => setConversationContext(undefined)} onPin={conversation => void setPinned(conversation)} onAction={(kind, anchor, conversation) => { setConversationContext(undefined); setActionSurface({ kind, anchor, conversation }); }}/>
+    <RenameDialog open={actionSurface?.kind === 'rename'} anchor={actionSurface?.anchor} conversation={actionSurface?.conversation} busy={isBusy('rename')} onClose={() => setActionSurface(undefined)} onRename={title => void rename(title)}/>
+    <DeleteDialog open={actionSurface?.kind === 'delete'} anchor={actionSurface?.anchor} conversation={actionSurface?.conversation} busy={isBusy('delete')} onClose={() => setActionSurface(undefined)} onConfirm={() => void remove()}/>
     <DevicePanel open={deviceOpen} bootstrap={bootstrap} busy={isBusy('device')} run={run} onClose={() => setDeviceOpen(false)} onOpenConversation={id => { setDeviceOpen(false); void selectConversation(id); }} onRefresh={() => void refresh()} onNotice={showNotice}/>
     <Notice notice={notice}/>
   </>;
@@ -201,9 +215,10 @@ function BrandMark({ large = false }: { large?: boolean }) {
   return <span className={`brand-mark ${large ? 'large' : ''}`} aria-hidden="true"><Icon name="cat" size={large ? 28 : 21}/></span>;
 }
 
-function Sidebar({ bootstrap, query, onQuery, collapsed, onToggle, onNew, onSelect, onDevice, composeActive, settingsActive, onSettings }: {
+function Sidebar({ bootstrap, query, onQuery, collapsed, onToggle, onNew, onSelect, onDevice, onContext, composeActive, settingsActive, onSettings }: {
   bootstrap: BootstrapState; query: string; onQuery(value: string): void; collapsed: boolean; onToggle(): void;
   onNew(): void; onSelect(id: string): void; onDevice(): void; composeActive: boolean; settingsActive: boolean; onSettings(): void;
+  onContext(conversation: ConversationSummary, left: number, top: number): void;
 }) {
   const filtered = useMemo(() => bootstrap.conversations.filter(item => item.title.toLocaleLowerCase().includes(query.toLocaleLowerCase())), [bootstrap.conversations, query]);
   const groups = groupConversations(filtered);
@@ -213,7 +228,7 @@ function Sidebar({ bootstrap, query, onQuery, collapsed, onToggle, onNew, onSele
     <button className={`new-conversation ${composeActive ? 'active' : ''}`} onClick={onNew} aria-label="新建对话" aria-current={composeActive ? 'true' : undefined}><Icon name="new"/><span>新对话</span></button>
     {!collapsed && <label className="search-box"><Icon name="search"/><input value={query} onChange={event => onQuery(event.target.value)} placeholder="搜索对话" aria-label="搜索对话"/></label>}
     <ScrollArea className="conversation-scroll" viewportClassName="conversation-list">
-      {groups.map(group => <section className="conversation-group" key={group.label} aria-label={group.label}><h2>{group.label}</h2>{group.items.map(item => <button key={item.id} className={`conversation-item ${!settingsActive && !composeActive && bootstrap.activeConversationId === item.id ? 'active' : ''}`} onClick={() => onSelect(item.id)} aria-current={!settingsActive && !composeActive && bootstrap.activeConversationId === item.id ? 'page' : undefined} title={item.title}><Icon name="chat" size={16}/><span>{item.title}</span></button>)}</section>)}
+      {groups.map(group => <section className="conversation-group" key={group.label} aria-label={group.label}><h2>{group.label}</h2>{group.items.map(item => <button key={item.id} className={`conversation-item ${!settingsActive && !composeActive && bootstrap.activeConversationId === item.id ? 'active' : ''}`} onClick={() => onSelect(item.id)} onContextMenu={event => { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); onContext(item, event.clientX || rect.right, event.clientY || rect.top); }} aria-current={!settingsActive && !composeActive && bootstrap.activeConversationId === item.id ? 'page' : undefined} aria-label={`${item.title}${item.isPinned ? '，已置顶' : ''}`} title={item.title}><Icon name={item.mode === 'work' ? 'work' : 'chat'} size={16}/><span>{item.title}</span></button>)}</section>)}
       {filtered.length === 0 && <div className="no-results">{query ? '没有匹配的对话' : '还没有对话'}</div>}
     </ScrollArea>
     <div className="sidebar-footer">

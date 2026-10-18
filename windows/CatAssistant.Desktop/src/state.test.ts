@@ -3,10 +3,10 @@ import type { BootstrapState } from './shared';
 import { deviceDiscoveryMessage, initialState, reduceBackendEvent } from './state';
 
 const bootstrap: BootstrapState = {
-  conversations: [{ id: 'chat-1', mode: 'chat', title: '测试', titleSource: 'generated', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }],
+  conversations: [{ id: 'chat-1', mode: 'chat', title: '测试', titleSource: 'generated', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', isPinned: false }],
   activeConversationId: 'chat-1',
   activeConversation: {
-    conversation: { id: 'chat-1', mode: 'chat', title: '测试', titleSource: 'generated', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
+    conversation: { id: 'chat-1', mode: 'chat', title: '测试', titleSource: 'generated', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', isPinned: false },
     messages: [{ id: 'assistant-1', conversationId: 'chat-1', role: 'assistant', source: 'runtime', status: 'streaming', sequence: 2, content: '', createdAt: '2026-01-01T00:00:01Z', runId: 'run-1' }],
     citations: [],
     activeRunId: 'run-1'

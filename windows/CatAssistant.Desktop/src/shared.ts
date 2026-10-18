@@ -21,6 +21,7 @@ export interface ConversationSummary {
   titleSource: 'fallback' | 'generated' | 'user';
   createdAt: string;
   updatedAt: string;
+  isPinned: boolean;
 }
 
 export interface ConversationMessage {

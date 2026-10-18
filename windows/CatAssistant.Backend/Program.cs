@@ -55,6 +55,9 @@ internal static class Program
             case "conversations.rename":
                 await coordinator.Conversations.RenameAsync(Required<string>(request.Params, "id"), Required<string>(request.Params, "title"));
                 return await coordinator.Conversations.GetAsync(Required<string>(request.Params, "id"));
+            case "conversations.pin":
+                await coordinator.Conversations.SetPinnedAsync(Required<string>(request.Params, "id"), Required<bool>(request.Params, "pinned"));
+                return await BootstrapAsync(coordinator);
             case "conversations.delete":
                 await coordinator.Conversations.DeleteAsync(Required<string>(request.Params, "id"));
                 return await BootstrapAsync(coordinator);

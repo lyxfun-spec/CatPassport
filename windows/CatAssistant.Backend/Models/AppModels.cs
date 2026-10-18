@@ -27,7 +27,8 @@ public sealed record ConversationSummary(
     string Title,
     string TitleSource,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    bool IsPinned);
 
 public sealed record ConversationMessage(
     string Id,

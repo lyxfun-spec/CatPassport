@@ -98,6 +98,7 @@ public sealed class SqliteRepository
             INSERT OR IGNORE INTO schema_migrations(version, applied_utc) VALUES(2, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
             """;
         await command.ExecuteNonQueryAsync();
+        await EnsureConversationPinColumnAsync(db);
         await RecoverInterruptedRunsAsync(db);
     }
 
@@ -151,7 +152,7 @@ public sealed class SqliteRepository
     {
         if (mode is not ("chat" or "work")) throw new ArgumentOutOfRangeException(nameof(mode));
         var now = DateTimeOffset.UtcNow;
-        var conversation = new ConversationSummary(Guid.NewGuid().ToString("N"), mode, "新对话", "fallback", now, now);
+        var conversation = new ConversationSummary(Guid.NewGuid().ToString("N"), mode, "新对话", "fallback", now, now, false);
         await using var db = await OpenAsync();
         var command = db.CreateCommand();
         command.CommandText = """
@@ -174,7 +175,7 @@ public sealed class SqliteRepository
         var result = new List<ConversationSummary>();
         await using var db = await OpenAsync();
         var command = db.CreateCommand();
-        command.CommandText = "SELECT id,mode,title,title_source,created_utc,updated_utc FROM conversations_v2 WHERE archived_utc IS NULL ORDER BY updated_utc DESC";
+        command.CommandText = "SELECT id,mode,title,title_source,created_utc,updated_utc,pinned_utc FROM conversations_v2 WHERE archived_utc IS NULL ORDER BY pinned_utc IS NULL, pinned_utc DESC, updated_utc DESC";
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync()) result.Add(ReadConversation(reader));
         return result;
@@ -184,7 +185,7 @@ public sealed class SqliteRepository
     {
         await using var db = await OpenAsync();
         var command = db.CreateCommand();
-        command.CommandText = "SELECT id,mode,title,title_source,created_utc,updated_utc FROM conversations_v2 WHERE id=$id AND archived_utc IS NULL";
+        command.CommandText = "SELECT id,mode,title,title_source,created_utc,updated_utc,pinned_utc FROM conversations_v2 WHERE id=$id AND archived_utc IS NULL";
         command.Parameters.AddWithValue("$id", id);
         await using var reader = await command.ExecuteReaderAsync();
         return await reader.ReadAsync() ? ReadConversation(reader) : null;
@@ -209,6 +210,28 @@ public sealed class SqliteRepository
         command.Parameters.AddWithValue("$title", title);
         command.Parameters.AddWithValue("$source", source);
         command.Parameters.AddWithValue("$now", Format(DateTimeOffset.UtcNow));
+        command.Parameters.AddWithValue("$id", id);
+        if (await command.ExecuteNonQueryAsync() == 0) throw new KeyNotFoundException("对话不存在。");
+    }
+
+    public async Task<bool> TrySetGeneratedTitleAsync(string id, string title)
+    {
+        title = NormalizeTitle(title);
+        await using var db = await OpenAsync();
+        var command = db.CreateCommand();
+        command.CommandText = "UPDATE conversations_v2 SET title=$title,title_source='generated',updated_utc=$now WHERE id=$id AND archived_utc IS NULL AND title_source<>'user'";
+        command.Parameters.AddWithValue("$title", title);
+        command.Parameters.AddWithValue("$now", Format(DateTimeOffset.UtcNow));
+        command.Parameters.AddWithValue("$id", id);
+        return await command.ExecuteNonQueryAsync() > 0;
+    }
+
+    public async Task SetConversationPinnedAsync(string id, bool pinned)
+    {
+        await using var db = await OpenAsync();
+        var command = db.CreateCommand();
+        command.CommandText = "UPDATE conversations_v2 SET pinned_utc=$pinned WHERE id=$id AND archived_utc IS NULL";
+        command.Parameters.AddWithValue("$pinned", pinned ? Format(DateTimeOffset.UtcNow) : (object)DBNull.Value);
         command.Parameters.AddWithValue("$id", id);
         if (await command.ExecuteNonQueryAsync() == 0) throw new KeyNotFoundException("对话不存在。");
     }
@@ -429,7 +452,7 @@ public sealed class SqliteRepository
     }
 
     private static ConversationSummary ReadConversation(SqliteDataReader reader) => new(
-        reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), Parse(reader.GetString(4)), Parse(reader.GetString(5)));
+        reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), Parse(reader.GetString(4)), Parse(reader.GetString(5)), !reader.IsDBNull(6));
 
     private static ConversationMessage ReadMessage(SqliteDataReader reader) => new(
         reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetInt64(5), reader.GetString(6),
@@ -451,4 +474,25 @@ public sealed class SqliteRepository
 
     private static string Format(DateTimeOffset value) => value.UtcDateTime.ToString("O");
     private static DateTimeOffset Parse(string value) => DateTimeOffset.Parse(value);
+
+    private static async Task EnsureConversationPinColumnAsync(SqliteConnection db)
+    {
+        var columns = db.CreateCommand();
+        columns.CommandText = "PRAGMA table_info(conversations_v2)";
+        var hasPinnedUtc = false;
+        await using (var reader = await columns.ExecuteReaderAsync())
+        {
+            while (await reader.ReadAsync())
+                if (reader.GetString(1) == "pinned_utc") hasPinnedUtc = true;
+        }
+        if (!hasPinnedUtc)
+        {
+            var alter = db.CreateCommand();
+            alter.CommandText = "ALTER TABLE conversations_v2 ADD COLUMN pinned_utc TEXT NULL";
+            await alter.ExecuteNonQueryAsync();
+        }
+        var index = db.CreateCommand();
+        index.CommandText = "CREATE INDEX IF NOT EXISTS idx_conversations_v2_pinned ON conversations_v2(pinned_utc DESC, updated_utc DESC)";
+        await index.ExecuteNonQueryAsync();
+    }
 }

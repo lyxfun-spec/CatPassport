@@ -141,6 +141,13 @@ public sealed class ConversationService : IAsyncDisposable
         Publish(new ConversationEvent("conversation.updated", id, Conversation: conversation));
     }
 
+    public async Task SetPinnedAsync(string id, bool pinned)
+    {
+        await _repository.SetConversationPinnedAsync(id, pinned);
+        var conversation = await _repository.GetConversationAsync(id);
+        Publish(new ConversationEvent("conversation.updated", id, Conversation: conversation));
+    }
+
     public async Task DeleteAsync(string id)
     {
         await CancelAsync(id);
