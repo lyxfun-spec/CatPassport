@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CatAssistant.Backend.Models;
 using CatAssistant.Backend.Services;
+using CatAssistant.Backend.Services.Work;
 using Xunit;
 
 namespace CatAssistant.Backend.Tests;
@@ -8,28 +9,43 @@ namespace CatAssistant.Backend.Tests;
 public sealed class WorkProviderTests
 {
     [Fact]
-    public void ParsesNativeToolCallsAndKeepsProviderIds()
+    public void AccumulatesStreamedToolCallFragmentsAcrossChunks()
     {
-        using var json = JsonDocument.Parse("""
-            {
-              "choices": [{
-                "message": {
-                  "role": "assistant",
-                  "content": "我先读取文件。",
-                  "tool_calls": [
-                    {"id":"call-a","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"inputs/a.txt\"}"}},
-                    {"id":"call-b","type":"function","function":{"name":"list_directory","arguments":"{\"path\":\"inputs\"}"}}
-                  ]
-                }
-              }]
-            }
-            """);
+        var accumulator = new DashScopeClient.WorkStreamAccumulator();
+        var chunks = new[]
+        {
+            """{"choices":[{"index":0,"delta":{"role":"assistant","content":"我先"}}]}""",
+            """{"choices":[{"index":0,"delta":{"content":"读取文件。","tool_calls":[{"index":0,"id":"call-a","type":"function","function":{"name":"read_file","arguments":""}}]},"finish_reason":null}]}""",
+            """{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"in"}}]},"finish_reason":null}]}""",
+            """{"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call-b","type":"function","function":{"name":"list_directory","arguments":"{}"}}]},"finish_reason":null}]}""",
+            """{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"puts/a.txt\"}"}}]},"finish_reason":"tool_calls"}]}"""
+        };
+        foreach (var chunk in chunks)
+        {
+            using var json = JsonDocument.Parse(chunk);
+            accumulator.Append(json.RootElement);
+        }
 
-        var response = DashScopeClient.ParseWorkResponse(json.RootElement);
+        var response = accumulator.ToResponse();
 
         Assert.Equal("我先读取文件。", response.Content);
         Assert.Equal(new[] { "call-a", "call-b" }, response.ToolCalls.Select(call => call.ToolCallId));
         Assert.Equal(new[] { "read_file", "list_directory" }, response.ToolCalls.Select(call => call.Name));
+        Assert.Equal("""{"path":"inputs/a.txt"}""", response.ToolCalls[0].ArgumentsJson);
+    }
+
+    [Fact]
+    public void IgnoresPrivateReasoningAndSurfacesStreamErrors()
+    {
+        var accumulator = new DashScopeClient.WorkStreamAccumulator();
+        using var chunk = JsonDocument.Parse("""{"choices":[{"index":0,"delta":{"reasoning_content":"私密思维链","content":"可见部分"}}]}""");
+
+        Assert.Equal("可见部分", accumulator.Append(chunk.RootElement));
+        Assert.Equal("可见部分", accumulator.ToResponse().Content);
+
+        using var error = JsonDocument.Parse("""{"code":"Throttling.RateQuota","message":"Too many requests."}""");
+        var throttled = new DashScopeClient.WorkStreamAccumulator();
+        Assert.Throws<CloudException>(() => throttled.Append(error.RootElement));
     }
 
     [Fact]
@@ -44,7 +60,15 @@ public sealed class WorkProviderTests
             new("3", conversationId, "run", 3, "tool_result", "tool", null, "call-a", "read_file", "{\"text\":\"内容\"}", now)
         };
 
-        var messages = DashScopeClient.BuildWorkMessages(context);
+        var workspace = Path.Combine(Path.GetTempPath(), "work-provider", conversationId);
+        var environment = new WorkEnvironmentInfo(
+            workspace,
+            Path.Combine(workspace, "inputs"),
+            Path.Combine(workspace, "work"),
+            Path.Combine(workspace, "outputs"),
+            Path.Combine(workspace, "work", "python-packages"),
+            @"C:\runtime\python.exe");
+        var messages = DashScopeClient.BuildWorkMessages(context, environment);
         var encoded = JsonSerializer.Serialize(messages);
         using var json = JsonDocument.Parse(encoded);
         var items = json.RootElement;
@@ -53,5 +77,11 @@ public sealed class WorkProviderTests
         Assert.Equal("user", items[1].GetProperty("role").GetString());
         Assert.Equal("call-a", items[2].GetProperty("tool_calls")[0].GetProperty("id").GetString());
         Assert.Equal("call-a", items[3].GetProperty("tool_call_id").GetString());
+        var system = items[0].GetProperty("content").GetString();
+        Assert.Contains("第一次工具调用前", system);
+        Assert.Contains("工作区根目录（也是命令默认目录）", system);
+        Assert.Contains(@"C:\runtime\python.exe", system);
+        Assert.Contains("PIP_TARGET", system);
+        Assert.Contains("shell=\"cmd\"", system);
     }
 }

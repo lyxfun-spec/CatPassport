@@ -17,6 +17,12 @@ public sealed class DashScopeClient : IChatProvider, IWorkModelProvider, IDispos
     private static readonly JsonSerializerOptions RequestJsonOptions = new(JsonSerializerDefaults.Web) { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull };
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(90) };
 
+    // Work turns stream their body, so HttpClient cannot cap the whole generation: the connect guard
+    // covers "the service never started answering" and the idle guard covers "the answer stopped arriving".
+    internal static readonly TimeSpan WorkConnectTimeout = TimeSpan.FromSeconds(90);
+    internal static readonly TimeSpan WorkStreamIdleTimeout = TimeSpan.FromSeconds(120);
+    private readonly HttpClient _workHttp = new() { Timeout = Timeout.InfiniteTimeSpan };
+
     public async Task<string> TranscribeAsync(byte[] wav, string model, string apiKey, CancellationToken cancellationToken)
     {
         EnsureKey(apiKey);
@@ -145,16 +151,19 @@ public sealed class DashScopeClient : IChatProvider, IWorkModelProvider, IDispos
     public async Task<WorkModelResponse> CompleteAsync(
         IReadOnlyList<WorkContextItem> context,
         IReadOnlyList<WorkToolDefinition> tools,
+        WorkEnvironmentInfo environment,
         string model,
         string apiKey,
+        Func<string, Task> onContentDelta,
         CancellationToken cancellationToken)
     {
         EnsureKey(apiKey);
         using var request = CreateRequest(ChatUrl, apiKey);
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
         request.Content = JsonContent.Create(new
         {
             model,
-            messages = BuildWorkMessages(context),
+            messages = BuildWorkMessages(context, environment),
             tools = tools.Select(tool => new
             {
                 type = "function",
@@ -167,29 +176,129 @@ public sealed class DashScopeClient : IChatProvider, IWorkModelProvider, IDispos
             }).ToArray(),
             tool_choice = "auto",
             parallel_tool_calls = true,
-            stream = false
+            stream = true
         }, options: RequestJsonOptions);
-        using var response = await _http.SendAsync(request, cancellationToken);
+        using var response = await SendWorkRequestAsync(request, cancellationToken);
         EnsureSuccess(response, isAsrRequest: false);
-        using var json = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(cancellationToken));
-        return ParseWorkResponse(json.RootElement);
+        var accumulator = new WorkStreamAccumulator();
+        await ReadWorkStreamAsync(response, accumulator, onContentDelta, cancellationToken);
+        return accumulator.ToResponse();
     }
 
-    internal static IReadOnlyList<object> BuildWorkMessages(IReadOnlyList<WorkContextItem> context)
+    private async Task<HttpResponseMessage> SendWorkRequestAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        using var connect = new CancellationTokenSource(WorkConnectTimeout);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, connect.Token);
+        try
+        {
+            return await _workHttp.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, linked.Token);
+        }
+        catch (OperationCanceledException error) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new TaskCanceledException($"模型服务在 {WorkConnectTimeout.TotalSeconds:0} 秒内没有开始响应，本轮任务已中断。", error);
+        }
+    }
+
+    private static async Task ReadWorkStreamAsync(HttpResponseMessage response, WorkStreamAccumulator accumulator, Func<string, Task> onContentDelta, CancellationToken cancellationToken)
+    {
+        using var idle = new CancellationTokenSource();
+        idle.CancelAfter(WorkStreamIdleTimeout);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, idle.Token);
+        try
+        {
+            await using var stream = await response.Content.ReadAsStreamAsync(linked.Token);
+            using var reader = new StreamReader(stream, Encoding.UTF8);
+            while (await reader.ReadLineAsync(linked.Token) is { } line)
+            {
+                idle.CancelAfter(WorkStreamIdleTimeout);
+                if (!line.StartsWith("data:", StringComparison.Ordinal)) continue;
+                var data = line[5..].Trim();
+                if (data.Length == 0) continue;
+                if (data == "[DONE]") return;
+                using var json = JsonDocument.Parse(data);
+                if (accumulator.Append(json.RootElement) is { Length: > 0 } delta) await onContentDelta(delta);
+            }
+        }
+        catch (OperationCanceledException error) when (idle.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            throw new TaskCanceledException($"模型连续 {WorkStreamIdleTimeout.TotalSeconds:0} 秒没有返回新的内容，本轮任务已中断。", error);
+        }
+    }
+
+    internal sealed class WorkStreamAccumulator
+    {
+        private readonly StringBuilder _content = new();
+        private readonly SortedDictionary<int, ToolCallFragment> _toolCalls = new();
+        private bool _answered;
+
+        /// <summary>Applies one SSE payload and returns the assistant text it carried, if any.</summary>
+        public string? Append(JsonElement root)
+        {
+            if (ReadString(root, "code") is { Length: > 0 }) throw new CloudException(CloudError.Service, "DashScope 服务返回错误。");
+            if (!root.TryGetProperty("choices", out var choices) || choices.ValueKind != JsonValueKind.Array) return null;
+            foreach (var choice in choices.EnumerateArray())
+            {
+                _answered = true;
+                if (!choice.TryGetProperty("delta", out var delta) || delta.ValueKind != JsonValueKind.Object) continue;
+                if (delta.TryGetProperty("tool_calls", out var calls) && calls.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var call in calls.EnumerateArray()) AppendToolCallFragment(call);
+                }
+                // reasoning_content is the model's private chain of thought; it is neither shown nor replayed.
+                var text = ReadString(delta, "content");
+                if (string.IsNullOrEmpty(text)) continue;
+                _content.Append(text);
+                return text;
+            }
+            return null;
+        }
+
+        public WorkModelResponse ToResponse()
+        {
+            if (!_answered && _content.Length == 0 && _toolCalls.Count == 0)
+                throw new CloudException(CloudError.Service, "DashScope 未返回有效的 Work 响应。");
+            var calls = _toolCalls.Values
+                .Where(fragment => !string.IsNullOrWhiteSpace(fragment.Name))
+                .Select((fragment, ordinal) => new WorkModelToolCall(
+                    string.IsNullOrWhiteSpace(fragment.Id) ? $"call-{ordinal + 1}" : fragment.Id,
+                    fragment.Name!,
+                    fragment.Arguments.Length == 0 ? "{}" : fragment.Arguments.ToString()))
+                .ToArray();
+            if (_content.Length == 0 && calls.Length == 0)
+                throw new CloudException(CloudError.Service, "DashScope Work 响应没有正文或工具调用。");
+            return new WorkModelResponse(_content.Length > 0 ? _content.ToString() : null, calls);
+        }
+
+        private void AppendToolCallFragment(JsonElement call)
+        {
+            if (call.ValueKind != JsonValueKind.Object) return;
+            var index = call.TryGetProperty("index", out var indexElement) && indexElement.TryGetInt32(out var parsed)
+                ? parsed
+                : _toolCalls.Count;
+            if (!_toolCalls.TryGetValue(index, out var fragment))
+                _toolCalls[index] = fragment = new ToolCallFragment();
+            if (ReadString(call, "id") is { Length: > 0 } id) fragment.Id = id;
+            if (!call.TryGetProperty("function", out var function) || function.ValueKind != JsonValueKind.Object) return;
+            if (ReadString(function, "name") is { Length: > 0 } name) fragment.Name = name;
+            if (ReadString(function, "arguments") is { } arguments) fragment.Arguments.Append(arguments);
+        }
+
+        private sealed class ToolCallFragment
+        {
+            public string? Id { get; set; }
+            public string? Name { get; set; }
+            public StringBuilder Arguments { get; } = new();
+        }
+    }
+
+    internal static IReadOnlyList<object> BuildWorkMessages(IReadOnlyList<WorkContextItem> context, WorkEnvironmentInfo environment)
     {
         var messages = new List<object>
         {
             new
             {
                 role = "system",
-                content = """
-                    你是小猫助手的 Work Agent。根据用户要求自主选择步骤和工具，只陈述真实完成的操作。
-                    优先在当前对话的 inputs、work、outputs 三个目录中工作；命令中使用 CATASSISTANT_WORKSPACE、CATASSISTANT_WORKING_DIRECTORY 和 CATASSISTANT_PYTHON 的绝对路径。
-                    办公文件任务先用 list_skills 查看概览，只在确实相关时用 load_skill 加载完整指令。共享 Python 运行时只读；额外依赖只能安装到当前工作区 work/python-packages。
-                    完成后把最终文件放入 outputs，并调用 deliver_files 交付真实成果。公开网络检索使用 web_search；沙箱内程序也可联网。
-                    工作区外的读写或命令执行必须申请并等待明确批准；目录文件权限不等于外部命令权限。工具失败或用户拒绝时，把真实结果纳入下一步决策。
-                    不得声称执行了未完成的操作，不得声称获得未批准的权限，也不得把文本或任意 JSON 冒充工具调用。
-                    """
+                content = BuildWorkSystemPrompt(environment)
             }
         };
         foreach (var item in context)
@@ -227,29 +336,30 @@ public sealed class DashScopeClient : IChatProvider, IWorkModelProvider, IDispos
         return messages;
     }
 
-    internal static WorkModelResponse ParseWorkResponse(JsonElement root)
+    internal static string BuildWorkSystemPrompt(WorkEnvironmentInfo environment)
     {
-        if (!root.TryGetProperty("choices", out var choices) || choices.ValueKind != JsonValueKind.Array || choices.GetArrayLength() == 0 ||
-            !choices[0].TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object)
-            throw new CloudException(CloudError.Service, "DashScope 未返回有效的 Work 响应。");
-        var content = ReadString(message, "content");
-        var calls = new List<WorkModelToolCall>();
-        var ids = new HashSet<string>(StringComparer.Ordinal);
-        if (message.TryGetProperty("tool_calls", out var toolCalls) && toolCalls.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var item in toolCalls.EnumerateArray())
-            {
-                var id = ReadString(item, "id");
-                if (string.IsNullOrWhiteSpace(id) || !ids.Add(id) ||
-                    !item.TryGetProperty("function", out var function) || function.ValueKind != JsonValueKind.Object) continue;
-                var name = ReadString(function, "name");
-                if (string.IsNullOrWhiteSpace(name)) continue;
-                calls.Add(new WorkModelToolCall(id, name, ReadString(function, "arguments") ?? "{}"));
-            }
-        }
-        if (string.IsNullOrWhiteSpace(content) && calls.Count == 0)
-            throw new CloudException(CloudError.Service, "DashScope Work 响应没有正文或工具调用。");
-        return new WorkModelResponse(content, calls);
+        var python = environment.BundledPythonPath is null
+            ? "未发现捆绑 Python；不要假设 python 或 pip 可用，先检查环境并在需要时向用户说明。"
+            : $"已提供只读的捆绑 Python：{environment.BundledPythonPath}。在 execute_command 中选择 cmd shell 后可直接使用 python 或 pip；已预装 python-docx、python-pptx、openpyxl、pypdf、pdfplumber、reportlab 等办公库。普通 pip 安装会由环境自动写入 {environment.PythonPackagesDirectory}，不要尝试修改共享运行时。";
+        return $"""
+            你是小猫助手的 Work Agent。根据用户目标自主规划并选择步骤和通用工具，只陈述真实完成的操作。
+            对明显包含多个阶段的任务，在第一次工具调用前用简短清单说明你制定的计划；简单任务直接执行。计划由你根据任务生成，不套用固定业务流程。每批工具返回后重新评估计划，只有在阶段变化、计划调整、需要用户决定或出现重要问题时，才发送简洁的阶段说明，避免逐条命令播报。不要展示私密思维链，只提供可核验的计划、判断依据和进度摘要。
+
+            当前真实环境：
+            - 操作系统与 Shell：Windows，支持 Windows PowerShell 5.1 和 cmd。AppContainer 中的 PowerShell 适合 PowerShell 内建脚本和文件操作，但不能可靠启动原生子进程；运行 python、pip 或其他原生程序时必须在 execute_command 中明确选择 shell="cmd"。这不是缺少软件，不要尝试修复或绕过沙箱。
+            - 工作区根目录（也是命令默认目录）：{environment.WorkspaceRoot}
+            - 输入目录：{environment.InputsDirectory}
+            - 过程目录：{environment.WorkDirectory}
+            - 成果目录：{environment.OutputsDirectory}
+            - 工作区内允许读写并允许联网；工作区外访问必须申请并等待明确批准。
+            - {python}
+            - 环境已设置 CATASSISTANT_WORKSPACE、CATASSISTANT_WORKING_DIRECTORY、CATASSISTANT_PYTHON（如可用）、PATH、PYTHONPATH 与 PIP_TARGET。优先使用普通、可移植的命令，不要重复探测已经明确给出的事实。
+
+            办公文件任务先用 list_skills 查看概览，只在确实相关时用 load_skill 加载完整指令。Skill 提供方法而不是替你规划任务。
+            最终文件应放入 outputs，并在验证后调用 deliver_files。公开网络检索使用 web_search；沙箱内程序也可联网。
+            目录文件权限不等于外部命令权限。工具失败或用户拒绝时，先根据真实错误重新判断原因，再决定修正、换方案、询问用户或结束；不要无分析地反复改写同一命令。
+            不得声称执行了未完成的操作，不得声称获得未批准的权限，也不得把文本或任意 JSON 冒充工具调用。
+            """;
     }
 
     private static string ReadContextContent(string payloadJson)
@@ -341,7 +451,11 @@ public sealed class DashScopeClient : IChatProvider, IWorkModelProvider, IDispos
         return false;
     }
 
-    public void Dispose() => _http.Dispose();
+    public void Dispose()
+    {
+        _http.Dispose();
+        _workHttp.Dispose();
+    }
 }
 
 public enum CloudError { ApiKeyMissing, ApiKeyInvalid, Permission, Model, Network, Timeout, NoSpeech, Service }

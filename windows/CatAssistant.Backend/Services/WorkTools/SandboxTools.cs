@@ -8,16 +8,16 @@ public sealed class ExecuteCommandTool(WindowsSandboxController sandbox, WorkApp
 {
     public WorkToolDefinition Definition { get; } = new(
         "execute_command",
-        "Run a PowerShell or cmd command inside the current conversation's Windows OS sandbox. The process and all children can access only this workspace and may access the network. Use $env:CATASSISTANT_WORKSPACE and $env:CATASSISTANT_WORKING_DIRECTORY for absolute paths. A bundled Python with office libraries is at $env:CATASSISTANT_PYTHON; install extras with pip --target under the workspace.",
+        "Run a PowerShell or cmd command inside the current conversation's Windows OS sandbox. The process and all children can access only this workspace and may access the network. Commands start at the workspace root by default. Use PowerShell for PowerShell-native operations and cmd for commands that launch native programs. The environment prepares PATH, PYTHONPATH and PIP_TARGET, so standard python and pip commands in cmd use the bundled read-only runtime and install extras into this conversation's work/python-packages directory.",
         """
-        {"type":"object","properties":{"command":{"type":"string"},"shell":{"type":"string","enum":["powershell","cmd"]},"working_directory":{"type":"string","description":"Workspace-relative directory; defaults to work"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":3600},"outside_sandbox":{"type":"boolean","description":"Request explicit approval to run this exact command outside the sandbox"}},"required":["command"],"additionalProperties":false}
+        {"type":"object","properties":{"command":{"type":"string"},"shell":{"type":"string","enum":["powershell","cmd"]},"working_directory":{"type":"string","description":"Workspace-relative directory; defaults to the workspace root"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":3600},"outside_sandbox":{"type":"boolean","description":"Request explicit approval to run this exact command outside the sandbox"}},"required":["command"],"additionalProperties":false}
         """);
 
     public async Task<WorkToolResult> ExecuteAsync(WorkToolExecutionContext context, string argumentsJson, CancellationToken cancellationToken)
     {
         var arguments = WorkToolArguments.Parse<Arguments>(argumentsJson);
         if (string.IsNullOrWhiteSpace(arguments.Command)) return WorkToolResult.Error("invalid_arguments", "command 不能为空。");
-        var workingDirectory = WorkspaceToolPaths.FullPath(context.WorkspaceRoot, arguments.WorkingDirectory ?? "work");
+        var workingDirectory = WorkspaceToolPaths.FullPath(context.WorkspaceRoot, arguments.WorkingDirectory ?? ".");
         if (!Directory.Exists(workingDirectory)) return WorkToolResult.Error("directory_not_found", "工作目录不存在。");
         var timeoutSeconds = Math.Clamp(arguments.TimeoutSeconds ?? 300, 1, 3600);
         var useCmd = string.Equals(arguments.Shell, "cmd", StringComparison.OrdinalIgnoreCase);
@@ -27,8 +27,8 @@ public sealed class ExecuteCommandTool(WindowsSandboxController sandbox, WorkApp
             ? Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe"
             : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
         var processArguments = useCmd
-            ? $"/d /q /c chcp 65001>nul & set \"CATASSISTANT_WORKSPACE={context.WorkspaceRoot}\" & set \"CATASSISTANT_WORKING_DIRECTORY={workingDirectory}\" & {arguments.Command}"
-            : $"-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes($"[Console]::OutputEncoding=[Text.Encoding]::UTF8; $ErrorActionPreference='Stop'; $env:CATASSISTANT_WORKSPACE='{ReadFileTool.PowerShellLiteral(context.WorkspaceRoot)}'; $env:CATASSISTANT_WORKING_DIRECTORY='{ReadFileTool.PowerShellLiteral(workingDirectory)}'; {arguments.Command}; if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}"))}";
+            ? $"/d /q /c {BuildCmdPrelude(context.WorkspaceRoot, workingDirectory)} {arguments.Command}"
+            : $"-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes($"{BuildPowerShellPrelude(context.WorkspaceRoot, workingDirectory)} {arguments.Command}; if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}"))}";
         try
         {
             var command = new SandboxCommand(executable, processArguments, workingDirectory, TimeSpan.FromSeconds(timeoutSeconds));
@@ -58,6 +58,28 @@ public sealed class ExecuteCommandTool(WindowsSandboxController sandbox, WorkApp
         }
         catch (TimeoutException error) { return WorkToolResult.Error("command_timeout", error.Message); }
         catch (UnauthorizedAccessException error) { return WorkToolResult.Error("access_denied", error.Message); }
+    }
+
+    internal static string BuildPowerShellPrelude(string workspaceRoot, string workingDirectory)
+    {
+        var packages = Path.Combine(workspaceRoot, "work", "python-packages");
+        Directory.CreateDirectory(packages);
+        var python = Environment.GetEnvironmentVariable("CATASSISTANT_PYTHON");
+        var pathPrefix = string.IsNullOrWhiteSpace(python)
+            ? ""
+            : $"$env:CATASSISTANT_PYTHON='{ReadFileTool.PowerShellLiteral(python)}'; $env:PATH='{ReadFileTool.PowerShellLiteral(Path.GetDirectoryName(python)!)};{ReadFileTool.PowerShellLiteral(Path.Combine(Path.GetDirectoryName(python)!, "Scripts"))};' + $env:PATH; ";
+        return $"[Console]::OutputEncoding=[Text.Encoding]::UTF8; $ErrorActionPreference='Stop'; $env:CATASSISTANT_WORKSPACE='{ReadFileTool.PowerShellLiteral(workspaceRoot)}'; $env:CATASSISTANT_WORKING_DIRECTORY='{ReadFileTool.PowerShellLiteral(workingDirectory)}'; {pathPrefix}$env:PYTHONPATH='{ReadFileTool.PowerShellLiteral(packages)}'; $env:PIP_TARGET='{ReadFileTool.PowerShellLiteral(packages)}'; $env:PIP_CONFIG_FILE='NUL'; $env:PIP_DISABLE_PIP_VERSION_CHECK='1'; $env:PYTHONNOUSERSITE='1'; $env:PYTHONUTF8='1';";
+    }
+
+    internal static string BuildCmdPrelude(string workspaceRoot, string workingDirectory)
+    {
+        var packages = Path.Combine(workspaceRoot, "work", "python-packages");
+        Directory.CreateDirectory(packages);
+        var python = Environment.GetEnvironmentVariable("CATASSISTANT_PYTHON");
+        var pathPrefix = string.IsNullOrWhiteSpace(python)
+            ? ""
+            : $"set \"CATASSISTANT_PYTHON={python}\" & set \"PATH={Path.GetDirectoryName(python)};{Path.Combine(Path.GetDirectoryName(python)!, "Scripts")};%PATH%\" & ";
+        return $"chcp 65001>nul & set \"CATASSISTANT_WORKSPACE={workspaceRoot}\" & set \"CATASSISTANT_WORKING_DIRECTORY={workingDirectory}\" & {pathPrefix}set \"PYTHONPATH={packages}\" & set \"PIP_TARGET={packages}\" & set \"PIP_CONFIG_FILE=NUL\" & set \"PIP_DISABLE_PIP_VERSION_CHECK=1\" & set \"PYTHONNOUSERSITE=1\" & set \"PYTHONUTF8=1\" &";
     }
 
     private sealed record Arguments(string Command, string? Shell, string? WorkingDirectory, int? TimeoutSeconds, bool? OutsideSandbox);

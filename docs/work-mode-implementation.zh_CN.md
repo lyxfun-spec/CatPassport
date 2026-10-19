@@ -23,6 +23,9 @@ Work 是文件中心的自主 Agent；支持原生工具调用、同批独立工
 - 外部授权：不动态放宽 AppContainer ACL。可信后端在用户批准后代理执行明确文件操作或明确命令；文件目录 grant 与外部命令权限分离。task-directory grant 仅存在于当前 run 的可信内存状态，结束即撤销。
 - 链接防绕过：工作区 ACL 不授予普通外部目录；外部文件代理拒绝目标现有路径链上的 reparse point，交付与定位也只接受 `outputs` 下的普通非 reparse 文件。
 - 运行时：打包 Python 3.13 x64 与固定版本办公依赖，发行资源只读共享；额外依赖安装到当前对话 `work/python-packages`。
+- 模型：Chat 与 Work 使用独立配置；Work 默认使用 `qwen3.8-max`，不会因调整普通聊天模型而降级。
+- 自主规划：不增加强制计划器或面向 Python/PPT 等场景的专用工具。系统提示要求 Agent 对多阶段任务先给出简短计划，在操作批次之间重新判断并公开阶段更新；简单任务仍可直接执行。
+- 环境适配：每轮 Work 开始前把实际 Windows shell、工作区绝对路径、打包 Python、办公依赖和目录权限告知模型。命令环境预置 `PATH`、`PYTHONPATH`、`PIP_TARGET` 等通用约定，使 `cmd` 中的标准 `python`/`pip` 命令自然落入当前对话工作区，但依赖选择和安装命令仍由 Agent 自主决定。由于 AppContainer 内的 PowerShell 5.1 不能可靠启动原生子进程，模型会收到“PowerShell 用于内建脚本、`cmd` 用于原生程序”的真实约束。
 - Skill：内置 `documents`、`presentations`、`spreadsheets`、`pdf`。模型先 `list_skills` 获取摘要，再按需 `load_skill` 获取完整 `SKILL.md`。
 - 上下文：第一版达到字符预算即显式失败并告知用户，没有静默截断或自动摘要。
 
@@ -68,7 +71,7 @@ Work 是文件中心的自主 Agent；支持原生工具调用、同批独立工
 | A15 | `SkillToolTests` 和四个内置 Skill | 通过 |
 | A16 | 打包运行时导入探针、运行时写入拒绝、每对话依赖目录约定 | 通过 |
 | A17 | AppContainer 有/无网络 capability 对照探针；文件越权仍拒绝 | 通过 |
-| A18 | Work activity、展开工具详情、真实状态/错误 UI | 代码与类型检查通过，需人工视觉确认 |
+| A18 | Work activity、当前计划/阶段说明、展开工具详情、真实状态/错误 UI | 代码与类型检查通过，需人工视觉确认 |
 | A19 | 工具错误进入下一轮 context；Agent loop 无硬编码业务重试次数 | 通过 |
 | A20 | `ContextLimitFailsExplicitlyWithoutDroppingHistoryOrCallingModel` | 通过 |
 

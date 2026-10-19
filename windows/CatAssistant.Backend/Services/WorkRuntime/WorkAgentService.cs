@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using CatAssistant.Backend.Models;
 
@@ -15,6 +16,8 @@ public sealed class WorkAgentService : IAsyncDisposable
         public ConcurrentQueue<ConversationMessage> PendingMessages { get; } = new();
         public Task? Execution { get; set; }
         public bool Stopping { get; set; }
+        public string? StreamMessageId { get; set; }
+        public StringBuilder StreamContent { get; } = new();
     }
 
     private readonly SqliteRepository _repository;
@@ -129,7 +132,10 @@ public sealed class WorkAgentService : IAsyncDisposable
     private async Task ExecuteObservedAsync(ActiveWorkRun run)
     {
         try { await ExecuteAsync(run); }
-        catch (OperationCanceledException) when (run.Cancellation.IsCancellationRequested) { }
+        catch (OperationCanceledException) when (run.Cancellation.IsCancellationRequested)
+        {
+            await InterruptStreamedMessageAsync(run);
+        }
         catch (Exception error)
         {
             await CompleteIfCurrentAsync(run, "failed", "error", error);
@@ -142,6 +148,8 @@ public sealed class WorkAgentService : IAsyncDisposable
 
     private async Task ExecuteAsync(ActiveWorkRun run)
     {
+        var workspace = await _workspaces.EnsureAsync(run.ConversationId, run.Cancellation.Token);
+        var environment = WorkEnvironmentInfo.From(workspace);
         var round = 0;
         while (true)
         {
@@ -152,19 +160,28 @@ public sealed class WorkAgentService : IAsyncDisposable
             var estimatedCharacters = WorkContextBudget.EstimateCharacters(context, definitions);
             if (estimatedCharacters >= _contextCharacterLimit)
                 throw new WorkContextLimitException(estimatedCharacters, _contextCharacterLimit);
-            var response = await _provider.CompleteAsync(context, definitions, settings.ChatModel, _apiKey(), run.Cancellation.Token);
+            run.StreamMessageId = null;
+            run.StreamContent.Clear();
+            var response = await _provider.CompleteAsync(
+                context,
+                definitions,
+                environment,
+                settings.WorkModel,
+                _apiKey(),
+                delta => AppendStreamedContentAsync(run, delta),
+                run.Cancellation.Token);
             run.Cancellation.Token.ThrowIfCancellationRequested();
 
             var roundId = $"{run.Id}:{++round}";
             if (response.ToolCalls.Count == 0)
             {
-                if (!string.IsNullOrWhiteSpace(response.Content)) await AddAssistantMessageAsync(run, response.Content, addToContext: true);
+                if (!string.IsNullOrWhiteSpace(response.Content)) await CommitRoundMessageAsync(run, response.Content!, addToContext: true);
                 if (await CompleteOrContinueAsync(run)) continue;
                 return;
             }
 
             ConversationMessage? explanation = null;
-            if (!string.IsNullOrWhiteSpace(response.Content)) explanation = await AddAssistantMessageAsync(run, response.Content, addToContext: false);
+            if (!string.IsNullOrWhiteSpace(response.Content)) explanation = await CommitRoundMessageAsync(run, response.Content!, addToContext: false);
             await _repository.AddWorkContextItemAsync(
                 run.ConversationId,
                 run.Id,
@@ -184,7 +201,6 @@ public sealed class WorkAgentService : IAsyncDisposable
                 Publish(new ConversationEvent("tool.created", run.ConversationId, RunId: run.Id, Status: "pending"));
             }
 
-            var workspace = await _workspaces.EnsureAsync(run.ConversationId, run.Cancellation.Token);
             var tasks = response.ToolCalls.Select((call, index) => ExecuteToolAsync(run, workspace, call, persistedCalls[index])).ToArray();
             var results = await Task.WhenAll(tasks);
             for (var index = 0; index < results.Length; index++)
@@ -300,9 +316,31 @@ public sealed class WorkAgentService : IAsyncDisposable
             JsonSerializer.Serialize(new { content = message.Content }),
             messageId: message.Id);
 
-    private async Task<ConversationMessage> AddAssistantMessageAsync(ActiveWorkRun run, string content, bool addToContext)
+    private async Task AppendStreamedContentAsync(ActiveWorkRun run, string delta)
     {
-        var message = await _repository.AddMessageAsync(run.ConversationId, "assistant", "runtime", "complete", content, run.Id);
+        if (run.Stopping || string.IsNullOrEmpty(delta)) return;
+        if (run.StreamMessageId is null)
+        {
+            var created = await _repository.AddMessageAsync(run.ConversationId, "assistant", "runtime", "streaming", "", run.Id);
+            run.StreamMessageId = created.Id;
+            run.StreamContent.Clear();
+            Publish(new ConversationEvent("message.created", run.ConversationId, created.Id, run.Id, Message: created));
+        }
+        run.StreamContent.Append(delta);
+        await _repository.UpdateMessageAsync(run.StreamMessageId, run.StreamContent.ToString(), "streaming");
+        Publish(new ConversationEvent("message.delta", run.ConversationId, run.StreamMessageId, run.Id, delta));
+    }
+
+    private async Task<ConversationMessage> CommitRoundMessageAsync(ActiveWorkRun run, string content, bool addToContext)
+    {
+        ConversationMessage message;
+        if (run.StreamMessageId is { } streamedId)
+        {
+            run.StreamMessageId = null;
+            await _repository.UpdateMessageAsync(streamedId, content, "complete");
+            message = (await _repository.LoadMessagesAsync(run.ConversationId)).Single(item => item.Id == streamedId);
+        }
+        else message = await _repository.AddMessageAsync(run.ConversationId, "assistant", "runtime", "complete", content, run.Id);
         if (addToContext)
             await _repository.AddWorkContextItemAsync(
                 run.ConversationId,
@@ -315,6 +353,27 @@ public sealed class WorkAgentService : IAsyncDisposable
         return message;
     }
 
+    private async Task InterruptStreamedMessageAsync(ActiveWorkRun run)
+    {
+        if (run.StreamMessageId is not { } messageId) return;
+        run.StreamMessageId = null;
+        await _repository.UpdateMessageAsync(messageId, run.StreamContent.ToString(), "interrupted");
+        Publish(new ConversationEvent("message.interrupted", run.ConversationId, messageId, run.Id, Status: "interrupted"));
+    }
+
+    private async Task RecordRunFailureAsync(ActiveWorkRun run, string reason)
+    {
+        if (run.StreamMessageId is { } messageId)
+        {
+            run.StreamMessageId = null;
+            var partial = run.StreamContent.ToString();
+            await _repository.UpdateMessageAsync(messageId, partial.Length > 0 ? $"{partial}\n\n{reason}" : reason, "failed");
+            return;
+        }
+        var message = await _repository.AddMessageAsync(run.ConversationId, "assistant", "runtime", "failed", reason, run.Id);
+        Publish(new ConversationEvent("message.created", run.ConversationId, message.Id, run.Id, Message: message));
+    }
+
     private async Task CompleteIfCurrentAsync(ActiveWorkRun run, string state, string reason, Exception? error = null)
     {
         var gate = Gate(run.ConversationId);
@@ -323,6 +382,7 @@ public sealed class WorkAgentService : IAsyncDisposable
         {
             if (!_runs.TryGetValue(run.ConversationId, out var current) || !ReferenceEquals(current, run) || run.Stopping) return;
             await _repository.FinishRunAsync(run.Id, state, reason, error?.GetType().Name);
+            if (error is not null) await RecordRunFailureAsync(run, error.Message);
             _approvals?.EndRun(run.Id);
             _runs.TryRemove(run.ConversationId, out _);
             Publish(new ConversationEvent(error is null ? "run.completed" : "run.failed", run.ConversationId, RunId: run.Id, Status: state, Error: error?.Message));

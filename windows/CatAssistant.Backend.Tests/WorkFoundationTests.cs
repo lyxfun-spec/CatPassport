@@ -8,6 +8,28 @@ namespace CatAssistant.Backend.Tests;
 public sealed class WorkFoundationTests
 {
     [Fact]
+    public async Task WorkModelDefaultsToQwenMaxAndPersistsIndependently()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), $"cat-assistant-settings-{Guid.NewGuid():N}.db");
+        try
+        {
+            var repository = new SqliteRepository(databasePath);
+            await repository.InitializeAsync();
+            var defaults = await repository.LoadSettingsAsync();
+            Assert.Equal("qwen-plus", defaults.ChatModel);
+            Assert.Equal("qwen3.8-max", defaults.WorkModel);
+
+            defaults.ChatModel = "chat-model";
+            defaults.WorkModel = "work-model";
+            await repository.SaveSettingsAsync(defaults);
+            var saved = await repository.LoadSettingsAsync();
+            Assert.Equal("chat-model", saved.ChatModel);
+            Assert.Equal("work-model", saved.WorkModel);
+        }
+        finally { DeleteDatabase(databasePath); }
+    }
+
+    [Fact]
     public async Task WorkspaceCreatesThreeDirectoriesAndKeepsDuplicateInputs()
     {
         var root = NewTemporaryDirectory();
@@ -26,6 +48,7 @@ public sealed class WorkFoundationTests
 
             Assert.True(Directory.Exists(paths.Inputs));
             Assert.True(Directory.Exists(paths.Work));
+            Assert.True(Directory.Exists(Path.Combine(paths.Work, "python-packages")));
             Assert.True(Directory.Exists(paths.Outputs));
             Assert.Equal("brief.txt", Path.GetFileName(first));
             Assert.Equal("brief (2).txt", Path.GetFileName(second));

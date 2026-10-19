@@ -102,6 +102,7 @@ internal static class Program
                     Optional<string>(request.Params, "apiKey"),
                     Required<string>(request.Params, "asrModel"),
                     Required<string>(request.Params, "chatModel"),
+                    Required<string>(request.Params, "workModel"),
                     Required<uint>(request.Params, "screenTimeoutSeconds"),
                     Required<bool>(request.Params, "autoReconnect"),
                     Required<bool>(request.Params, "webSearchEnabled"));

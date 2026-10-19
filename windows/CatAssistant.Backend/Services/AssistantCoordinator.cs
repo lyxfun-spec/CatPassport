@@ -121,6 +121,7 @@ public sealed class AssistantCoordinator : IAsyncDisposable
     public PublicSettings PublicSettings() => new(
         Settings.AsrModel,
         Settings.ChatModel,
+        Settings.WorkModel,
         Settings.ScreenTimeoutSeconds,
         Settings.AutoReconnect,
         Settings.WebSearchEnabled,
@@ -241,12 +242,12 @@ public sealed class AssistantCoordinator : IAsyncDisposable
         catch (Exception error) { ShowError(error); }
     }
 
-    public async Task SaveSettingsAsync(string? apiKey, string asrModel, string chatModel, uint screenTimeout, bool autoReconnect, bool webSearchEnabled)
+    public async Task SaveSettingsAsync(string? apiKey, string asrModel, string chatModel, string workModel, uint screenTimeout, bool autoReconnect, bool webSearchEnabled)
     {
         try
         {
             if (!string.IsNullOrWhiteSpace(apiKey)) _secureStore.Save(apiKey);
-            Settings.AsrModel = asrModel.Trim(); Settings.ChatModel = chatModel.Trim(); Settings.ScreenTimeoutSeconds = screenTimeout; Settings.AutoReconnect = autoReconnect; Settings.WebSearchEnabled = webSearchEnabled;
+            Settings.AsrModel = asrModel.Trim(); Settings.ChatModel = chatModel.Trim(); Settings.WorkModel = workModel.Trim(); Settings.ScreenTimeoutSeconds = screenTimeout; Settings.AutoReconnect = autoReconnect; Settings.WebSearchEnabled = webSearchEnabled;
             await _repository.SaveSettingsAsync(Settings);
             if (IsLinkReady()) { await SendUInt32Async(MessageType.ScreenTimeout, screenTimeout); await SendAppStatusAsync(); }
             SetDetail("设置已保存");

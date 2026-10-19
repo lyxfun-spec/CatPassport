@@ -235,6 +235,7 @@ public sealed class SqliteRepository
         {
             AsrModel = values.GetValueOrDefault("asr_model", "qwen-audio-3.1-asr-flash"),
             ChatModel = values.GetValueOrDefault("chat_model", "qwen-plus"),
+            WorkModel = values.GetValueOrDefault("work_model", "qwen3.8-max"),
             LastBluetoothAddress = ulong.TryParse(values.GetValueOrDefault("last_address"), out var address) ? address : null,
             LastDeviceName = values.GetValueOrDefault("last_name"),
             ScreenTimeoutSeconds = uint.TryParse(values.GetValueOrDefault("screen_timeout"), out var timeout) ? timeout : 60,
@@ -249,6 +250,7 @@ public sealed class SqliteRepository
         {
             ["asr_model"] = settings.AsrModel,
             ["chat_model"] = settings.ChatModel,
+            ["work_model"] = settings.WorkModel,
             ["screen_timeout"] = settings.ScreenTimeoutSeconds.ToString(),
             ["auto_reconnect"] = settings.AutoReconnect ? "1" : "0",
             ["web_search"] = settings.WebSearchEnabled ? "1" : "0",

@@ -27,6 +27,7 @@ public sealed class WorkWorkspaceService : IDisposable
             var paths = Paths(conversationId);
             Directory.CreateDirectory(paths.Inputs);
             Directory.CreateDirectory(paths.Work);
+            Directory.CreateDirectory(Path.Combine(paths.Work, "python-packages"));
             Directory.CreateDirectory(paths.Outputs);
             return paths;
         }
@@ -94,6 +95,7 @@ public sealed class WorkWorkspaceService : IDisposable
         var paths = Paths(conversationId);
         Directory.CreateDirectory(paths.Inputs);
         Directory.CreateDirectory(paths.Work);
+        Directory.CreateDirectory(Path.Combine(paths.Work, "python-packages"));
         Directory.CreateDirectory(paths.Outputs);
         return paths;
     }

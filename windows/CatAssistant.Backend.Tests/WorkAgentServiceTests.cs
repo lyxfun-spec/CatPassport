@@ -38,6 +38,12 @@ public sealed class WorkAgentServiceTests
         var queued = Assert.Single(secondContext, item => item.Kind == "message" && item.Role == "user" && JsonContent(item) == "改用浅色");
         Assert.True(queued.Ordinal > results.Max(item => item.Ordinal));
         Assert.Null(fixture.Agent.ActiveRunId(fixture.ConversationId));
+        Assert.All(fixture.Provider.Models, model => Assert.Equal("qwen3.8-max", model));
+        Assert.All(fixture.Provider.Environments, environment =>
+        {
+            Assert.Equal(fixture.ConversationId, Path.GetFileName(Path.GetDirectoryName(environment.InputsDirectory)));
+            Assert.Equal(environment.WorkspaceRoot, environment.OutputsDirectory[..^"outputs".Length].TrimEnd(Path.DirectorySeparatorChar));
+        });
 
         void OnStarted()
         {
@@ -79,6 +85,56 @@ public sealed class WorkAgentServiceTests
 
         Assert.Contains("没有静默删除", error);
         Assert.Empty(fixture.Provider.Contexts);
+    }
+
+    [Fact]
+    public async Task ModelTimeoutPersistsAVisibleFailureInsteadOfEndingSilently()
+    {
+        await using var fixture = await WorkAgentFixture.CreateAsync();
+        fixture.Provider.EnqueueFailure(new TaskCanceledException("模型在 10 分钟内没有完成生成，本轮任务已中断。", new TimeoutException()));
+
+        await fixture.Agent.SendAsync(fixture.ConversationId, "制作 Transformer 的 PPT", "desktop");
+        var error = await fixture.Failed.Task.WaitAsync(TimeSpan.FromSeconds(3));
+
+        Assert.Equal("模型在 10 分钟内没有完成生成，本轮任务已中断。", error);
+        Assert.Null(fixture.Agent.ActiveRunId(fixture.ConversationId));
+        var failure = Assert.Single(await fixture.Repository.LoadMessagesAsync(fixture.ConversationId), message => message.Role == "assistant");
+        Assert.Equal("failed", failure.Status);
+        Assert.Equal(error, failure.Content);
+        Assert.All(await fixture.Repository.LoadWorkContextItemsAsync(fixture.ConversationId), item => Assert.NotEqual(failure.Content, JsonContent(item)));
+    }
+
+    [Fact]
+    public async Task StreamedAnswerAccumulatesIntoOneMessageAndOneContextItem()
+    {
+        await using var fixture = await WorkAgentFixture.CreateAsync();
+        fixture.Provider.EnqueueStreamed(["环境已确认：", "python-pptx 可用。"], new WorkModelResponse("环境已确认：python-pptx 可用。", []));
+
+        await fixture.Agent.SendAsync(fixture.ConversationId, "制作 PPT", "desktop");
+        await fixture.Completed.Task.WaitAsync(TimeSpan.FromSeconds(3));
+
+        var answer = Assert.Single(await fixture.Repository.LoadMessagesAsync(fixture.ConversationId), message => message.Role == "assistant");
+        Assert.Equal("complete", answer.Status);
+        Assert.Equal("环境已确认：python-pptx 可用。", answer.Content);
+        Assert.Single(fixture.Events, update => update.Type == "message.created" && update.MessageId == answer.Id);
+        Assert.Equal(2, fixture.Events.Count(update => update.Type == "message.delta" && update.MessageId == answer.Id));
+        var context = await fixture.Repository.LoadWorkContextItemsAsync(fixture.ConversationId);
+        Assert.Single(context, item => item.Kind == "message" && item.Role == "assistant" && item.MessageId == answer.Id);
+    }
+
+    [Fact]
+    public async Task StoppingDuringAStreamKeepsThePartialAnswer()
+    {
+        await using var fixture = await WorkAgentFixture.CreateAsync();
+        fixture.Provider.EnqueueStreamThenHang(["大纲已经写好，"]);
+
+        await fixture.Agent.SendAsync(fixture.ConversationId, "制作 PPT", "desktop");
+        await WaitUntilAsync(() => fixture.Events.Any(update => update.Type == "message.created"));
+        await fixture.Agent.StopAsync(fixture.ConversationId);
+
+        var partial = Assert.Single(await fixture.Repository.LoadMessagesAsync(fixture.ConversationId), message => message.Role == "assistant");
+        Assert.Equal("interrupted", partial.Status);
+        Assert.Equal("大纲已经写好，", partial.Content);
     }
 
     [Fact]
@@ -151,30 +207,53 @@ public sealed class WorkAgentServiceTests
 
     private sealed class ControlledWorkProvider : IWorkModelProvider
     {
-        private readonly ConcurrentQueue<WorkModelResponse> _responses = new();
+        private readonly ConcurrentQueue<Func<Func<string, Task>, CancellationToken, Task<WorkModelResponse>>> _replies = new();
         private readonly object _lock = new();
         private readonly List<IReadOnlyList<WorkContextItem>> _contexts = [];
+        private readonly List<string> _models = [];
+        private readonly List<WorkEnvironmentInfo> _environments = [];
         private TaskCompletionSource _changed = Signal();
 
         public IReadOnlyList<IReadOnlyList<WorkContextItem>> Contexts { get { lock (_lock) return _contexts.ToArray(); } }
+        public IReadOnlyList<string> Models { get { lock (_lock) return _models.ToArray(); } }
+        public IReadOnlyList<WorkEnvironmentInfo> Environments { get { lock (_lock) return _environments.ToArray(); } }
 
-        public void Enqueue(WorkModelResponse response) => _responses.Enqueue(response);
+        public void Enqueue(WorkModelResponse response) => _replies.Enqueue((_, _) => Task.FromResult(response));
 
-        public Task<WorkModelResponse> CompleteAsync(
+        public void EnqueueFailure(Exception error) => _replies.Enqueue((_, _) => Task.FromException<WorkModelResponse>(error));
+
+        public void EnqueueStreamed(IReadOnlyList<string> deltas, WorkModelResponse response) => _replies.Enqueue(async (onContentDelta, _) =>
+        {
+            foreach (var delta in deltas) await onContentDelta(delta);
+            return response;
+        });
+
+        public void EnqueueStreamThenHang(IReadOnlyList<string> deltas) => _replies.Enqueue(async (onContentDelta, cancellationToken) =>
+        {
+            foreach (var delta in deltas) await onContentDelta(delta);
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            throw new InvalidOperationException("取消后不应继续执行。");
+        });
+
+        public async Task<WorkModelResponse> CompleteAsync(
             IReadOnlyList<WorkContextItem> context,
             IReadOnlyList<WorkToolDefinition> tools,
+            WorkEnvironmentInfo environment,
             string model,
             string apiKey,
+            Func<string, Task> onContentDelta,
             CancellationToken cancellationToken)
         {
             lock (_lock)
             {
                 _contexts.Add(context.ToArray());
+                _models.Add(model);
+                _environments.Add(environment);
                 _changed.TrySetResult();
                 _changed = Signal();
             }
-            if (!_responses.TryDequeue(out var response)) throw new InvalidOperationException("没有准备模型响应。");
-            return Task.FromResult(response);
+            if (!_replies.TryDequeue(out var reply)) throw new InvalidOperationException("没有准备模型响应。");
+            return await reply(onContentDelta, cancellationToken);
         }
 
         public async Task WaitForCallsAsync(int count)
@@ -221,6 +300,7 @@ public sealed class WorkAgentServiceTests
         public string ConversationId { get; }
         public TaskCompletionSource Completed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<string> Failed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public ConcurrentBag<ConversationEvent> Events { get; } = [];
 
         public static async Task<WorkAgentFixture> CreateAsync(int contextCharacterLimit = 96_000)
         {
@@ -239,6 +319,7 @@ public sealed class WorkAgentServiceTests
 
         private void OnChanged(object? sender, ConversationEvent update)
         {
+            Events.Add(update);
             if (update.Type == "run.completed") Completed.TrySetResult();
             if (update.Type == "run.failed") Failed.TrySetResult(update.Error ?? "");
         }

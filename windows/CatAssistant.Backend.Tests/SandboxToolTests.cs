@@ -55,6 +55,15 @@ public sealed class SandboxToolTests
                     "{\"command\":\"\\\"%CATASSISTANT_PYTHON%\\\" verify-runtime.py\",\"shell\":\"cmd\",\"working_directory\":\"work\"}", CancellationToken.None);
                 Assert.True(pythonViaTool.Success, pythonViaTool.OutputJson);
                 Assert.Contains("runtime-ok", pythonViaTool.OutputJson);
+                var preparedEnvironment = await new ExecuteCommandTool(sandbox).ExecuteAsync(context,
+                    "{\"command\":\"python -c \\\"import os; print(os.environ['CATASSISTANT_WORKSPACE']); print(os.getcwd()); print(os.environ['PIP_TARGET']); print(os.environ['PYTHONPATH'])\\\"\",\"shell\":\"cmd\"}", CancellationToken.None);
+                Assert.True(preparedEnvironment.Success, preparedEnvironment.OutputJson);
+                using (var preparedPayload = JsonDocument.Parse(preparedEnvironment.OutputJson))
+                {
+                    var preparedOutput = preparedPayload.RootElement.GetProperty("stdout").GetString() ?? "";
+                    Assert.Contains(workspace, preparedOutput, StringComparison.OrdinalIgnoreCase);
+                    Assert.Contains("python-packages", preparedOutput, StringComparison.OrdinalIgnoreCase);
+                }
                 var runtimeSentinel = Path.Combine(Path.GetDirectoryName(workPython)!, "runtime-read-only-probe.txt");
                 await File.WriteAllTextAsync(runtimeSentinel, "host");
                 try
@@ -86,5 +95,28 @@ public sealed class SandboxToolTests
         {
             sandbox.DeleteProfile(conversationId);
         }
+    }
+
+    [Fact]
+    public void CommandPreludePreparesConventionalPythonEnvironment()
+    {
+        var previous = Environment.GetEnvironmentVariable("CATASSISTANT_PYTHON");
+        try
+        {
+            Environment.SetEnvironmentVariable("CATASSISTANT_PYTHON", @"C:\runtime\python.exe");
+            var root = Path.Combine(Path.GetTempPath(), $"cat-command-{Guid.NewGuid():N}");
+            var powerShell = ExecuteCommandTool.BuildPowerShellPrelude(root, root);
+            var cmd = ExecuteCommandTool.BuildCmdPrelude(root, root);
+
+            Assert.Contains("PIP_TARGET", powerShell);
+            Assert.Contains("PYTHONPATH", powerShell);
+            Assert.Contains("C:\\runtime", powerShell);
+            Assert.Contains("PIP_TARGET", cmd);
+            Assert.Contains("PYTHONPATH", cmd);
+            Assert.Contains("C:\\runtime", cmd);
+            Assert.True(Directory.Exists(Path.Combine(root, "work", "python-packages")));
+            Directory.Delete(root, recursive: true);
+        }
+        finally { Environment.SetEnvironmentVariable("CATASSISTANT_PYTHON", previous); }
     }
 }

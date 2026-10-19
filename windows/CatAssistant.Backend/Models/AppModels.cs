@@ -6,6 +6,7 @@ public sealed class AppSettings
 {
     public string AsrModel { get; set; } = "qwen-audio-3.1-asr-flash";
     public string ChatModel { get; set; } = "qwen-plus";
+    public string WorkModel { get; set; } = "qwen3.8-max";
     public ulong? LastBluetoothAddress { get; set; }
     public string? LastDeviceName { get; set; }
     public uint ScreenTimeoutSeconds { get; set; } = 60;
@@ -16,6 +17,7 @@ public sealed class AppSettings
 public sealed record PublicSettings(
     string AsrModel,
     string ChatModel,
+    string WorkModel,
     uint ScreenTimeoutSeconds,
     bool AutoReconnect,
     bool WebSearchEnabled,

@@ -14,14 +14,14 @@ public sealed class WebSearchToolTests
     public async Task UsesExistingSearchProviderAndReturnsGroundedSources()
     {
         var provider = new SearchProvider();
-        var tool = new WebSearchTool(provider, () => new AppSettings { ChatModel = "test-model" }, () => "test-key");
+        var tool = new WebSearchTool(provider, () => new AppSettings { ChatModel = "chat-model", WorkModel = "work-model" }, () => "test-key");
         var context = new WorkToolExecutionContext(Guid.NewGuid().ToString("N"), "run", Path.GetTempPath(), "call");
 
         var result = await tool.ExecuteAsync(context, "{\"query\":\"今日公开信息\"}", CancellationToken.None);
 
         Assert.True(result.Success, result.ErrorMessage);
         Assert.True(provider.SearchEnabled);
-        Assert.Equal("test-model", provider.Model);
+        Assert.Equal("work-model", provider.Model);
         using var json = JsonDocument.Parse(result.OutputJson);
         Assert.Equal("检索结果", json.RootElement.GetProperty("answer").GetString());
         var source = Assert.Single(json.RootElement.GetProperty("sources").EnumerateArray());
