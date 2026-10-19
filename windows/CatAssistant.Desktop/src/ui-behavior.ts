@@ -43,3 +43,24 @@ export function greetingForHour(hour: number): string {
   if (hour < 18) return '下午好，想聊些什么？';
   return '晚上好，想聊些什么？';
 }
+
+export function workPhaseLabel(
+  messages: Array<{ role: string; source: string; content: string; runId?: string }>,
+  activeRunId?: string,
+  maximumLength = 72
+): string | undefined {
+  if (!activeRunId) return undefined;
+  const message = [...messages].reverse().find(item =>
+    item.role === 'assistant'
+    && item.source === 'runtime'
+    && item.runId === activeRunId
+    && item.content.trim().length > 0
+  );
+  if (!message) return undefined;
+  const line = message.content.split(/\r?\n/).map(value => value.trim()).find(Boolean)
+    ?.replace(/^[#>*\-\s]+/, '')
+    .replace(/^\*\*(.+)\*\*:?$/, '$1')
+    .trim();
+  if (!line) return undefined;
+  return line.length > maximumLength ? `${line.slice(0, maximumLength - 1)}…` : line;
+}

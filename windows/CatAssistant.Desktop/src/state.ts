@@ -27,7 +27,7 @@ export function deviceDiscoveryMessage(device: DeviceState): string {
 export function reduceBackendEvent(state: UiState, action: UiAction): UiState {
   if (action.event === 'backend.ready' || action.event === 'ui.bootstrap') {
     const bootstrap = action.event === 'backend.ready' ? action.data.state : action.data;
-    return { bootstrap, backendError: undefined };
+    return { bootstrap, backendError: undefined, runError: state.runError };
   }
   if (action.event === 'backend.exited') {
     return { ...state, backendError: action.data.message ?? `后台服务已退出${action.data.code === null ? '' : `（代码 ${action.data.code}）`}` };
@@ -56,8 +56,21 @@ export function reduceBackendEvent(state: UiState, action: UiAction): UiState {
 function reduceConversationEvent(state: UiState, event: ConversationEvent): UiState {
   const bootstrap = state.bootstrap!;
   const detail = bootstrap.activeConversation;
-  if (event.type === 'run.failed') return { ...state, runError: event.error ?? 'AI 服务暂时不可用。' };
   if (!detail || detail.conversation.id !== event.conversationId) return state;
+  if (event.type === 'run.failed') {
+    return { ...state, runError: event.error ?? 'AI 服务暂时不可用。', bootstrap: { ...bootstrap, activeConversation: { ...detail, activeRunId: undefined } } };
+  }
+  if (event.type === 'message.created' && event.message) {
+    const created = event.message;
+    if (detail.messages.some(message => message.id === created.id)) return state;
+    return {
+      ...state,
+      bootstrap: {
+        ...bootstrap,
+        activeConversation: { ...detail, messages: [...detail.messages, created], activeRunId: event.runId ?? detail.activeRunId }
+      }
+    };
+  }
   if (event.type === 'message.delta' && event.messageId && event.delta) {
     const messages = detail.messages.map(message => message.id === event.messageId
       ? { ...message, content: message.content + event.delta, status: 'streaming' as const }

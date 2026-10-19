@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { BootstrapState } from './shared';
+import type { BootstrapState, ConversationMessage } from './shared';
 import { deviceDiscoveryMessage, initialState, reduceBackendEvent } from './state';
 
 const bootstrap: BootstrapState = {
@@ -12,7 +12,7 @@ const bootstrap: BootstrapState = {
     activeRunId: 'run-1'
   },
   device: { status: '未连接', detail: '', isConnected: false, hasPairedDevice: false, maxPduSize: 0, devices: [], followDesktop: true },
-  settings: { asrModel: 'asr', chatModel: 'chat', screenTimeoutSeconds: 60, autoReconnect: true, webSearchEnabled: true, hasApiKey: true }
+  settings: { asrModel: 'asr', chatModel: 'chat', workModel: 'work', screenTimeoutSeconds: 60, autoReconnect: true, webSearchEnabled: true, hasApiKey: true }
 };
 
 describe('conversation stream state', () => {
@@ -23,11 +23,48 @@ describe('conversation stream state', () => {
     expect(state.bootstrap?.activeConversation?.messages[0].content).toBe('你好');
   });
 
+  it('attaches streamed deltas to a message that appears mid-run', () => {
+    const created: ConversationMessage = {
+      id: 'assistant-2', conversationId: 'chat-1', role: 'assistant', source: 'runtime', status: 'streaming',
+      sequence: 3, content: '', createdAt: '2026-01-01T00:00:02Z', runId: 'run-1'
+    };
+    let state = reduceBackendEvent(initialState, { event: 'ui.bootstrap', data: bootstrap });
+    state = reduceBackendEvent(state, { event: 'message.created', data: { type: 'message.created', conversationId: 'chat-1', messageId: created.id, runId: 'run-1', message: created } });
+    state = reduceBackendEvent(state, { event: 'message.delta', data: { type: 'message.delta', conversationId: 'chat-1', messageId: created.id, runId: 'run-1', delta: '正在生成' } });
+
+    expect(state.bootstrap?.activeConversation?.messages.at(-1)?.content).toBe('正在生成');
+
+    const redelivered = reduceBackendEvent(state, { event: 'message.created', data: { type: 'message.created', conversationId: 'chat-1', messageId: created.id, runId: 'run-1', message: { ...created, content: '正在生成' } } });
+    expect(redelivered.bootstrap?.activeConversation?.messages.at(-1)?.content).toBe('正在生成');
+  });
+
   it('marks a partial answer interrupted', () => {
     let state = reduceBackendEvent(initialState, { event: 'ui.bootstrap', data: bootstrap });
     state = reduceBackendEvent(state, { event: 'message.interrupted', data: { type: 'message.interrupted', conversationId: 'chat-1', messageId: 'assistant-1', runId: 'run-1' } });
     expect(state.bootstrap?.activeConversation?.messages[0].status).toBe('interrupted');
     expect(state.bootstrap?.activeConversation?.activeRunId).toBeUndefined();
+  });
+
+  it('ends the active run and keeps the failure visible when a run fails', () => {
+    let state = reduceBackendEvent(initialState, { event: 'ui.bootstrap', data: bootstrap });
+    state = reduceBackendEvent(state, { event: 'run.failed', data: { type: 'run.failed', conversationId: 'chat-1', runId: 'run-1', error: '模型在 10 分钟内没有完成生成，本轮任务已中断。' } });
+    expect(state.bootstrap?.activeConversation?.activeRunId).toBeUndefined();
+    expect(state.runError).toBe('模型在 10 分钟内没有完成生成，本轮任务已中断。');
+
+    const refreshed = reduceBackendEvent(state, { event: 'ui.bootstrap', data: { ...bootstrap, activeConversation: { ...bootstrap.activeConversation!, activeRunId: undefined } } });
+    expect(refreshed.runError).toBe(state.runError);
+  });
+
+  it('clears the failure when another conversation is opened', () => {
+    let state = reduceBackendEvent(initialState, { event: 'ui.bootstrap', data: bootstrap });
+    state = reduceBackendEvent(state, { event: 'run.failed', data: { type: 'run.failed', conversationId: 'chat-1', runId: 'run-1' } });
+    expect(state.runError).toBe('AI 服务暂时不可用。');
+
+    state = reduceBackendEvent(state, { event: 'ui.conversation', data: { ...bootstrap.activeConversation!, conversation: { ...bootstrap.activeConversation!.conversation, id: 'chat-2' } } });
+    expect(state.runError).toBeUndefined();
+
+    const ignored = reduceBackendEvent(state, { event: 'run.failed', data: { type: 'run.failed', conversationId: 'chat-1', runId: 'run-1' } });
+    expect(ignored.runError).toBeUndefined();
   });
 });
 

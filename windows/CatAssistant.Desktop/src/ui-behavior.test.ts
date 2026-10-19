@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clampTextareaHeight, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldSubmitComposer } from './ui-behavior';
+import { clampTextareaHeight, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldSubmitComposer, workPhaseLabel } from './ui-behavior';
 
 describe('composer keyboard behavior', () => {
   it('submits on plain Enter', () => {
@@ -35,5 +35,21 @@ describe('empty conversation greeting', () => {
     expect(greetingForHour(8)).toBe('早上好，想聊些什么？');
     expect(greetingForHour(14)).toBe('下午好，想聊些什么？');
     expect(greetingForHour(21)).toBe('晚上好，想聊些什么？');
+  });
+});
+
+describe('Work phase status', () => {
+  it('uses the latest public agent update from the active run', () => {
+    expect(workPhaseLabel([
+      { role: 'assistant', source: 'runtime', runId: 'old', content: '旧任务' },
+      { role: 'assistant', source: 'runtime', runId: 'run-1', content: '**计划**\n\n- 收集资料' },
+      { role: 'assistant', source: 'runtime', runId: 'run-1', content: '正在整理最终文件。' }
+    ], 'run-1')).toBe('正在整理最终文件。');
+  });
+
+  it('does not expose another run as the current phase', () => {
+    expect(workPhaseLabel([
+      { role: 'assistant', source: 'runtime', runId: 'old', content: '旧任务状态' }
+    ], 'run-1')).toBeUndefined();
   });
 });

@@ -8,6 +8,7 @@ export interface CatDevice {
 export interface PublicSettings {
   asrModel: string;
   chatModel: string;
+  workModel: string;
   screenTimeoutSeconds: number;
   autoReconnect: boolean;
   webSearchEnabled: boolean;

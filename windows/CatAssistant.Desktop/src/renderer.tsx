@@ -5,7 +5,7 @@ import ReactMarkdown, { type Components } from 'react-markdown';
 import type { BackendEvent, BootstrapState, CatDevice, Citation, ConversationDetail, ConversationMessage, ConversationSummary, PublicSettings, WorkApproval, WorkArtifact, WorkToolCall } from './shared';
 import { citationOrdinal, hidePartialCitationMarker, remarkCitations, stripCitationMarkers } from './citations';
 import { deviceDiscoveryMessage, initialState, reduceBackendEvent } from './state';
-import { clampTextareaHeight, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldSubmitComposer } from './ui-behavior';
+import { clampTextareaHeight, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldSubmitComposer, workPhaseLabel } from './ui-behavior';
 import { AnchorRect, AnchoredSurface, rectOf, ScrollArea } from './ui-primitives';
 import './ui-tokens.css';
 import './styles.css';
@@ -206,6 +206,7 @@ function App() {
       apiKey: patch.apiKey || undefined,
       asrModel: patch.asrModel ?? current.asrModel,
       chatModel: patch.chatModel ?? current.chatModel,
+      workModel: patch.workModel ?? current.workModel,
       screenTimeoutSeconds: patch.screenTimeoutSeconds ?? current.screenTimeoutSeconds,
       autoReconnect: patch.autoReconnect ?? current.autoReconnect,
       webSearchEnabled: patch.webSearchEnabled ?? current.webSearchEnabled
@@ -352,9 +353,12 @@ function WorkActivity({ active, approvals, tools, artifacts, busy, onResolve, on
   onResolve(approval: WorkApproval, approved: boolean): void; onReveal(path: string): void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const latest = tools.at(-1);
+  const currentTools = active.activeRunId ? tools.filter(tool => tool.runId === active.activeRunId) : [];
+  const latest = (currentTools.length ? currentTools : tools).at(-1);
+  const phase = workPhaseLabel(active.messages, active.activeRunId);
+  const toolInProgress = latest && (latest.state === 'pending' || latest.state === 'running');
   const status = approvals.length ? '等待你的批准' : active.activeRunId
-    ? latest ? `${toolStateLabel(latest.state)}：${latest.toolName}` : '正在分析任务'
+    ? toolInProgress ? `${toolStateLabel(latest.state)}：${latest.toolName}` : phase ? `当前阶段：${phase}` : '正在分析并规划任务'
     : latest?.state === 'cancelled' ? '任务已停止' : '任务记录';
   return <section className="work-activity" aria-label="Work 执行状态">
     <div className="work-status-row"><span className={`work-status-dot ${active.activeRunId ? 'active' : ''}`}/><strong>{status}</strong>{tools.length > 0 && <button className="text-button" onClick={() => setExpanded(value => !value)} aria-expanded={expanded}>{expanded ? '收起详情' : `查看详情 (${tools.length})`}</button>}</div>
@@ -392,7 +396,7 @@ function MessageList({ detail, runError }: { detail: ConversationDetail; runErro
   const pinned = useRef(true);
   const lastContent = detail.messages.at(-1)?.content;
   useEffect(() => { pinned.current = true; requestAnimationFrame(() => scroller.current?.scrollTo({ top: scroller.current.scrollHeight })); }, [detail.conversation.id]);
-  useEffect(() => { if (pinned.current) requestAnimationFrame(() => scroller.current?.scrollTo({ top: scroller.current.scrollHeight })); }, [detail.messages.length, lastContent]);
+  useEffect(() => { if (pinned.current) requestAnimationFrame(() => scroller.current?.scrollTo({ top: scroller.current.scrollHeight })); }, [detail.messages.length, lastContent, runError]);
   const onScroll = () => { const element = scroller.current; if (element) pinned.current = isNearScrollEnd(element.scrollHeight, element.scrollTop, element.clientHeight); };
   return <ScrollArea ref={scroller} className="message-scroll" viewportClassName={`messages ${detail.messages.length ? '' : 'empty-chat'}`} onScroll={onScroll}>
     {detail.messages.length === 0 ? <div className="empty-greeting"><BrandMark large/><h2>{greetingForHour(new Date().getHours())}</h2></div> : <div className="message-column">{detail.messages.map(message => <MessageItem key={message.id} message={message} citations={detail.citations.filter(item => item.messageId === message.id)}/>)}{runError && <div className="run-error" role="alert"><Icon name="info"/><span>{runError}</span></div>}</div>}
@@ -602,11 +606,12 @@ function SettingsPage({ settings, onboarding, busy, onBack, onSave }: { settings
   const sectionVersion = useRef(0);
   const [apiKey, setApiKey] = useState('');
   const [chatModel, setChatModel] = useState(settings.chatModel);
+  const [workModel, setWorkModel] = useState(settings.workModel);
   const [asrModel, setAsrModel] = useState(settings.asrModel);
   const [screenTimeout, setScreenTimeout] = useState(settings.screenTimeoutSeconds);
   const [webSearch, setWebSearch] = useState(settings.webSearchEnabled);
   const [autoReconnect, setAutoReconnect] = useState(settings.autoReconnect);
-  useEffect(() => { setChatModel(settings.chatModel); setAsrModel(settings.asrModel); setScreenTimeout(settings.screenTimeoutSeconds); setWebSearch(settings.webSearchEnabled); setAutoReconnect(settings.autoReconnect); }, [settings]);
+  useEffect(() => { setChatModel(settings.chatModel); setWorkModel(settings.workModel); setAsrModel(settings.asrModel); setScreenTimeout(settings.screenTimeoutSeconds); setWebSearch(settings.webSearchEnabled); setAutoReconnect(settings.autoReconnect); }, [settings]);
   const chooseSection = (section: SettingsSection) => {
     const current = ++sectionVersion.current;
     setRequestedSection(section);
@@ -617,7 +622,7 @@ function SettingsPage({ settings, onboarding, busy, onBack, onSave }: { settings
   const toggleWeb = async (value: boolean) => { const previous = webSearch; setWebSearch(value); if (!await onSave({ webSearchEnabled: value }, value ? '联网搜索已开启' : '联网搜索已关闭')) setWebSearch(previous); };
   const toggleReconnect = async (value: boolean) => { const previous = autoReconnect; setAutoReconnect(value); if (!await onSave({ autoReconnect: value }, value ? '自动重连已开启' : '自动重连已关闭')) setAutoReconnect(previous); };
   return <section className="settings-page" aria-labelledby="settings-title"><header className="settings-page-header"><button className="icon-button" onClick={onBack} aria-label="返回对话"><Icon name="back"/></button><div><h1 id="settings-title">设置</h1>{onboarding && <p>先配置 AI 服务，即可开始对话。</p>}</div></header><div className="settings-shell"><nav className="settings-nav" aria-label="设置分类"><span className={`settings-indicator section-${requestedSection}`} aria-hidden="true"/><button className={requestedSection === 'service' ? 'active' : ''} onClick={() => chooseSection('service')}><Icon name="key"/><span>AI 服务</span></button><button className={requestedSection === 'device' ? 'active' : ''} onClick={() => chooseSection('device')}><Icon name="device"/><span>AI 卡片</span></button><button className={requestedSection === 'privacy' ? 'active' : ''} onClick={() => chooseSection('privacy')}><Icon name="shield"/><span>数据与隐私</span></button></nav><ScrollArea className="settings-scroll" viewportClassName="settings-content"><div className={`settings-section-content phase-${sectionPhase}`}>
-    {displayedSection === 'service' && <section><SettingsHeading eyebrow="AI 服务" title="模型与联网" description="凭据只保存在这台电脑上。"/><div className="settings-group"><form className="setting-row editable-row" onSubmit={async event => { event.preventDefault(); if (await onSave({ apiKey: apiKey || undefined, chatModel }, 'AI 服务设置已保存')) setApiKey(''); }}><span><b>模型与 API Key</b><small>{settings.hasApiKey ? 'API Key 已安全配置' : '需要配置 API Key'}</small></span><div className="inline-fields"><input value={chatModel} onChange={event => setChatModel(event.target.value)} aria-label="Chat 模型"/><input type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} placeholder={settings.hasApiKey ? '留空不更改 Key' : '输入 API Key'} aria-label="API Key" autoComplete="off"/><button className="line-save" disabled={busy}>保存</button></div></form><Switch checked={webSearch} disabled={busy} onChange={value => void toggleWeb(value)} label="联网搜索" description="需要最新信息时允许模型搜索网络"/></div></section>}
+    {displayedSection === 'service' && <section><SettingsHeading eyebrow="AI 服务" title="模型与联网" description="凭据只保存在这台电脑上。"/><div className="settings-group"><form className="setting-row editable-row" onSubmit={async event => { event.preventDefault(); if (await onSave({ apiKey: apiKey || undefined, chatModel, workModel }, 'AI 服务设置已保存')) setApiKey(''); }}><span><b>模型与 API Key</b><small>{settings.hasApiKey ? 'Chat 与 Work 使用独立模型' : '需要配置 API Key'}</small></span><div className="inline-fields"><input value={chatModel} onChange={event => setChatModel(event.target.value)} aria-label="Chat 模型" placeholder="Chat 模型"/><input value={workModel} onChange={event => setWorkModel(event.target.value)} aria-label="Work 模型" placeholder="Work 模型"/><input type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} placeholder={settings.hasApiKey ? '留空不更改 Key' : '输入 API Key'} aria-label="API Key" autoComplete="off"/><button className="line-save" disabled={busy}>保存</button></div></form><Switch checked={webSearch} disabled={busy} onChange={value => void toggleWeb(value)} label="联网搜索" description="需要最新信息时允许模型搜索网络"/></div></section>}
     {displayedSection === 'device' && <section><SettingsHeading eyebrow="AI 卡片" title="语音与显示" description="卡片连接后会自动同步这些选项。"/><div className="settings-group"><form className="setting-row editable-row" onSubmit={event => { event.preventDefault(); void onSave({ asrModel, screenTimeoutSeconds: screenTimeout }, '卡片设置已保存'); }}><span><b>识别与休眠</b><small>休眠时间设为 0 时保持亮屏</small></span><div className="inline-fields compact"><input value={asrModel} onChange={event => setAsrModel(event.target.value)} aria-label="语音识别模型"/><input type="number" min="0" max="86400" value={screenTimeout} onChange={event => setScreenTimeout(Math.max(0, Math.min(86400, Number(event.target.value))))} aria-label="屏幕休眠秒数"/><button className="line-save" disabled={busy}>保存</button></div></form><Switch checked={autoReconnect} disabled={busy} onChange={value => void toggleReconnect(value)} label="自动重连" description="启动后连接已绑定的卡片"/></div></section>}
     {displayedSection === 'privacy' && <section><SettingsHeading eyebrow="数据与隐私" title="本地保存" description="小猫助手不会自动同步你的对话。"/><div className="settings-group privacy-rows"><InfoRow icon="shield" title="API Key" detail="使用 Windows DPAPI 加密，仅当前用户可读取。"/><InfoRow icon="chat" title="会话历史" detail="保存在本机 SQLite 数据库中。"/><InfoRow icon="device" title="AI 卡片" detail="只接收当前对话所需的文本和控制数据。"/></div></section>}
   </div></ScrollArea></div></section>;
