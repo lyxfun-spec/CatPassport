@@ -8,6 +8,9 @@ namespace CatAssistant.Backend.Services.Work;
 
 public sealed class WorkAgentService : IAsyncDisposable
 {
+    // The streamed row is only a crash checkpoint; the round commit, stop and failure paths all store the full text.
+    private static readonly TimeSpan StreamPersistInterval = TimeSpan.FromMilliseconds(250);
+
     private sealed class ActiveWorkRun(string id, string conversationId, CancellationTokenSource cancellation)
     {
         public string Id { get; } = id;
@@ -18,6 +21,7 @@ public sealed class WorkAgentService : IAsyncDisposable
         public bool Stopping { get; set; }
         public string? StreamMessageId { get; set; }
         public StringBuilder StreamContent { get; } = new();
+        public DateTimeOffset? LastContentPersistedAt { get; set; }
     }
 
     private readonly SqliteRepository _repository;
@@ -162,6 +166,7 @@ public sealed class WorkAgentService : IAsyncDisposable
                 throw new WorkContextLimitException(estimatedCharacters, _contextCharacterLimit);
             run.StreamMessageId = null;
             run.StreamContent.Clear();
+            run.LastContentPersistedAt = null;
             var response = await _provider.CompleteAsync(
                 context,
                 definitions,
@@ -319,16 +324,22 @@ public sealed class WorkAgentService : IAsyncDisposable
     private async Task AppendStreamedContentAsync(ActiveWorkRun run, string delta)
     {
         if (run.Stopping || string.IsNullOrEmpty(delta)) return;
-        if (run.StreamMessageId is null)
+        var messageId = run.StreamMessageId;
+        if (messageId is null)
         {
             var created = await _repository.AddMessageAsync(run.ConversationId, "assistant", "runtime", "streaming", "", run.Id);
-            run.StreamMessageId = created.Id;
+            messageId = created.Id;
+            run.StreamMessageId = messageId;
             run.StreamContent.Clear();
             Publish(new ConversationEvent("message.created", run.ConversationId, created.Id, run.Id, Message: created));
         }
         run.StreamContent.Append(delta);
-        await _repository.UpdateMessageAsync(run.StreamMessageId, run.StreamContent.ToString(), "streaming");
-        Publish(new ConversationEvent("message.delta", run.ConversationId, run.StreamMessageId, run.Id, delta));
+        if (run.LastContentPersistedAt is null || DateTimeOffset.UtcNow - run.LastContentPersistedAt >= StreamPersistInterval)
+        {
+            run.LastContentPersistedAt = DateTimeOffset.UtcNow;
+            await _repository.UpdateMessageAsync(messageId, run.StreamContent.ToString(), "streaming");
+        }
+        Publish(new ConversationEvent("message.delta", run.ConversationId, messageId, run.Id, delta));
     }
 
     private async Task<ConversationMessage> CommitRoundMessageAsync(ActiveWorkRun run, string content, bool addToContext)

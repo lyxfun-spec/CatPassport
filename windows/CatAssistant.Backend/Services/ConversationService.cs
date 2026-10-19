@@ -8,6 +8,9 @@ namespace CatAssistant.Backend.Services;
 
 public sealed class ConversationService : IAsyncDisposable
 {
+    // The streamed row is only a crash checkpoint; the completion, failure and interrupt paths all store the full text.
+    private static readonly TimeSpan StreamPersistInterval = TimeSpan.FromMilliseconds(250);
+
     private sealed class ActiveRun(string id, string conversationId, string assistantMessageId, CancellationTokenSource cancellation)
     {
         public string Id { get; } = id;
@@ -16,6 +19,7 @@ public sealed class ConversationService : IAsyncDisposable
         public CancellationTokenSource Cancellation { get; } = cancellation;
         public StringBuilder Content { get; } = new();
         public object ContentLock { get; } = new();
+        public DateTimeOffset? LastContentPersistedAt { get; set; }
     }
 
     private readonly SqliteRepository _repository;
@@ -302,13 +306,17 @@ public sealed class ConversationService : IAsyncDisposable
             if (!IsCurrent(run)) return;
             if (!string.IsNullOrEmpty(chunk.Delta))
             {
-                string content;
+                string? checkpoint = null;
                 lock (run.ContentLock)
                 {
                     run.Content.Append(chunk.Delta);
-                    content = run.Content.ToString();
+                    if (run.LastContentPersistedAt is null || DateTimeOffset.UtcNow - run.LastContentPersistedAt >= StreamPersistInterval)
+                    {
+                        run.LastContentPersistedAt = DateTimeOffset.UtcNow;
+                        checkpoint = run.Content.ToString();
+                    }
                 }
-                await _repository.UpdateMessageAsync(run.AssistantMessageId, content, "streaming");
+                if (checkpoint is not null) await _repository.UpdateMessageAsync(run.AssistantMessageId, checkpoint, "streaming");
                 Publish(new ConversationEvent("message.delta", run.ConversationId, run.AssistantMessageId, run.Id, chunk.Delta));
             }
             if (chunk.Citations is not null)

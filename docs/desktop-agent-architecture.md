@@ -233,7 +233,7 @@ Chat Runtime is the first-party cloud conversation coordinator:
 2. Build the system prompt and context.
 3. Enforce a context budget and expose an interface for future summarization.
 4. Call AliyunChatProvider.
-5. Persist stream deltas into the active assistant message and publish events.
+5. Publish every stream delta; checkpoint the active assistant message no more often than every 250 ms and write the full text on completion, failure and interruption.
 6. Parse search state, citations, usage, and normalized errors.
 7. Honor Run cancellation and expose no local-environment operations.
 
