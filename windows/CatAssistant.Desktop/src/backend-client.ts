@@ -11,20 +11,27 @@ type BackendMessage = ResponseMessage | EventMessage;
 export class BackendClient extends EventEmitter {
   private child?: ChildProcessWithoutNullStreams;
   private nextId = 1;
+  private failureSummary?: string;
   private readonly pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void }>();
 
   start(): void {
     if (this.child) return;
+    this.failureSummary = undefined;
     const command = app.isPackaged ? path.join(process.resourcesPath, 'backend', 'CatAssistant.Backend.exe') : 'dotnet';
     const args = app.isPackaged ? [] : ['run', '--project', path.resolve(__dirname, '..', '..', '..', 'CatAssistant.Backend', 'CatAssistant.Backend.csproj'), '--no-launch-profile'];
     this.child = spawn(command, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     readline.createInterface({ input: this.child.stdout }).on('line', line => this.acceptLine(line));
-    readline.createInterface({ input: this.child.stderr }).on('line', line => console.error(`[backend] ${line}`));
+    readline.createInterface({ input: this.child.stderr }).on('line', line => {
+      console.error(`[backend] ${line}`);
+      if (line.startsWith('Backend fatal error:') || (!this.failureSummary && line.startsWith('Unhandled exception.')))
+        this.failureSummary = line.replace(/^Backend fatal error:\s*/, '').trim();
+    });
     this.child.on('exit', code => {
       this.child = undefined;
-      for (const pending of this.pending.values()) pending.reject(new Error('后台服务已退出。'));
+      const message = this.failureSummary ? `后台服务已退出：${this.failureSummary}` : '后台服务已退出。';
+      for (const pending of this.pending.values()) pending.reject(new Error(message));
       this.pending.clear();
-      this.emit('event', { event: 'backend.exited', data: { code } });
+      this.emit('event', { event: 'backend.exited', data: { code, message } });
     });
     this.child.on('error', error => this.emit('error', error));
   }

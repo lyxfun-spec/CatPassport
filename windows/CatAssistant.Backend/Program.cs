@@ -11,18 +11,20 @@ internal static class Program
     {
         Console.InputEncoding = System.Text.Encoding.UTF8;
         Console.OutputEncoding = System.Text.Encoding.UTF8;
-        var repository = new SqliteRepository();
-        await repository.InitializeAsync();
-        var coordinator = new AssistantCoordinator(new BleGateway(), new DashScopeClient(), repository, new SecureApiKeyStore(), await repository.LoadSettingsAsync());
+        AssistantCoordinator? coordinator = null;
         RpcServer? server = null;
-        server = new RpcServer(Console.In, Console.Out, request => HandleAsync(coordinator, request));
-        coordinator.StateChanged += (_, state) => _ = server.PublishAsync("device.changed", state);
-        coordinator.Conversations.Changed += (_, update) => _ = server.PublishAsync(update.Type, update);
         try
         {
+            var repository = new SqliteRepository();
+            await repository.InitializeAsync();
+            coordinator = new AssistantCoordinator(new BleGateway(), new DashScopeClient(), repository, new SecureApiKeyStore(), await repository.LoadSettingsAsync());
+            var rpcServer = new RpcServer(Console.In, Console.Out, request => HandleAsync(coordinator, request));
+            server = rpcServer;
+            coordinator.StateChanged += (_, state) => _ = rpcServer.PublishAsync("device.changed", state);
+            coordinator.Conversations.Changed += (_, update) => _ = rpcServer.PublishAsync(update.Type, update);
             await coordinator.StartAsync();
-            await server.PublishAsync("backend.ready", new { version = RpcServer.ProtocolVersion, state = await BootstrapAsync(coordinator) });
-            await server.RunAsync();
+            await rpcServer.PublishAsync("backend.ready", new { version = RpcServer.ProtocolVersion, state = await BootstrapAsync(coordinator) });
+            await rpcServer.RunAsync();
             return 0;
         }
         catch (Exception error)
@@ -32,8 +34,8 @@ internal static class Program
         }
         finally
         {
-            await coordinator.DisposeAsync();
-            await server.DisposeAsync();
+            if (coordinator is not null) await coordinator.DisposeAsync();
+            if (server is not null) await server.DisposeAsync();
         }
     }
 

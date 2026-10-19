@@ -30,7 +30,7 @@ export function reduceBackendEvent(state: UiState, action: UiAction): UiState {
     return { bootstrap, backendError: undefined };
   }
   if (action.event === 'backend.exited') {
-    return { ...state, backendError: `后台服务已退出${action.data.code === null ? '' : `（代码 ${action.data.code}）`}` };
+    return { ...state, backendError: action.data.message ?? `后台服务已退出${action.data.code === null ? '' : `（代码 ${action.data.code}）`}` };
   }
   if (action.event === 'device.changed' || action.event === 'ui.device') {
     if (!state.bootstrap) return state;

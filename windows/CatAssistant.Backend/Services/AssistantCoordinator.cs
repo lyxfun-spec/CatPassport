@@ -101,8 +101,9 @@ public sealed class AssistantCoordinator : IAsyncDisposable
         PublishState();
         _ = ReconnectLoopAsync(_lifetime.Token);
         if (Settings.AutoReconnect && Settings.LastBluetoothAddress is ulong address)
-            await ConnectAsync(address, Settings.LastDeviceName ?? "FoloToy Cat");
-        else await ScanAsync();
+            _ = ConnectAsync(address, Settings.LastDeviceName ?? "FoloToy Cat");
+        else
+            _ = ScanAsync();
     }
 
     public DeviceState Snapshot()

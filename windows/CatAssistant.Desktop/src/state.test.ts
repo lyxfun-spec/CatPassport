@@ -31,6 +31,16 @@ describe('conversation stream state', () => {
   });
 });
 
+describe('backend startup failure', () => {
+  it('shows the backend diagnostic instead of a generic not-started error', () => {
+    const state = reduceBackendEvent(initialState, {
+      event: 'backend.exited',
+      data: { code: 1, message: '后台服务已退出：数据库迁移失败' }
+    });
+    expect(state.backendError).toBe('后台服务已退出：数据库迁移失败');
+  });
+});
+
 describe('device discovery message', () => {
   it('explains that Windows Bluetooth must be enabled', () => {
     const device = {
