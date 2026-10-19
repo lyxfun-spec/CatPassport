@@ -38,6 +38,35 @@ describe('conversation stream state', () => {
     expect(redelivered.bootstrap?.activeConversation?.messages.at(-1)?.content).toBe('正在生成');
   });
 
+  it('keeps assembled stream text when a refresh snapshot is older', () => {
+    let state = reduceBackendEvent(initialState, { event: 'ui.bootstrap', data: bootstrap });
+    state = reduceBackendEvent(state, { event: 'message.delta', data: { type: 'message.delta', conversationId: 'chat-1', messageId: 'assistant-1', runId: 'run-1', delta: '环境已确认' } });
+
+    const stale: BootstrapState = { ...bootstrap, activeConversation: { ...bootstrap.activeConversation!, messages: [{ ...bootstrap.activeConversation!.messages[0], content: '环境' }] } };
+    state = reduceBackendEvent(state, { event: 'ui.bootstrap', data: stale });
+    expect(state.bootstrap?.activeConversation?.messages[0].content).toBe('环境已确认');
+
+    state = reduceBackendEvent(state, { event: 'message.delta', data: { type: 'message.delta', conversationId: 'chat-1', messageId: 'assistant-1', runId: 'run-1', delta: '：python-pptx 可用。' } });
+    expect(state.bootstrap?.activeConversation?.messages[0].content).toBe('环境已确认：python-pptx 可用。');
+  });
+
+  it('adopts the snapshot once the server holds the finished answer', () => {
+    let state = reduceBackendEvent(initialState, { event: 'ui.bootstrap', data: bootstrap });
+    state = reduceBackendEvent(state, { event: 'message.delta', data: { type: 'message.delta', conversationId: 'chat-1', messageId: 'assistant-1', runId: 'run-1', delta: '你好' } });
+
+    const finished: BootstrapState = {
+      ...bootstrap,
+      activeConversation: {
+        ...bootstrap.activeConversation!,
+        activeRunId: undefined,
+        messages: [{ ...bootstrap.activeConversation!.messages[0], status: 'complete', content: '你好，世界' }]
+      }
+    };
+    state = reduceBackendEvent(state, { event: 'ui.bootstrap', data: finished });
+    expect(state.bootstrap?.activeConversation?.messages[0].content).toBe('你好，世界');
+    expect(state.bootstrap?.activeConversation?.messages[0].status).toBe('complete');
+  });
+
   it('marks a partial answer interrupted', () => {
     let state = reduceBackendEvent(initialState, { event: 'ui.bootstrap', data: bootstrap });
     state = reduceBackendEvent(state, { event: 'message.interrupted', data: { type: 'message.interrupted', conversationId: 'chat-1', messageId: 'assistant-1', runId: 'run-1' } });

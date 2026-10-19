@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import ReactMarkdown, { type Components } from 'react-markdown';
@@ -232,7 +232,7 @@ function App() {
           ? <SettingsPage settings={bootstrap.settings} onboarding={!bootstrap.settings.hasApiKey} busy={isBusy('settings')} onBack={() => setRequestedView('conversation')} onSave={saveSettings}/>
           : displayedView === 'compose' || !active
             ? <DraftConversation mode={draftMode} onMode={setDraftMode} value={draft} onChange={setDraft} onSend={() => void send()} onAttach={() => void attachFiles()} hasApiKey={bootstrap.settings.hasApiKey} sending={isBusy('send')} focusSignal={composerFocusSignal} onOpenSettings={() => setRequestedView('settings')}/>
-            : <><ConversationHeader conversation={active.conversation} onAction={(kind, anchor) => setActionSurface({ kind, anchor, conversation: active.conversation })}/>{active.conversation.mode === 'work' ? <div className="work-content"><WorkActivity active={active} approvals={bootstrap.pendingApprovals ?? []} tools={bootstrap.workToolCalls ?? []} artifacts={bootstrap.workArtifacts ?? []} busy={busy} onResolve={(approval, approved) => void resolveApproval(approval, approved)} onReveal={artifactId => void window.catAssistant.revealArtifact(active.conversation.id, artifactId)}/><MessageList detail={active} runError={state.runError}/></div> : <MessageList detail={active} runError={state.runError}/>}<Composer value={draft} onChange={setDraft} onSend={() => void send()} onAttach={active.conversation.mode === 'work' ? () => void attachFiles() : undefined} onStop={active.conversation.mode === 'work' && active.activeRunId ? () => void stopWork() : undefined} hasApiKey={bootstrap.settings.hasApiKey} sending={isBusy('send')} focusSignal={composerFocusSignal} onOpenSettings={() => setRequestedView('settings')}/></>
+            : <><ConversationHeader conversation={active.conversation} onAction={(kind, anchor) => setActionSurface({ kind, anchor, conversation: active.conversation })}/>{active.conversation.mode === 'work' ? <div className="work-content"><WorkActivity active={active} approvals={bootstrap.pendingApprovals ?? []} tools={bootstrap.workToolCalls ?? noWorkToolCalls} artifacts={bootstrap.workArtifacts ?? []} busy={busy} onResolve={(approval, approved) => void resolveApproval(approval, approved)} onReveal={artifactId => void window.catAssistant.revealArtifact(active.conversation.id, artifactId)}/><MessageList detail={active} runError={state.runError}/></div> : <MessageList detail={active} runError={state.runError}/>}<Composer value={draft} onChange={setDraft} onSend={() => void send()} onAttach={active.conversation.mode === 'work' ? () => void attachFiles() : undefined} onStop={active.conversation.mode === 'work' && active.activeRunId ? () => void stopWork() : undefined} hasApiKey={bootstrap.settings.hasApiKey} sending={isBusy('send')} focusSignal={composerFocusSignal} onOpenSettings={() => setRequestedView('settings')}/></>
         }
       </main>
     </div>
@@ -360,6 +360,7 @@ function WorkActivity({ active, approvals, tools, artifacts, busy, onResolve, on
   const status = approvals.length ? '等待你的批准' : active.activeRunId
     ? toolInProgress ? `${toolStateLabel(latest.state)}：${latest.toolName}` : phase ? `当前阶段：${phase}` : '正在分析并规划任务'
     : latest?.state === 'cancelled' ? '任务已停止' : '任务记录';
+  const toolHistory = useMemo(() => <div className="tool-history">{tools.map(tool => <details key={tool.id}><summary><span>{tool.toolName}</span><em className={`tool-state state-${tool.state}`}>{toolStateLabel(tool.state)}</em>{tool.durationMilliseconds !== undefined && <small>{tool.durationMilliseconds} ms</small>}</summary><div><b>参数</b><pre>{maskSensitiveJson(tool.argumentsJson)}</pre>{tool.resultJson && <><b>结果</b><pre>{maskSensitiveJson(tool.resultJson)}</pre></>}{tool.errorMessage && <p className="tool-error">{tool.errorMessage}</p>}</div></details>)}</div>, [tools]);
   return <section className="work-activity" aria-label="Work 执行状态">
     <div className="work-status-row"><span className={`work-status-dot ${active.activeRunId ? 'active' : ''}`}/><strong>{status}</strong>{tools.length > 0 && <button className="text-button" onClick={() => setExpanded(value => !value)} aria-expanded={expanded}>{expanded ? '收起详情' : `查看详情 (${tools.length})`}</button>}</div>
     {approvals.map(approval => <div className="approval-card" key={approval.id}>
@@ -368,7 +369,7 @@ function WorkActivity({ active, approvals, tools, artifacts, busy, onResolve, on
       <p>{approval.scope === 'task_directory' ? '批准后，本任务期间可在该目录内复用相同权限。' : '仅批准这一次明确操作。'}</p>
       <div className="approval-actions"><button className="text-button" disabled={busy.has(`approval-${approval.id}`)} onClick={() => onResolve(approval, false)}>拒绝</button><button className="primary-button" disabled={busy.has(`approval-${approval.id}`)} onClick={() => onResolve(approval, true)}>批准</button></div>
     </div>)}
-    {expanded && <div className="tool-history">{tools.map(tool => <details key={tool.id}><summary><span>{tool.toolName}</span><em className={`tool-state state-${tool.state}`}>{toolStateLabel(tool.state)}</em>{tool.durationMilliseconds !== undefined && <small>{tool.durationMilliseconds} ms</small>}</summary><div><b>参数</b><pre>{maskSensitiveJson(tool.argumentsJson)}</pre>{tool.resultJson && <><b>结果</b><pre>{maskSensitiveJson(tool.resultJson)}</pre></>}{tool.errorMessage && <p className="tool-error">{tool.errorMessage}</p>}</div></details>)}</div>}
+    {expanded && toolHistory}
     {artifacts.length > 0 && <div className="artifact-list">{artifacts.map(artifact => <button key={artifact.id} onClick={() => onReveal(artifact.id)} title={artifact.label}><Icon name="file"/><span><b>{artifact.label}</b><small>在文件资源管理器中显示</small></span><Icon name="external" size={14}/></button>)}</div>}
   </section>;
 }
@@ -391,19 +392,33 @@ function maskSensitiveJson(value: string): string {
   } catch { return value.length > 2000 ? `${value.slice(0, 2000)}…` : value; }
 }
 
+const noCitations: Citation[] = [];
+const noWorkToolCalls: WorkToolCall[] = [];
+
 function MessageList({ detail, runError }: { detail: ConversationDetail; runError?: string }) {
   const scroller = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
   const lastContent = detail.messages.at(-1)?.content;
+  const citationsByMessage = useMemo(() => {
+    const grouped = new Map<string, Citation[]>();
+    for (const citation of detail.citations) grouped.set(citation.messageId, [...(grouped.get(citation.messageId) ?? []), citation]);
+    return grouped;
+  }, [detail.citations]);
+  const tail = detail.messages.at(-1);
+  const awaitingFirstToken = Boolean(detail.activeRunId) && tail?.role === 'user';
   useEffect(() => { pinned.current = true; requestAnimationFrame(() => scroller.current?.scrollTo({ top: scroller.current.scrollHeight })); }, [detail.conversation.id]);
   useEffect(() => { if (pinned.current) requestAnimationFrame(() => scroller.current?.scrollTo({ top: scroller.current.scrollHeight })); }, [detail.messages.length, lastContent, runError]);
   const onScroll = () => { const element = scroller.current; if (element) pinned.current = isNearScrollEnd(element.scrollHeight, element.scrollTop, element.clientHeight); };
   return <ScrollArea ref={scroller} className="message-scroll" viewportClassName={`messages ${detail.messages.length ? '' : 'empty-chat'}`} onScroll={onScroll}>
-    {detail.messages.length === 0 ? <div className="empty-greeting"><BrandMark large/><h2>{greetingForHour(new Date().getHours())}</h2></div> : <div className="message-column">{detail.messages.map(message => <MessageItem key={message.id} message={message} citations={detail.citations.filter(item => item.messageId === message.id)}/>)}{runError && <div className="run-error" role="alert"><Icon name="info"/><span>{runError}</span></div>}</div>}
+    {detail.messages.length === 0 ? <div className="empty-greeting"><BrandMark large/><h2>{greetingForHour(new Date().getHours())}</h2></div> : <div className="message-column">{detail.messages.map(message => <MessageItem key={message.id} message={message} citations={citationsByMessage.get(message.id) ?? noCitations}/>)}{awaitingFirstToken && <ThinkingBubble/>}{runError && <div className="run-error" role="alert"><Icon name="info"/><span>{runError}</span></div>}</div>}
   </ScrollArea>;
 }
 
-function MessageItem({ message, citations }: { message: ConversationMessage; citations: ConversationDetail['citations'] }) {
+function ThinkingBubble() {
+  return <article className="message assistant"><div className="thinking" role="status"><i/><i/><i/><span className="sr-only">正在生成回复</span></div></article>;
+}
+
+const MessageItem = memo(function MessageItem({ message, citations }: { message: ConversationMessage; citations: ConversationDetail['citations'] }) {
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(copyTimer.current), []);
@@ -416,10 +431,10 @@ function MessageItem({ message, citations }: { message: ConversationMessage; cit
     setSourcesOpen(true);
   }, []);
   const copy = async () => { clearTimeout(copyTimer.current); try { await navigator.clipboard.writeText(stripCitationMarkers(message.content)); setCopyState('copied'); } catch { setCopyState('failed'); } copyTimer.current = setTimeout(() => setCopyState('idle'), 1650); };
-  if (message.role === 'assistant' && message.status === 'streaming' && !message.content) return <article className="message assistant"><div className="thinking" role="status"><i/><i/><i/><span className="sr-only">正在生成回复</span></div></article>;
+  if (message.role === 'assistant' && message.status === 'streaming' && !message.content) return <ThinkingBubble/>;
   const safeCitations = citations.filter(citation => safeHttpUrl(citation.url));
   return <article className={`message ${message.role} ${message.status}`}><div className="message-body">{message.role === 'assistant' ? <AssistantMarkdown content={message.content} streaming={message.status === 'streaming'} citations={safeCitations} onCite={revealSource}/> : <p>{message.content}</p>}</div>{safeCitations.length > 0 && <SourceList messageId={message.id} citations={safeCitations} open={sourcesOpen} onToggle={() => setSourcesOpen(value => !value)} target={sourceTarget}/>}{message.role === 'assistant' && message.content && <div className="message-actions">{message.status === 'interrupted' && <span>已中断</span>}{message.status === 'failed' && <span className="failed-label">生成失败</span>}<button onClick={() => void copy()} aria-label="复制回复"><Icon name={copyState === 'copied' ? 'check' : 'copy'} size={15}/>{copyState === 'copied' ? '已复制' : copyState === 'failed' ? '复制失败' : '复制'}</button></div>}</article>;
-}
+});
 
 const markdownPlugins = [remarkCitations];
 function AssistantMarkdown({ content, streaming, citations, onCite }: { content: string; streaming: boolean; citations: Citation[]; onCite(ordinal: number): void }) {

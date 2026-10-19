@@ -26,7 +26,8 @@ export function deviceDiscoveryMessage(device: DeviceState): string {
 
 export function reduceBackendEvent(state: UiState, action: UiAction): UiState {
   if (action.event === 'backend.ready' || action.event === 'ui.bootstrap') {
-    const bootstrap = action.event === 'backend.ready' ? action.data.state : action.data;
+    const incoming = action.event === 'backend.ready' ? action.data.state : action.data;
+    const bootstrap: BootstrapState = { ...incoming, activeConversation: keepAheadOfSnapshot(state.bootstrap?.activeConversation, incoming.activeConversation) };
     return { bootstrap, backendError: undefined, runError: state.runError };
   }
   if (action.event === 'backend.exited') {
@@ -51,6 +52,22 @@ export function reduceBackendEvent(state: UiState, action: UiAction): UiState {
   if (action.event === 'ui.clearError') return { ...state, backendError: undefined, runError: undefined };
   if (!state.bootstrap || !isConversationEvent(action.data)) return state;
   return reduceConversationEvent(state, action.data);
+}
+
+// A bootstrap snapshot is read while deltas keep arriving, so it can lag the assembled text.
+// Backend persists content before publishing, therefore local content is always an extension of the snapshot.
+function keepAheadOfSnapshot(local: ConversationDetail | undefined, incoming: ConversationDetail | undefined): ConversationDetail | undefined {
+  if (!local || !incoming || local.conversation.id !== incoming.conversation.id) return incoming;
+  const streaming = new Map(local.messages.filter(message => message.status === 'streaming').map(message => [message.id, message]));
+  if (streaming.size === 0) return incoming;
+  let replaced = false;
+  const messages = incoming.messages.map(message => {
+    const ahead = message.status === 'streaming' ? streaming.get(message.id) : undefined;
+    if (!ahead || ahead.content.length <= message.content.length || !ahead.content.startsWith(message.content)) return message;
+    replaced = true;
+    return { ...message, content: ahead.content };
+  });
+  return replaced ? { ...incoming, messages } : incoming;
 }
 
 function reduceConversationEvent(state: UiState, event: ConversationEvent): UiState {
