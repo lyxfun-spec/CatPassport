@@ -9,7 +9,8 @@ const api: BackendApi = {
     return () => ipcRenderer.removeListener('backend:event', handler);
   },
   selectWorkFiles: () => ipcRenderer.invoke('work:select-files'),
-  revealArtifact: (conversationId, artifactId) => ipcRenderer.invoke('work:reveal-artifact', conversationId, artifactId)
+  revealArtifact: (conversationId, artifactId) => ipcRenderer.invoke('work:reveal-artifact', conversationId, artifactId),
+  paste: () => ipcRenderer.invoke('edit:paste')
 };
 
 contextBridge.exposeInMainWorld('catAssistant', api);

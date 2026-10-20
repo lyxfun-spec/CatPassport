@@ -84,6 +84,7 @@ app.whenReady().then(() => {
     if (!allowedMethods.has(method)) throw new Error(`不允许的后台方法：${method}`);
     return backend.invoke(method, params);
   });
+  ipcMain.handle('edit:paste', () => { mainWindow?.webContents.paste(); });
   ipcMain.handle('work:select-files', async () => {
     const result = await dialog.showOpenDialog(mainWindow!, { properties: ['openFile', 'multiSelections'] });
     return result.canceled ? [] : result.filePaths;

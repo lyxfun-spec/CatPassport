@@ -7,12 +7,13 @@ import type { BackendEvent, BootstrapState, CatDevice, Citation, ConversationDet
 import { citationOrdinal, hidePartialCitationMarker, remarkCitations, stripCitationMarkers } from './citations';
 import { deviceDiscoveryMessage, initialState, reduceBackendEvent } from './state';
 import { clampTextareaHeight, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldSubmitComposer, workPhaseLabel } from './ui-behavior';
+import { textMenuEntries, type TextMenuAction, type TextMenuScene } from './text-context-menu';
 import { AnchorRect, AnchoredSurface, rectOf, ScrollArea } from './ui-primitives';
 import './ui-tokens.css';
 import './styles.css';
 
 type IconName = 'new' | 'search' | 'chat' | 'work' | 'device' | 'settings' | 'menu' | 'send'
-  | 'copy' | 'close' | 'sidebar' | 'check' | 'back' | 'rename' | 'delete' | 'refresh'
+  | 'copy' | 'cut' | 'paste' | 'selectAll' | 'close' | 'sidebar' | 'check' | 'back' | 'rename' | 'delete' | 'refresh'
   | 'key' | 'shield' | 'info' | 'chevron' | 'pin' | 'cat' | 'external' | 'attach' | 'stop' | 'file';
 
 const iconPaths: Record<IconName, React.ReactNode> = {
@@ -25,6 +26,9 @@ const iconPaths: Record<IconName, React.ReactNode> = {
   menu: <><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></>,
   send: <><path d="m4 12 16-8-6.5 16-2-6Z"/><path d="m11.5 14 3-3"/></>,
   copy: <><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></>,
+  cut: <><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M8.12 8.12 12 12M20 4 8.12 15.88M14.8 14.8 20 20"/></>,
+  paste: <><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></>,
+  selectAll: <><path d="M5 3a2 2 0 0 0-2 2M19 3a2 2 0 0 1 2 2M21 19a2 2 0 0 1-2 2M5 21a2 2 0 0 1-2-2"/><path d="M9 3h1M9 21h1M14 3h1M14 21h1M3 9v1M21 9v1M3 14v1M21 14v1"/></>,
   close: <path d="m6 6 12 12M18 6 6 18"/>,
   sidebar: <><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></>,
   check: <path d="m5 12 4 4L19 6"/>,
@@ -52,6 +56,11 @@ interface NoticeState { id: number; text: string; tone?: 'default' | 'danger' }
 type AppView = 'conversation' | 'compose' | 'settings';
 type ActionSurface = { kind: 'rename' | 'delete'; anchor: AnchorRect; conversation: ConversationSummary } | undefined;
 type ConversationContext = { conversation: ConversationSummary; left: number; top: number } | undefined;
+type TextMenuField = HTMLInputElement | HTMLTextAreaElement;
+type TextMenuState = {
+  x: number; y: number; scene: TextMenuScene; scope: HTMLElement; field?: TextMenuField;
+  selectedText: string; hasSelection: boolean; selectionStart: number | null; selectionEnd: number | null;
+} | undefined;
 
 function useViewTransition(target: AppView) {
   const [displayed, setDisplayed] = useState(target);
@@ -80,6 +89,7 @@ function App() {
   const [draftMode, setDraftMode] = useState<'chat' | 'work'>('chat');
   const [actionSurface, setActionSurface] = useState<ActionSurface>();
   const [conversationContext, setConversationContext] = useState<ConversationContext>();
+  const [textMenu, setTextMenu] = useState<TextMenuState>();
   const [deviceOpen, setDeviceOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [draft, setDraft] = useState('');
@@ -123,6 +133,57 @@ function App() {
     const timer = setTimeout(() => setNotice(current => current?.id === notice.id ? undefined : current), 2600);
     return () => clearTimeout(timer);
   }, [notice]);
+  useEffect(() => {
+    const openTextMenu = (event: MouseEvent) => {
+      if (event.defaultPrevented) return;
+      const target = event.target instanceof Element ? event.target : undefined;
+      if (!target || target.closest('[role="menu"], .text-context-menu')) return;
+      const field = target.closest<TextMenuField>('textarea, input:not([type]), input[type="text"], input[type="password"], input[type="search"], input[type="email"], input[type="url"], input[type="tel"]');
+      const scope = target.closest<HTMLElement>('.message-body');
+      if (field) {
+        const start = field.selectionStart, end = field.selectionEnd;
+        const selectedText = start === null || end === null ? '' : field.value.slice(start, end);
+        event.preventDefault();
+        setTextMenu({ x: event.clientX, y: event.clientY, scene: 'editable', field, scope: field, selectedText, hasSelection: selectedText.length > 0, selectionStart: start, selectionEnd: end });
+      } else if (scope) {
+        const selection = window.getSelection();
+        const selectedText = selection?.rangeCount && selection.anchorNode && scope.contains(selection.anchorNode) ? selection.toString() : '';
+        event.preventDefault();
+        setTextMenu({ x: event.clientX, y: event.clientY, scene: selectedText ? 'selection' : 'message', scope, selectedText, hasSelection: Boolean(selectedText), selectionStart: null, selectionEnd: null });
+      }
+    };
+    document.addEventListener('contextmenu', openTextMenu);
+    return () => document.removeEventListener('contextmenu', openTextMenu);
+  }, []);
+  const applyTextAction = async (action: TextMenuAction) => {
+    const menu = textMenu;
+    if (!menu) return;
+    setTextMenu(undefined);
+    if (!menu.field) {
+      if (action === 'copy') { try { await navigator.clipboard.writeText(menu.selectedText); } catch { /* clipboard unavailable */ } return; }
+      const range = document.createRange();
+      range.selectNodeContents(menu.scope);
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      return;
+    }
+    const field = menu.field;
+    field.focus({ preventScroll: true });
+    if (menu.selectionStart !== null && menu.selectionEnd !== null) field.setSelectionRange(menu.selectionStart, menu.selectionEnd);
+    if (action === 'selectAll') { field.select(); return; }
+    if (action === 'paste') {
+      try { await window.catAssistant.paste(); }
+      catch {
+        try {
+          const text = await navigator.clipboard.readText();
+          document.execCommand('insertText', false, text);
+        } catch { /* clipboard unavailable */ }
+      }
+      return;
+    }
+    document.execCommand(action);
+  };
 
   if (!state.bootstrap) return <Loading error={localError ?? state.backendError}/>;
   const bootstrap = state.bootstrap;
@@ -246,6 +307,7 @@ function App() {
       </main>
     </div>
     <ConversationContextMenu value={conversationContext} onClose={() => setConversationContext(undefined)} onPin={conversation => void setPinned(conversation)} onAction={(kind, anchor, conversation) => { setConversationContext(undefined); setActionSurface({ kind, anchor, conversation }); }}/>
+    <TextContextMenu value={textMenu} onClose={() => setTextMenu(undefined)} onAction={action => void applyTextAction(action)}/>
     <RenameDialog open={actionSurface?.kind === 'rename'} anchor={actionSurface?.anchor} conversation={actionSurface?.conversation} busy={isBusy('rename')} onClose={() => setActionSurface(undefined)} onRename={title => void rename(title)}/>
     <DeleteDialog open={actionSurface?.kind === 'delete'} anchor={actionSurface?.anchor} conversation={actionSurface?.conversation} busy={isBusy('delete')} onClose={() => setActionSurface(undefined)} onConfirm={() => void remove()}/>
     <DevicePanel open={deviceOpen} bootstrap={bootstrap} busy={isBusy('device')} run={run} onClose={() => setDeviceOpen(false)} onOpenConversation={id => { setDeviceOpen(false); void selectConversation(id); }} onRefresh={() => void refresh()} onNotice={showNotice}/>
@@ -278,6 +340,48 @@ function Sidebar({ bootstrap, query, onQuery, collapsed, onToggle, onNew, onSele
       <button className={`footer-entry ${settingsActive ? 'active' : ''}`} onClick={onSettings}><Icon name="settings"/><span className="footer-copy"><b>设置</b><small>{bootstrap.settings.hasApiKey ? '服务已配置' : '需要配置 API Key'}</small></span></button>
     </div>
   </aside>;
+}
+
+const textMenuIcons: Record<TextMenuAction, IconName> = { cut: 'cut', copy: 'copy', paste: 'paste', selectAll: 'selectAll' };
+
+function TextContextMenu({ value, onClose, onAction }: {
+  value: TextMenuState; onClose(): void; onAction(action: TextMenuAction): void;
+}) {
+  const menu = useRef<HTMLDivElement>(null);
+  const entries = useMemo(() => value ? textMenuEntries(value.scene, value.hasSelection) : [], [value?.scene, value?.hasSelection]);
+  const [active, setActive] = useState(-1);
+  useLayoutEffect(() => {
+    setActive(-1);
+    if (!value || !menu.current) return;
+    const box = menu.current.getBoundingClientRect();
+    menu.current.style.left = `${Math.max(8, Math.min(value.x, window.innerWidth - box.width - 8))}px`;
+    menu.current.style.top = `${Math.max(8, Math.min(value.y, window.innerHeight - box.height - 8))}px`;
+  }, [value]);
+  useEffect(() => {
+    if (!value) return;
+    const closeOnPointer = (event: PointerEvent) => { if (!menu.current?.contains(event.target as Node)) onClose(); };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(); return; }
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault(); event.stopPropagation();
+        const entry = entries[active];
+        if (entry) onAction(entry.id);
+        return;
+      }
+      if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key) || !entries.length) return;
+      event.preventDefault(); event.stopPropagation();
+      const step = event.key === 'ArrowUp' ? -1 : 1;
+      setActive(previous => event.key === 'Home' ? 0 : event.key === 'End' ? entries.length - 1
+        : previous < 0 ? (event.key === 'ArrowUp' ? entries.length - 1 : 0)
+        : (previous + step + entries.length) % entries.length);
+    };
+    window.addEventListener('resize', onClose); document.addEventListener('pointerdown', closeOnPointer); document.addEventListener('keydown', onKey, true);
+    return () => { window.removeEventListener('resize', onClose); document.removeEventListener('pointerdown', closeOnPointer); document.removeEventListener('keydown', onKey, true); };
+  }, [value, onClose, onAction, entries, active]);
+  if (!value) return null;
+  return <div ref={menu} className="text-context-menu" role="menu" aria-label="文字操作" style={{ left: value.x, top: value.y }}>
+    {entries.map((entry, index) => <button key={entry.id} role="menuitem" tabIndex={-1} className={index === active ? 'is-active' : ''} onMouseDown={event => event.preventDefault()} onClick={() => onAction(entry.id)}><Icon name={textMenuIcons[entry.id]} size={15}/>{entry.label}</button>)}
+  </div>;
 }
 
 function ConversationContextMenu({ value, onClose, onPin, onAction }: {

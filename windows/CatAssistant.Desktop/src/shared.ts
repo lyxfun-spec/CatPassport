@@ -160,6 +160,7 @@ export interface BackendApi {
   onEvent(listener: (event: BackendEvent) => void): () => void;
   selectWorkFiles(): Promise<string[]>;
   revealArtifact(conversationId: string, artifactId: string): Promise<void>;
+  paste(): Promise<void>;
 }
 
 declare global {
