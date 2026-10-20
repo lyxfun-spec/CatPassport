@@ -1,7 +1,9 @@
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using System.Threading.Channels;
 using CatAssistant.Backend.Models;
 using CatAssistant.Backend.Services;
+using CatAssistant.Backend.Services.Work;
 using Xunit;
 
 namespace CatAssistant.Backend.Tests;
@@ -194,29 +196,261 @@ public sealed class ConversationServiceTests
         Assert.Equal(new[] { "杭州天气", "明天降温。", "后天呢" }, fixture.Provider.Histories[1].Select(message => message.Content));
     }
 
+    [Fact]
+    public async Task ChatToolCallPersistsProposalWithoutCreatingWorkBeforeApproval()
+    {
+        await using var fixture = await ConversationFixture.CreateAsync();
+        var proposed = new TaskCompletionSource<WorkRequestRecord>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Service.Changed += (_, update) =>
+        {
+            if (update.Type == "work.request.proposed" && update.WorkRequest is { } request) proposed.TrySetResult(request);
+            if (update.Type == "run.completed") completed.TrySetResult();
+        };
+        var sourceId = fixture.Service.DesktopActiveConversationId!;
+
+        await fixture.Service.SendAsync(sourceId, "把聊天内容整理成一份演示文稿", "desktop");
+        await fixture.Provider.WaitForCallsAsync(1);
+        await fixture.Provider.EmitAsync(0, new ChatStreamChunk(ToolCall: new ChatToolCall(
+            "call-work-1",
+            "request_work",
+            """{"title":"项目演示文稿","prompt":"整理当前讨论并制作演示文稿。","contextSummary":"用户希望把当前讨论整理成演示文稿。"}""")));
+
+        var request = await proposed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        fixture.Provider.CompleteStream(0);
+        await completed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal("proposed", request.State);
+        Assert.Single((await fixture.Service.GetAsync(sourceId)).WorkRequests!);
+        Assert.DoesNotContain(await fixture.Service.ListAsync(), item => item.Mode == "work");
+        var rejected = await fixture.Service.ResolveWorkRequestAsync(request.Id, approved: false);
+        Assert.Equal("rejected", rejected.State);
+        Assert.DoesNotContain(await fixture.Service.ListAsync(), item => item.Mode == "work");
+    }
+
+    [Fact]
+    public async Task ApprovalCreatesOneBackgroundWorkConversationWithBidirectionalOrigin()
+    {
+        await using var fixture = await ConversationFixture.CreateAsync(enableWork: true);
+        var proposed = new TaskCompletionSource<WorkRequestRecord>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var chatCompleted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Service.Changed += (_, update) =>
+        {
+            if (update.Type == "work.request.proposed" && update.WorkRequest is { } request) proposed.TrySetResult(request);
+            if (update.Type == "run.completed" && update.ConversationId == fixture.Service.DesktopActiveConversationId) chatCompleted.TrySetResult();
+        };
+        var sourceId = fixture.Service.DesktopActiveConversationId!;
+        await fixture.Service.SendAsync(sourceId, "制作发布计划文档", "desktop");
+        await fixture.Provider.WaitForCallsAsync(1);
+        await fixture.Provider.EmitAsync(0, new ChatStreamChunk(ToolCall: new ChatToolCall(
+            "call-work-approve",
+            "request_work",
+            """{"title":"发布计划","prompt":"创建一份可审阅的发布计划文档。","contextSummary":"项目需要一份发布计划，内容应可审阅。"}""")));
+        var proposal = await proposed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        fixture.Provider.CompleteStream(0);
+        await chatCompleted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        var started = await fixture.Service.ResolveWorkRequestAsync(proposal.Id, approved: true);
+        var repeated = await fixture.Service.ResolveWorkRequestAsync(proposal.Id, approved: true);
+
+        Assert.Equal("started", started.State);
+        Assert.Equal(started.TargetConversationId, repeated.TargetConversationId);
+        Assert.Equal(sourceId, fixture.Service.DesktopActiveConversationId);
+        var work = Assert.Single(await fixture.Service.ListAsync(), item => item.Mode == "work");
+        Assert.Equal(sourceId, work.OriginConversationId);
+        Assert.Equal("发布计划", work.Title);
+        Assert.Contains((await fixture.Service.GetAsync(work.Id)).Messages, message => message.Role == "user" && message.Content == "创建一份可审阅的发布计划文档。");
+        var handoff = Assert.Single(await fixture.Repository.LoadWorkContextItemsAsync(work.Id), item => item.Name == "chat_handoff_context");
+        using (var payload = JsonDocument.Parse(handoff.PayloadJson))
+            Assert.Contains("项目需要一份发布计划", payload.RootElement.GetProperty("content").GetString());
+        Assert.Contains((await fixture.Service.GetAsync(work.Id)).WorkRequests!, item => item.Id == proposal.Id && item.SourceConversationId == sourceId);
+    }
+
+    [Fact]
+    public async Task InvalidWorkProposalFailsGracefullyWithoutInterruptingTheChatRun()
+    {
+        await using var fixture = await ConversationFixture.CreateAsync();
+        var proposed = new TaskCompletionSource<WorkRequestRecord>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var failed = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Service.Changed += (_, update) =>
+        {
+            if (update.Type == "work.request.proposed" && update.WorkRequest is { } request) proposed.TrySetResult(request);
+            if (update.Type is "message.completed" or "run.completed") completed.TrySetResult();
+            if (update.Type == "run.failed") failed.TrySetResult(update.Error ?? string.Empty);
+        };
+        var sourceId = fixture.Service.DesktopActiveConversationId!;
+
+        await fixture.Service.SendAsync(sourceId, "帮我把资料整理成演示文稿", "desktop");
+        await fixture.Provider.WaitForCallsAsync(1);
+        await fixture.Provider.EmitAsync(0, new ChatStreamChunk(Delta: "好的，我来安排。"));
+        await fixture.Provider.EmitAsync(0, new ChatStreamChunk(ToolCall: new ChatToolCall("call-broken", "request_work", "{\"title\":\"演示文稿\",\"prompt\":")));
+        fixture.Provider.CompleteStream(0);
+
+        var request = await proposed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await completed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.False(failed.Task.IsCompleted);
+        Assert.Equal("failed", request.State);
+        Assert.Empty(request.Prompt);
+        Assert.NotNull(request.ErrorMessage);
+        var detail = await fixture.Service.GetAsync(sourceId);
+        Assert.Equal("好的，我来安排。", Assert.Single(detail.Messages, message => message.Role == "assistant").Content);
+        Assert.DoesNotContain(await fixture.Service.ListAsync(), item => item.Mode == "work");
+        await fixture.Provider.WaitForTitleCallsAsync(1);
+        await Task.Delay(200);
+    }
+
+    [Fact]
+    public async Task ReproposingARejectedWorkRequestRevivesTheSameRecord()
+    {
+        await using var fixture = await ConversationFixture.CreateAsync();
+        var sourceId = fixture.Service.DesktopActiveConversationId!;
+        var proposals = new List<WorkRequestRecord>();
+        void Subscribe() => fixture.Service.Changed += (_, update) =>
+        {
+            if (update.Type == "work.request.proposed" && update.WorkRequest is { } request) proposals.Add(request);
+        };
+
+        Subscribe();
+        await fixture.Service.SendAsync(sourceId, "做一份演示文稿", "desktop");
+        await fixture.Provider.WaitForCallsAsync(1);
+        await fixture.Provider.EmitAsync(0, new ChatStreamChunk(ToolCall: new ChatToolCall("call-again", "request_work",
+            """{"title":"演示文稿","prompt":"制作演示文稿。","contextSummary":"用户想要演示文稿。"}""")));
+        fixture.Provider.CompleteStream(0);
+        while (proposals.Count == 0) await Task.Delay(10);
+        var first = proposals[0];
+        Assert.Equal("rejected", (await fixture.Service.ResolveWorkRequestAsync(first.Id, approved: false)).State);
+
+        proposals.Clear();
+        Subscribe();
+        await fixture.Service.SendAsync(sourceId, "换成发布会脚本再做", "desktop");
+        await fixture.Provider.WaitForCallsAsync(2);
+        await fixture.Provider.EmitAsync(1, new ChatStreamChunk(ToolCall: new ChatToolCall("call-again", "request_work",
+            """{"title":"发布会脚本","prompt":"改写为发布会脚本。","contextSummary":"用户改要发布会脚本。"}""")));
+        fixture.Provider.CompleteStream(1);
+        while (proposals.Count == 0) await Task.Delay(10);
+
+        var second = proposals[0];
+        Assert.Equal(first.Id, second.Id);
+        Assert.Equal("proposed", second.State);
+        Assert.Equal("发布会脚本", second.Title);
+        Assert.Single((await fixture.Service.GetAsync(sourceId)).WorkRequests!);
+        Assert.DoesNotContain(await fixture.Service.ListAsync(), item => item.Mode == "work");
+    }
+
+    [Fact]
+    public async Task InitializeDoesNotReplayARequestThatAlreadyStarted()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"cat-assistant-{Guid.NewGuid():N}.db");
+        var workspaceRoot = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"cat-assistant-workspaces-{Guid.NewGuid():N}");
+        try
+        {
+            var repository = new SqliteRepository(path);
+            await repository.InitializeAsync();
+            var source = await repository.CreateConversationAsync("chat");
+            var request = await repository.CreateWorkRequestAsync(
+                source.Id, "message-started", "run-started", "tool-started", "已启动", "生成交付物。", "用户已批准并已启动。");
+            await repository.UpdateWorkRequestAsync(request.Id, "proposed", "approved");
+            var (target, _) = await repository.CreateWorkConversationForRequestAsync(request.Id);
+            await repository.UpdateWorkRequestAsync(request.Id, "approved", "started", target.Id);
+            await repository.AddMessageAsync(target.Id, "user", "desktop", "complete", "生成交付物。");
+
+            var settings = new AppSettings();
+            var workspaces = new WorkWorkspaceService(workspaceRoot);
+            var agent = new WorkAgentService(repository, workspaces, new ImmediateWorkProvider(), new WorkToolRegistry(), () => settings, () => "test-key", CancellationToken.None);
+            await using (var service = new ConversationService(repository, new ControlledProvider(), () => settings, () => "test-key", CancellationToken.None, workspaces, agent))
+            {
+                await service.InitializeAsync();
+                Assert.Single(await service.ListAsync(), item => item.Mode == "work");
+                Assert.Single((await service.GetAsync(target.Id)).Messages, message => message.Content == "生成交付物。");
+                Assert.Equal("started", (await repository.GetWorkRequestAsync(request.Id))!.State);
+            }
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            if (File.Exists(path + "-wal")) File.Delete(path + "-wal");
+            if (File.Exists(path + "-shm")) File.Delete(path + "-shm");
+            if (Directory.Exists(workspaceRoot)) Directory.Delete(workspaceRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task InitializeResumesApprovedRequestWithoutCreatingDuplicateWorkConversation()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"cat-assistant-{Guid.NewGuid():N}.db");
+        var workspaceRoot = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"cat-assistant-workspaces-{Guid.NewGuid():N}");
+        try
+        {
+            var repository = new SqliteRepository(path);
+            await repository.InitializeAsync();
+            var source = await repository.CreateConversationAsync("chat");
+            var request = await repository.CreateWorkRequestAsync(
+                source.Id, "message-restart", "run-restart", "tool-restart", "重启续跑", "生成重启后的交付物。", "应用在用户批准后退出。");
+            await repository.UpdateWorkRequestAsync(request.Id, "proposed", "approved");
+
+            var settings = new AppSettings();
+            var workspaces = new WorkWorkspaceService(workspaceRoot);
+            var agent = new WorkAgentService(repository, workspaces, new ImmediateWorkProvider(), new WorkToolRegistry(), () => settings, () => "test-key", CancellationToken.None);
+            await using (var service = new ConversationService(repository, new ControlledProvider(), () => settings, () => "test-key", CancellationToken.None, workspaces, agent))
+            {
+                await service.InitializeAsync();
+                var resumed = await repository.GetWorkRequestAsync(request.Id);
+                Assert.Equal("started", resumed!.State);
+                Assert.NotNull(resumed.TargetConversationId);
+                Assert.Single(await service.ListAsync(), item => item.Mode == "work");
+                Assert.Contains((await service.GetAsync(resumed.TargetConversationId!)).Messages,
+                    message => message.Role == "user" && message.Content == "生成重启后的交付物。");
+            }
+
+            var secondWorkspaces = new WorkWorkspaceService(workspaceRoot);
+            var secondAgent = new WorkAgentService(repository, secondWorkspaces, new ImmediateWorkProvider(), new WorkToolRegistry(), () => settings, () => "test-key", CancellationToken.None);
+            await using (var service = new ConversationService(repository, new ControlledProvider(), () => settings, () => "test-key", CancellationToken.None, secondWorkspaces, secondAgent))
+            {
+                await service.InitializeAsync();
+                Assert.Single(await service.ListAsync(), item => item.Mode == "work");
+            }
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            if (File.Exists(path + "-wal")) File.Delete(path + "-wal");
+            if (File.Exists(path + "-shm")) File.Delete(path + "-shm");
+            if (Directory.Exists(workspaceRoot)) Directory.Delete(workspaceRoot, recursive: true);
+        }
+    }
+
     private sealed class ConversationFixture : IAsyncDisposable
     {
-        private ConversationFixture(string path, ControlledProvider provider, ConversationService service)
+        private ConversationFixture(string path, string workspaceRoot, SqliteRepository repository, ControlledProvider provider, ConversationService service)
         {
             Path = path;
+            WorkspaceRoot = workspaceRoot;
+            Repository = repository;
             Provider = provider;
             Service = service;
         }
 
         public string Path { get; }
+        public string WorkspaceRoot { get; }
+        public SqliteRepository Repository { get; }
         public ControlledProvider Provider { get; }
         public ConversationService Service { get; }
 
-        public static async Task<ConversationFixture> CreateAsync()
+        public static async Task<ConversationFixture> CreateAsync(bool enableWork = false)
         {
             var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"cat-assistant-{Guid.NewGuid():N}.db");
+            var workspaceRoot = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"cat-assistant-workspaces-{Guid.NewGuid():N}");
             var repository = new SqliteRepository(path);
             await repository.InitializeAsync();
             var provider = new ControlledProvider();
             var settings = new AppSettings();
-            var service = new ConversationService(repository, provider, () => settings, () => "test-key", CancellationToken.None);
+            var workspaces = new WorkWorkspaceService(workspaceRoot);
+            var workAgent = enableWork
+                ? new WorkAgentService(repository, workspaces, new ImmediateWorkProvider(), new WorkToolRegistry(), () => settings, () => "test-key", CancellationToken.None)
+                : null;
+            var service = new ConversationService(repository, provider, () => settings, () => "test-key", CancellationToken.None, workspaces, workAgent);
             await service.InitializeAsync();
-            return new ConversationFixture(path, provider, service);
+            return new ConversationFixture(path, workspaceRoot, repository, provider, service);
         }
 
         public async ValueTask DisposeAsync()
@@ -225,7 +459,20 @@ public sealed class ConversationServiceTests
             if (File.Exists(Path)) File.Delete(Path);
             if (File.Exists(Path + "-wal")) File.Delete(Path + "-wal");
             if (File.Exists(Path + "-shm")) File.Delete(Path + "-shm");
+            if (Directory.Exists(WorkspaceRoot)) Directory.Delete(WorkspaceRoot, recursive: true);
         }
+    }
+
+    private sealed class ImmediateWorkProvider : IWorkModelProvider
+    {
+        public Task<WorkModelResponse> CompleteAsync(
+            IReadOnlyList<WorkContextItem> context,
+            IReadOnlyList<WorkToolDefinition> tools,
+            WorkEnvironmentInfo environment,
+            string model,
+            string apiKey,
+            Func<string, Task> onContentDelta,
+            CancellationToken cancellationToken) => Task.FromResult(new WorkModelResponse("任务已接收。", []));
     }
 
     private sealed class ControlledProvider : IChatProvider

@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text;
+using System.Text.Json;
 using CatAssistant.Backend.Models;
 using CatAssistant.Backend.Services.Sandbox;
 using CatAssistant.Backend.Services.Work;
@@ -11,15 +12,17 @@ public sealed class ConversationService : IAsyncDisposable
     // The streamed row is only a crash checkpoint; the completion, failure and interrupt paths all store the full text.
     private static readonly TimeSpan StreamPersistInterval = TimeSpan.FromMilliseconds(250);
 
-    private sealed class ActiveRun(string id, string conversationId, string assistantMessageId, CancellationTokenSource cancellation)
+    private sealed class ActiveRun(string id, string conversationId, string triggerMessageId, string assistantMessageId, CancellationTokenSource cancellation)
     {
         public string Id { get; } = id;
         public string ConversationId { get; } = conversationId;
+        public string TriggerMessageId { get; } = triggerMessageId;
         public string AssistantMessageId { get; } = assistantMessageId;
         public CancellationTokenSource Cancellation { get; } = cancellation;
         public StringBuilder Content { get; } = new();
         public object ContentLock { get; } = new();
         public DateTimeOffset? LastContentPersistedAt { get; set; }
+        public HashSet<string> WorkRequestToolCalls { get; } = new(StringComparer.Ordinal);
     }
 
     private readonly SqliteRepository _repository;
@@ -32,6 +35,7 @@ public sealed class ConversationService : IAsyncDisposable
     private readonly WorkApprovalService? _workApprovals;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new();
     private readonly ConcurrentDictionary<string, ActiveRun> _runs = new();
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _workRequestGates = new(StringComparer.Ordinal);
     private readonly object _stateLock = new();
     private string? _desktopActiveConversationId;
     private string? _deviceActiveConversationId;
@@ -88,6 +92,8 @@ public sealed class ConversationService : IAsyncDisposable
                 : savedDevice is not null && ids.Contains(savedDevice) ? savedDevice : _desktopActiveConversationId;
         }
         await PersistBindingsAsync();
+        foreach (var request in await _repository.ListWorkRequestsByStateAsync("approved"))
+            await ResumeApprovedWorkRequestAsync(request.Id);
     }
 
     public Task<IReadOnlyList<ConversationSummary>> ListAsync() => _repository.ListConversationsAsync();
@@ -98,10 +104,15 @@ public sealed class ConversationService : IAsyncDisposable
         return detail ?? throw new KeyNotFoundException("对话不存在。");
     }
 
-    public async Task<ConversationSummary> CreateAsync(string mode = "chat", bool activateDesktop = true)
+    public async Task<ConversationSummary> CreateAsync(
+        string mode = "chat",
+        bool activateDesktop = true,
+        string? originConversationId = null,
+        string? title = null,
+        string titleSource = "fallback")
     {
         if (mode is not ("chat" or "work")) throw new ArgumentOutOfRangeException(nameof(mode));
-        var created = await _repository.CreateConversationAsync(mode);
+        var created = await _repository.CreateConversationAsync(mode, originConversationId, title, titleSource);
         if (mode == "work") await _workspaces.EnsureAsync(created.Id, _lifetime);
         if (activateDesktop) await ActivateDesktopAsync(created.Id);
         Publish(new ConversationEvent("conversation.created", created.Id, Conversation: created));
@@ -139,6 +150,72 @@ public sealed class ConversationService : IAsyncDisposable
 
     public Task<IReadOnlyList<WorkArtifactRecord>> ListWorkArtifactsAsync(string conversationId) =>
         _repository.ListWorkArtifactsAsync(conversationId);
+
+    public async Task<WorkRequestRecord> ResolveWorkRequestAsync(string requestId, bool approved)
+    {
+        var gate = _workRequestGates.GetOrAdd(requestId, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(_lifetime);
+        try
+        {
+            var request = await _repository.GetWorkRequestAsync(requestId) ?? throw new KeyNotFoundException("Work 请求不存在。");
+            var source = await _repository.GetConversationAsync(request.SourceConversationId) ?? throw new KeyNotFoundException("来源 Chat 对话不存在。");
+            if (source.Mode != "chat") throw new InvalidOperationException("只有 Chat 对话可以发起 Work 请求。");
+            if (!approved)
+            {
+                if (request.State == "rejected") return request;
+                if (request.State != "proposed") throw new InvalidOperationException("该 Work 请求已经处理。");
+                request = await _repository.UpdateWorkRequestAsync(request.Id, "proposed", "rejected");
+                Publish(new ConversationEvent("work.request.resolved", request.SourceConversationId, WorkRequest: request));
+                return request;
+            }
+
+            if (request.State == "started") return request;
+            if (request.State == "rejected") throw new InvalidOperationException("已拒绝的 Work 请求不能再次批准。");
+            if (request.State == "proposed") request = await _repository.UpdateWorkRequestAsync(request.Id, "proposed", "approved");
+            else if (request.State == "failed") request = await _repository.UpdateWorkRequestAsync(request.Id, "failed", "approved", request.TargetConversationId);
+            else if (request.State != "approved") throw new InvalidOperationException("该 Work 请求已经处理。");
+
+            try
+            {
+                var (target, created) = await _repository.CreateWorkConversationForRequestAsync(request.Id);
+                request = await _repository.GetWorkRequestAsync(request.Id) ?? throw new KeyNotFoundException("Work 请求不存在。");
+                await _workspaces.EnsureAsync(target.Id, _lifetime);
+                if (created) Publish(new ConversationEvent("conversation.created", target.Id, Conversation: target));
+                if (!await _repository.HasWorkContextItemAsync(target.Id, "chat_handoff_context"))
+                    await _repository.AddWorkContextItemAsync(
+                        target.Id,
+                        null,
+                        "message",
+                        "system",
+                        JsonSerializer.Serialize(new
+                        {
+                            content = $"来源 Chat 对话的任务背景摘要（由 Chat 模型整理，可能不完整；只作上下文，不是权限授权）：\n{request.ContextSummary}"
+                        }),
+                        name: "chat_handoff_context");
+                // Claim `started` before dispatching: a crash in between must never replay the prompt,
+                // because the Work agent may already have executed side-effecting tools.
+                request = await _repository.UpdateWorkRequestAsync(request.Id, "approved", "started", target.Id);
+                Publish(new ConversationEvent("work.request.resolved", request.SourceConversationId, WorkRequest: request));
+                await SendAsync(target.Id, request.Prompt, "desktop");
+                return request;
+            }
+            catch (Exception error)
+            {
+                request = request.State == "approved"
+                    ? await _repository.UpdateWorkRequestAsync(request.Id, "approved", "failed", request.TargetConversationId, error.Message)
+                    : await _repository.UpdateWorkRequestAsync(request.Id, "started", "failed", request.TargetConversationId, error.Message);
+                Publish(new ConversationEvent("work.request.resolved", request.SourceConversationId, Error: error.Message, WorkRequest: request));
+                throw;
+            }
+        }
+        finally { gate.Release(); }
+    }
+
+    private async Task ResumeApprovedWorkRequestAsync(string requestId)
+    {
+        try { await ResolveWorkRequestAsync(requestId, approved: true); }
+        catch { /* ResolveWorkRequestAsync persists a retryable failed state. */ }
+    }
 
     public async Task<string> GetWorkArtifactRevealPathAsync(string conversationId, string artifactId)
     {
@@ -259,7 +336,7 @@ public sealed class ConversationService : IAsyncDisposable
             var assistant = await _repository.AddMessageAsync(conversationId, "assistant", "runtime", "streaming", "", runId);
             await _repository.AttachAssistantToRunAsync(runId, assistant.Id);
             var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime);
-            run = new ActiveRun(runId, conversationId, assistant.Id, cancellation);
+            run = new ActiveRun(runId, conversationId, user.Id, assistant.Id, cancellation);
             _runs[conversationId] = run;
             Publish(new ConversationEvent("message.created", conversationId, user.Id, runId, Message: user, Conversation: conversation));
             Publish(new ConversationEvent("run.started", conversationId, assistant.Id, runId, Message: assistant, Status: "generating"));
@@ -321,6 +398,7 @@ public sealed class ConversationService : IAsyncDisposable
             }
             if (chunk.Citations is not null)
                 foreach (var citation in chunk.Citations) citations.TryAdd(citation.Ordinal, citation);
+            if (chunk.ToolCall is { } toolCall) await ProposeWorkRequestAsync(run, toolCall);
         }
         var gate = Gate(run.ConversationId);
         await gate.WaitAsync(_lifetime);
@@ -330,15 +408,17 @@ public sealed class ConversationService : IAsyncDisposable
             _runs.TryRemove(run.ConversationId, out _);
             string content;
             lock (run.ContentLock) content = run.Content.ToString();
-            await _repository.UpdateMessageAsync(run.AssistantMessageId, content, "complete");
+            if (content.Length == 0 && run.WorkRequestToolCalls.Count > 0) await _repository.RemoveMessageIfEmptyAsync(run.AssistantMessageId);
+            else await _repository.UpdateMessageAsync(run.AssistantMessageId, content, "complete");
             if (citations.Count > 0)
             {
                 var normalized = citations.Values.OrderBy(item => item.Ordinal).Select(item => item with { MessageId = run.AssistantMessageId }).ToArray();
                 await _repository.ReplaceCitationsAsync(run.AssistantMessageId, normalized);
             }
             await _repository.FinishRunAsync(run.Id, "completed", "stop");
-            var message = (await _repository.LoadMessagesAsync(run.ConversationId)).Single(item => item.Id == run.AssistantMessageId);
-            Publish(new ConversationEvent("message.completed", run.ConversationId, run.AssistantMessageId, run.Id, Message: message, Status: "completed"));
+            var message = (await _repository.LoadMessagesAsync(run.ConversationId)).SingleOrDefault(item => item.Id == run.AssistantMessageId);
+            if (message is not null) Publish(new ConversationEvent("message.completed", run.ConversationId, run.AssistantMessageId, run.Id, Message: message, Status: "completed"));
+            else Publish(new ConversationEvent("run.completed", run.ConversationId, RunId: run.Id, Status: "completed"));
             var userMessages = history.Where(item => item.Role == "user").Take(2).ToArray();
             if (userMessages.Length == 1 && !string.IsNullOrWhiteSpace(content))
                 _ = GenerateTitleObservedAsync(run.ConversationId, userMessages[0].Content, CitationMarkers.Strip(content));
@@ -368,6 +448,48 @@ public sealed class ConversationService : IAsyncDisposable
             gate.Release();
         }
     }
+
+    private async Task ProposeWorkRequestAsync(ActiveRun run, ChatToolCall toolCall)
+    {
+        if (toolCall.Name != "request_work" || !IsCurrent(run) || !run.WorkRequestToolCalls.Add(toolCall.ToolCallId)) return;
+        try
+        {
+            var arguments = ParseWorkRequestArguments(toolCall.ArgumentsJson);
+            var request = await _repository.CreateWorkRequestAsync(
+                run.ConversationId,
+                run.TriggerMessageId,
+                run.Id,
+                toolCall.ToolCallId,
+                arguments.Title,
+                arguments.Prompt,
+                arguments.ContextSummary);
+            if (request.State == "proposed")
+                Publish(new ConversationEvent("work.request.proposed", run.ConversationId, run.TriggerMessageId, run.Id, WorkRequest: request));
+        }
+        catch (Exception error) when (error is JsonException or ArgumentException)
+        {
+            // A malformed proposal must not fail the whole chat answer: the model still owes the user text.
+            await ProposeFailedWorkRequestAsync(run, toolCall.ToolCallId, error.Message);
+        }
+    }
+
+    private async Task ProposeFailedWorkRequestAsync(ActiveRun run, string toolCallId, string errorMessage)
+    {
+        if (!IsCurrent(run)) return;
+        var request = await _repository.CreateFailedWorkRequestAsync(run.ConversationId, run.TriggerMessageId, run.Id, toolCallId, errorMessage);
+        Publish(new ConversationEvent("work.request.proposed", run.ConversationId, run.TriggerMessageId, run.Id, WorkRequest: request));
+    }
+
+    private static WorkRequestArguments ParseWorkRequestArguments(string argumentsJson)
+    {
+        var arguments = JsonSerializer.Deserialize<WorkRequestArguments>(argumentsJson, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        if (string.IsNullOrWhiteSpace(arguments?.Title)) throw new ArgumentException("模型返回的 Work 请求缺少标题。");
+        if (string.IsNullOrWhiteSpace(arguments.Prompt)) throw new ArgumentException("模型返回的 Work 请求缺少执行提示词。");
+        if (string.IsNullOrWhiteSpace(arguments.ContextSummary)) throw new ArgumentException("模型返回的 Work 请求缺少上下文摘要。");
+        return arguments!;
+    }
+
+    private sealed record WorkRequestArguments(string Title, string Prompt, string ContextSummary);
 
     private async Task InterruptLockedAsync(string conversationId)
     {
@@ -476,6 +598,8 @@ public sealed class ConversationService : IAsyncDisposable
         _runs.Clear();
         foreach (var gate in _gates.Values) gate.Dispose();
         _gates.Clear();
+        foreach (var gate in _workRequestGates.Values) gate.Dispose();
+        _workRequestGates.Clear();
         _workspaces.Dispose();
     }
 }

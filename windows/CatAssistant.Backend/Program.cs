@@ -83,6 +83,9 @@ internal static class Program
                 await coordinator.Conversations.ResolveWorkApprovalAsync(
                     Required<string>(request.Params, "id"), Required<string>(request.Params, "approvalId"), Required<bool>(request.Params, "approved"));
                 return await coordinator.Conversations.ListPendingWorkApprovalsAsync(Required<string>(request.Params, "id"));
+            case "work.requests.resolve":
+                return await coordinator.Conversations.ResolveWorkRequestAsync(
+                    Required<string>(request.Params, "requestId"), Required<bool>(request.Params, "approved"));
             case "work.artifacts.revealPath":
                 return new { path = await coordinator.Conversations.GetWorkArtifactRevealPathAsync(
                     Required<string>(request.Params, "id"), Required<string>(request.Params, "artifactId")) };

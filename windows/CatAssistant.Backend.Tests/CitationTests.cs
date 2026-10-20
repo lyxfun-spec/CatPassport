@@ -36,6 +36,37 @@ public sealed class CitationTests
     }
 
     [Fact]
+    public void NativeStreamSurfacesOnlyCompleteFunctionCalls()
+    {
+        var incomplete = DashScopeClient.ParseStreamData("""{"output":{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call-1","function":{"name":"request_work","arguments":"{\"title\":"}}]}}]}}""");
+        Assert.DoesNotContain(incomplete, chunk => chunk.ToolCall is not null);
+
+        var chunks = DashScopeClient.ParseStreamData("""{"output":{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call-1","function":{"name":"request_work","arguments":"{\"title\":\"报告\",\"prompt\":\"制作报告\",\"contextSummary\":\"背景\"}"}}]}}]}}""");
+        var call = Assert.Single(chunks, chunk => chunk.ToolCall is not null).ToolCall!;
+        Assert.Equal("call-1", call.ToolCallId);
+        Assert.Equal("request_work", call.Name);
+    }
+
+    [Fact]
+    public void NativeStreamAssemblesFunctionCallArgumentsFromFragments()
+    {
+        var accumulator = new DashScopeClient.ChatToolCallAccumulator();
+        const string head = """{"output":{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call-1","function":{"name":"request_work","arguments":FRAGMENT}}]}}]}}""";
+        const string tail = """{"output":{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"arguments":FRAGMENT}}]}}]}}""";
+
+        Assert.DoesNotContain(DashScopeClient.ParseStreamData(head.Replace("FRAGMENT", Quote("{\"title\":\"报告\",")), accumulator), chunk => chunk.ToolCall is not null);
+        var tailData = tail.Replace("FRAGMENT", Quote("\"prompt\":\"制作报告\"}"));
+        var call = Assert.Single(DashScopeClient.ParseStreamData(tailData, accumulator), chunk => chunk.ToolCall is not null).ToolCall!;
+
+        Assert.Equal("call-1", call.ToolCallId);
+        Assert.Equal("request_work", call.Name);
+        Assert.Equal("""{"title":"报告","prompt":"制作报告"}""", call.ArgumentsJson);
+        Assert.DoesNotContain(DashScopeClient.ParseStreamData(tailData, accumulator), chunk => chunk.ToolCall is not null);
+    }
+
+    private static string Quote(string value) => System.Text.Json.JsonSerializer.Serialize(value);
+
+    [Fact]
     public void StripRemovesOnlyCompleteMarkers()
     {
         Assert.Equal("降温。[ref_x]", CitationMarkers.Strip("降温[ref_1][ref_12]。[ref_x]"));

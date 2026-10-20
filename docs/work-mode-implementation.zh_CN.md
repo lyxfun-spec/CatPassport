@@ -28,6 +28,7 @@ Work 是文件中心的自主 Agent；支持原生工具调用、同批独立工
 - 环境适配：每轮 Work 开始前把实际 Windows shell、工作区绝对路径、打包 Python、办公依赖和目录权限告知模型。命令环境预置 `PATH`、`PYTHONPATH`、`PIP_TARGET` 等通用约定，使 `cmd` 中的标准 `python`/`pip` 命令自然落入当前对话工作区，但依赖选择和安装命令仍由 Agent 自主决定。由于 AppContainer 内的 PowerShell 5.1 不能可靠启动原生子进程，模型会收到“PowerShell 用于内建脚本、`cmd` 用于原生程序”的真实约束。
 - Skill：内置 `documents`、`presentations`、`spreadsheets`、`pdf`。模型先 `list_skills` 获取摘要，再按需 `load_skill` 获取完整 `SKILL.md`。
 - 上下文：第一版达到字符预算即显式失败并告知用户，没有静默截断或自动摘要。
+- Chat 转 Work：Chat 原生请求只暴露 `request_work`，先持久化为批准卡片；桌面批准后由可信后端创建并后台启动 Work。批准状态与目标对话在同一 SQLite 事务中关联，重启后自动续跑尚未启动的已批准请求。目标对话保存 `origin_conversation_id`，请求保存目标对话 ID，实现双向跳转；完整 Chat 历史不复制到 Work。工具调用参数跨 SSE 分片累积后才提议，参数非法或字段缺失只落一条 `failed` 请求并在卡片上说明，不打断当轮回答；派发 run 前先写入 `started`，因此崩溃重启不会重放已批准的 prompt；同一 tool call 的重新提议复用原记录，被拒绝的请求可以再次提议。
 
 这些是实现选择，不反向改变正式需求。并发上限仍受模型单轮工具批次和机器资源约束；未引入额外调度平台。
 
@@ -53,8 +54,9 @@ Work 是文件中心的自主 Agent；支持原生工具调用、同批独立工
 4. Skill、搜索、运行环境和成果：已完成内置 Skill 渐进加载、搜索、只读办公运行时和交付。
 5. UI 与生命周期：已完成简洁/展开进度、审批、附件、停止、成果胶囊、托盘后台和重新同步。
 6. 回归与发行验收：自动化测试和 x64 打包已完成；真实云模型效果与人工视觉交互保留为发布前人工验收。
+7. Chat 发起 Work：已完成请求持久化、桌面批准/拒绝、幂等后台创建、来源摘要注入和双向跳转；随后补齐健壮性（跨分片工具调用组装、非法提议降级为失败卡片、`started` 先于派发写入、重新提议复用记录、前端即时应用 `work.request.*` 事件）。真实云模型对 `request_work` 与联网搜索组合的选择效果保留为发布前人工验收。
 
-## 5. A01–A20 验收矩阵
+## 5. A01–A21 验收矩阵
 
 | 项 | 自动化或代码证据 | 当前结果 |
 | --- | --- | --- |
@@ -74,6 +76,7 @@ Work 是文件中心的自主 Agent；支持原生工具调用、同批独立工
 | A18 | Work activity、当前计划/阶段说明、展开工具详情、真实状态/错误 UI | 代码与类型检查通过，需人工视觉确认 |
 | A19 | 工具错误进入下一轮 context；Agent loop 无硬编码业务重试次数 | 通过 |
 | A20 | `ContextLimitFailsExplicitlyWithoutDroppingHistoryOrCallingModel` | 通过 |
+| A21 | `ChatToolCallPersistsProposalWithoutCreatingWorkBeforeApproval`、`ApprovalCreatesOneBackgroundWorkConversationWithBidirectionalOrigin`、`InitializeResumesApprovedRequestWithoutCreatingDuplicateWorkConversation`、`InvalidWorkProposalFailsGracefullyWithoutInterruptingTheChatRun`、`ReproposingARejectedWorkRequestRevivesTheSameRecord`、`InitializeDoesNotReplayARequestThatAlreadyStarted`、`NativeStreamAssemblesFunctionCallArgumentsFromFragments`；批准卡片与双向来源 UI | 自动化通过，需真实模型与人工视觉确认 |
 
 ## 6. 安全边界与发布前人工检查
 

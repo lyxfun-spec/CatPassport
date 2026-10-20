@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { BootstrapState, ConversationMessage } from './shared';
+import type { BootstrapState, ConversationMessage, WorkRequest } from './shared';
 import { deviceDiscoveryMessage, initialState, reduceBackendEvent } from './state';
 
 const bootstrap: BootstrapState = {
@@ -94,6 +94,45 @@ describe('conversation stream state', () => {
 
     const ignored = reduceBackendEvent(state, { event: 'run.failed', data: { type: 'run.failed', conversationId: 'chat-1', runId: 'run-1' } });
     expect(ignored.runError).toBeUndefined();
+  });
+});
+
+describe('work request proposals', () => {
+  const workRequest: WorkRequest = {
+    id: 'req-1', sourceConversationId: 'chat-1', sourceMessageId: 'user-1', sourceRunId: 'run-1', toolCallId: 'call-1',
+    title: '发布计划', prompt: '创建一份可审阅的发布计划文档。', contextSummary: '用户想要发布计划。',
+    state: 'proposed', createdAt: '2026-01-01T00:00:03Z', updatedAt: '2026-01-01T00:00:03Z'
+  };
+
+  it('surfaces a proposal as soon as the event arrives', () => {
+    let state = reduceBackendEvent(initialState, { event: 'ui.bootstrap', data: bootstrap });
+    state = reduceBackendEvent(state, { event: 'work.request.proposed', data: { type: 'work.request.proposed', conversationId: 'chat-1', workRequest } });
+
+    expect(state.bootstrap?.activeConversation?.workRequests).toEqual([workRequest]);
+  });
+
+  it('updates the proposal in place when it is resolved', () => {
+    let state = reduceBackendEvent(initialState, { event: 'ui.bootstrap', data: bootstrap });
+    state = reduceBackendEvent(state, { event: 'work.request.proposed', data: { type: 'work.request.proposed', conversationId: 'chat-1', workRequest } });
+    state = reduceBackendEvent(state, {
+      event: 'work.request.resolved',
+      data: { type: 'work.request.resolved', conversationId: 'chat-1', workRequest: { ...workRequest, state: 'started', targetConversationId: 'work-1' } }
+    });
+
+    const requests = state.bootstrap?.activeConversation?.workRequests;
+    expect(requests).toHaveLength(1);
+    expect(requests?.[0].state).toBe('started');
+    expect(requests?.[0].targetConversationId).toBe('work-1');
+  });
+
+  it('ignores proposals that belong to another conversation', () => {
+    let state = reduceBackendEvent(initialState, { event: 'ui.bootstrap', data: bootstrap });
+    state = reduceBackendEvent(state, {
+      event: 'work.request.proposed',
+      data: { type: 'work.request.proposed', conversationId: 'chat-2', workRequest: { ...workRequest, sourceConversationId: 'chat-2' } }
+    });
+
+    expect(state.bootstrap?.activeConversation?.workRequests ?? []).toHaveLength(0);
   });
 });
 

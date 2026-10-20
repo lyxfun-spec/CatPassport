@@ -1,4 +1,4 @@
-import type { BackendEvent, BootstrapState, ConversationDetail, ConversationEvent, DeviceState } from './shared';
+import type { BackendEvent, BootstrapState, ConversationDetail, ConversationEvent, DeviceState, WorkRequest } from './shared';
 
 export interface UiState {
   bootstrap?: BootstrapState;
@@ -100,7 +100,19 @@ function reduceConversationEvent(state: UiState, event: ConversationEvent): UiSt
       : message);
     return { ...state, bootstrap: { ...bootstrap, activeConversation: { ...detail, messages, activeRunId: undefined } } };
   }
+  if ((event.type === 'work.request.proposed' || event.type === 'work.request.resolved') && event.workRequest) {
+    const workRequests = upsertWorkRequest(detail.workRequests ?? [], event.workRequest);
+    return { ...state, bootstrap: { ...bootstrap, activeConversation: { ...detail, workRequests } } };
+  }
   return state;
+}
+
+function upsertWorkRequest(requests: WorkRequest[], request: WorkRequest): WorkRequest[] {
+  const index = requests.findIndex(item => item.id === request.id);
+  if (index < 0) return [...requests, request];
+  const next = requests.slice();
+  next[index] = request;
+  return next;
 }
 
 function isConversationEvent(value: unknown): value is ConversationEvent {

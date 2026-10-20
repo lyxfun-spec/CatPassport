@@ -10,6 +10,7 @@ const allowedMethods = new Set([
   'conversations.list', 'conversations.get', 'conversations.create', 'conversations.start', 'conversations.rename', 'conversations.pin',
   'conversations.delete', 'conversations.activate', 'conversations.send', 'conversations.cancel',
   'work.workspace.get', 'work.inputs.add', 'work.approvals.list', 'work.approvals.resolve', 'work.artifacts.revealPath',
+  'work.requests.resolve',
   'devices.scan', 'devices.connect', 'devices.forget', 'devices.followDesktop',
   'conversation.new', 'conversation.cancel', 'conversation.send', 'settings.save'
 ]);

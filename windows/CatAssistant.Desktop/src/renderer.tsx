@@ -2,7 +2,7 @@ import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReduc
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import ReactMarkdown, { type Components } from 'react-markdown';
-import type { BackendEvent, BootstrapState, CatDevice, Citation, ConversationDetail, ConversationMessage, ConversationSummary, PublicSettings, WorkApproval, WorkArtifact, WorkToolCall } from './shared';
+import type { BackendEvent, BootstrapState, CatDevice, Citation, ConversationDetail, ConversationMessage, ConversationSummary, PublicSettings, WorkApproval, WorkArtifact, WorkRequest, WorkToolCall } from './shared';
 import { citationOrdinal, hidePartialCitationMarker, remarkCitations, stripCitationMarkers } from './citations';
 import { deviceDiscoveryMessage, initialState, reduceBackendEvent } from './state';
 import { clampTextareaHeight, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldSubmitComposer, workPhaseLabel } from './ui-behavior';
@@ -180,6 +180,14 @@ function App() {
     }));
     if (result !== undefined) await refresh();
   };
+  const resolveWorkRequest = async (request: WorkRequest, approved: boolean) => {
+    const result = await run<WorkRequest>(`work-request-${request.id}`, () => invoke('work.requests.resolve', {
+      requestId: request.id, approved
+    }));
+    if (!result) return;
+    await refresh();
+    showNotice(approved ? result.state === 'started' ? 'Work 任务已在后台开始' : '正在创建 Work 任务' : '已拒绝 Work 任务');
+  };
   const rename = async (title: string) => {
     const target = actionSurface?.conversation;
     if (!target || title === target.title) { setActionSurface(undefined); return; }
@@ -232,7 +240,7 @@ function App() {
           ? <SettingsPage settings={bootstrap.settings} onboarding={!bootstrap.settings.hasApiKey} busy={isBusy('settings')} onBack={() => setRequestedView('conversation')} onSave={saveSettings}/>
           : displayedView === 'compose' || !active
             ? <DraftConversation mode={draftMode} onMode={setDraftMode} value={draft} onChange={setDraft} onSend={() => void send()} onAttach={() => void attachFiles()} hasApiKey={bootstrap.settings.hasApiKey} sending={isBusy('send')} focusSignal={composerFocusSignal} onOpenSettings={() => setRequestedView('settings')}/>
-            : <><ConversationHeader conversation={active.conversation} onAction={(kind, anchor) => setActionSurface({ kind, anchor, conversation: active.conversation })}/>{active.conversation.mode === 'work' ? <div className="work-content"><WorkActivity active={active} approvals={bootstrap.pendingApprovals ?? []} tools={bootstrap.workToolCalls ?? noWorkToolCalls} artifacts={bootstrap.workArtifacts ?? []} busy={busy} onResolve={(approval, approved) => void resolveApproval(approval, approved)} onReveal={artifactId => void window.catAssistant.revealArtifact(active.conversation.id, artifactId)}/><MessageList detail={active} runError={state.runError}/></div> : <MessageList detail={active} runError={state.runError}/>}<Composer value={draft} onChange={setDraft} onSend={() => void send()} onAttach={active.conversation.mode === 'work' ? () => void attachFiles() : undefined} onStop={active.conversation.mode === 'work' && active.activeRunId ? () => void stopWork() : undefined} hasApiKey={bootstrap.settings.hasApiKey} sending={isBusy('send')} focusSignal={composerFocusSignal} onOpenSettings={() => setRequestedView('settings')}/></>
+            : <><ConversationHeader conversation={active.conversation} origin={active.conversation.originConversationId ? bootstrap.conversations.find(item => item.id === active.conversation.originConversationId) : undefined} onOpenConversation={id => void selectConversation(id)} onAction={(kind, anchor) => setActionSurface({ kind, anchor, conversation: active.conversation })}/>{active.conversation.mode === 'work' ? <div className="work-content"><WorkActivity active={active} approvals={bootstrap.pendingApprovals ?? []} tools={bootstrap.workToolCalls ?? noWorkToolCalls} artifacts={bootstrap.workArtifacts ?? []} busy={busy} onResolve={(approval, approved) => void resolveApproval(approval, approved)} onReveal={artifactId => void window.catAssistant.revealArtifact(active.conversation.id, artifactId)}/><MessageList detail={active} runError={state.runError} busy={busy} onResolveWorkRequest={(request, approved) => void resolveWorkRequest(request, approved)} onOpenConversation={id => void selectConversation(id)}/></div> : <MessageList detail={active} runError={state.runError} busy={busy} onResolveWorkRequest={(request, approved) => void resolveWorkRequest(request, approved)} onOpenConversation={id => void selectConversation(id)}/>}<Composer value={draft} onChange={setDraft} onSend={() => void send()} onAttach={active.conversation.mode === 'work' ? () => void attachFiles() : undefined} onStop={active.conversation.mode === 'work' && active.activeRunId ? () => void stopWork() : undefined} hasApiKey={bootstrap.settings.hasApiKey} sending={isBusy('send')} focusSignal={composerFocusSignal} onOpenSettings={() => setRequestedView('settings')}/></>
         }
       </main>
     </div>
@@ -300,7 +308,10 @@ function ConversationContextMenu({ value, onClose, onPin, onAction }: {
   </div>;
 }
 
-function ConversationHeader({ conversation, onAction }: { conversation: ConversationSummary; onAction(kind: 'rename' | 'delete', anchor: AnchorRect): void }) {
+function ConversationHeader({ conversation, origin, onOpenConversation, onAction }: {
+  conversation: ConversationSummary; origin?: ConversationSummary; onOpenConversation(id: string): void;
+  onAction(kind: 'rename' | 'delete', anchor: AnchorRect): void;
+}) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuRendered, setMenuRendered] = useState(false);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
@@ -345,7 +356,7 @@ function ConversationHeader({ conversation, onAction }: { conversation: Conversa
     return () => { document.removeEventListener('pointerdown', onPointer); document.removeEventListener('keydown', onKey); };
   }, [menuOpen, keyboardOpen]);
   const choose = (kind: 'rename' | 'delete', element: HTMLButtonElement) => { const anchor = rectOf(element); closeMenu(true); onAction(kind, anchor); };
-  return <header className="conversation-header"><h1>{conversation.title}</h1><div className="header-menu" ref={wrapper}><button ref={trigger} className="icon-button" onClick={toggleMenu} aria-label="对话选项" aria-haspopup="menu" aria-expanded={menuOpen}><Icon name="menu"/></button>{menuRendered && <div className={`popover-menu ${menuOpen ? 'is-open' : 'is-closing'}`} role="menu" aria-hidden={!menuOpen} inert={!menuOpen}><button ref={firstItem} role="menuitem" onClick={event => choose('rename', event.currentTarget)}><Icon name="rename"/>重命名</button><button role="menuitem" className="danger" onClick={event => choose('delete', event.currentTarget)}><Icon name="delete"/>删除</button></div>}</div></header>;
+  return <header className="conversation-header"><div className="conversation-heading"><h1>{conversation.title}</h1>{origin && <button className="origin-link" onClick={() => onOpenConversation(origin.id)} title={`返回来源 Chat：${origin.title}`}><Icon name="back" size={13}/>来源：{origin.title}</button>}</div><div className="header-menu" ref={wrapper}><button ref={trigger} className="icon-button" onClick={toggleMenu} aria-label="对话选项" aria-haspopup="menu" aria-expanded={menuOpen}><Icon name="menu"/></button>{menuRendered && <div className={`popover-menu ${menuOpen ? 'is-open' : 'is-closing'}`} role="menu" aria-hidden={!menuOpen} inert={!menuOpen}><button ref={firstItem} role="menuitem" onClick={event => choose('rename', event.currentTarget)}><Icon name="rename"/>重命名</button><button role="menuitem" className="danger" onClick={event => choose('delete', event.currentTarget)}><Icon name="delete"/>删除</button></div>}</div></header>;
 }
 
 function WorkActivity({ active, approvals, tools, artifacts, busy, onResolve, onReveal }: {
@@ -395,7 +406,10 @@ function maskSensitiveJson(value: string): string {
 const noCitations: Citation[] = [];
 const noWorkToolCalls: WorkToolCall[] = [];
 
-function MessageList({ detail, runError }: { detail: ConversationDetail; runError?: string }) {
+function MessageList({ detail, runError, busy, onResolveWorkRequest, onOpenConversation }: {
+  detail: ConversationDetail; runError?: string; busy: Set<string>;
+  onResolveWorkRequest(request: WorkRequest, approved: boolean): void; onOpenConversation(id: string): void;
+}) {
   const scroller = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
   const lastContent = detail.messages.at(-1)?.content;
@@ -404,14 +418,41 @@ function MessageList({ detail, runError }: { detail: ConversationDetail; runErro
     for (const citation of detail.citations) grouped.set(citation.messageId, [...(grouped.get(citation.messageId) ?? []), citation]);
     return grouped;
   }, [detail.citations]);
+  const requestsByMessage = useMemo(() => {
+    const grouped = new Map<string, WorkRequest[]>();
+    for (const request of detail.workRequests ?? []) {
+      if (request.sourceConversationId !== detail.conversation.id) continue;
+      grouped.set(request.sourceMessageId, [...(grouped.get(request.sourceMessageId) ?? []), request]);
+    }
+    return grouped;
+  }, [detail.conversation.id, detail.workRequests]);
   const tail = detail.messages.at(-1);
   const awaitingFirstToken = Boolean(detail.activeRunId) && tail?.role === 'user';
   useEffect(() => { pinned.current = true; requestAnimationFrame(() => scroller.current?.scrollTo({ top: scroller.current.scrollHeight })); }, [detail.conversation.id]);
   useEffect(() => { if (pinned.current) requestAnimationFrame(() => scroller.current?.scrollTo({ top: scroller.current.scrollHeight })); }, [detail.messages.length, lastContent, runError]);
   const onScroll = () => { const element = scroller.current; if (element) pinned.current = isNearScrollEnd(element.scrollHeight, element.scrollTop, element.clientHeight); };
   return <ScrollArea ref={scroller} className="message-scroll" viewportClassName={`messages ${detail.messages.length ? '' : 'empty-chat'}`} onScroll={onScroll}>
-    {detail.messages.length === 0 ? <div className="empty-greeting"><BrandMark large/><h2>{greetingForHour(new Date().getHours())}</h2></div> : <div className="message-column">{detail.messages.map(message => <MessageItem key={message.id} message={message} citations={citationsByMessage.get(message.id) ?? noCitations}/>)}{awaitingFirstToken && <ThinkingBubble/>}{runError && <div className="run-error" role="alert"><Icon name="info"/><span>{runError}</span></div>}</div>}
+    {detail.messages.length === 0 ? <div className="empty-greeting"><BrandMark large/><h2>{greetingForHour(new Date().getHours())}</h2></div> : <div className="message-column">{detail.messages.map(message => <React.Fragment key={message.id}><MessageItem message={message} citations={citationsByMessage.get(message.id) ?? noCitations}/>{(requestsByMessage.get(message.id) ?? []).map(request => <WorkRequestCard key={request.id} request={request} busy={busy.has(`work-request-${request.id}`)} onResolve={onResolveWorkRequest} onOpenConversation={onOpenConversation}/>)}</React.Fragment>)}{awaitingFirstToken && <ThinkingBubble/>}{runError && <div className="run-error" role="alert"><Icon name="info"/><span>{runError}</span></div>}</div>}
   </ScrollArea>;
+}
+
+function WorkRequestCard({ request, busy, onResolve, onOpenConversation }: {
+  request: WorkRequest; busy: boolean; onResolve(request: WorkRequest, approved: boolean): void; onOpenConversation(id: string): void;
+}) {
+  const stateLabel = ({ proposed: '等待批准', approved: '正在创建', rejected: '已拒绝', started: '已开始', failed: '创建失败' } as const)[request.state];
+  // The backend stores an empty prompt when the model's proposal could not be parsed at all.
+  const retryable = request.prompt.trim().length > 0;
+  return <section className={`work-request-card state-${request.state}`} aria-label={`Work 任务：${request.title}`}>
+    <div className="work-request-heading"><span className="work-request-icon"><Icon name="work"/></span><span><small>Chat 建议交给 Work</small><b>{request.title}</b></span><em>{stateLabel}</em></div>
+    {retryable ? <p>{request.prompt}</p> : <p className="work-request-hint">模型没有给出可执行的任务内容，无法创建 Work 对话。可以让它重新提议一次。</p>}
+    {retryable && <details><summary>查看传递的背景摘要</summary><div>{request.contextSummary}</div></details>}
+    {request.errorMessage && <div className="work-request-error" role="alert">{request.errorMessage}</div>}
+    <div className="work-request-actions">
+      {request.state === 'proposed' && <><button className="text-button" disabled={busy} onClick={() => onResolve(request, false)}>拒绝</button><button className="primary-button" disabled={busy} onClick={() => onResolve(request, true)}>{busy ? '正在创建…' : '批准并开始'}</button></>}
+      {request.state === 'failed' && retryable && <button className="primary-button" disabled={busy} onClick={() => onResolve(request, true)}>{busy ? '正在重试…' : '重试创建'}</button>}
+      {request.state === 'started' && request.targetConversationId && <button className="primary-button" onClick={() => onOpenConversation(request.targetConversationId!)}>打开 Work<Icon name="chevron" size={14}/></button>}
+    </div>
+  </section>;
 }
 
 function ThinkingBubble() {

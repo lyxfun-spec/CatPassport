@@ -30,7 +30,8 @@ public sealed record ConversationSummary(
     string TitleSource,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
-    bool IsPinned);
+    bool IsPinned,
+    string? OriginConversationId = null);
 
 public sealed record ConversationMessage(
     string Id,
@@ -57,7 +58,23 @@ public sealed record ConversationDetail(
     ConversationSummary Conversation,
     IReadOnlyList<ConversationMessage> Messages,
     IReadOnlyList<CitationRecord> Citations,
-    string? ActiveRunId);
+    string? ActiveRunId,
+    IReadOnlyList<WorkRequestRecord>? WorkRequests = null);
+
+public sealed record WorkRequestRecord(
+    string Id,
+    string SourceConversationId,
+    string SourceMessageId,
+    string SourceRunId,
+    string ToolCallId,
+    string Title,
+    string Prompt,
+    string ContextSummary,
+    string State,
+    string? TargetConversationId,
+    string? ErrorMessage,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
 
 public sealed record DeviceState(
     string Status,
@@ -93,7 +110,8 @@ public sealed record ConversationEvent(
     string? Status = null,
     string? Error = null,
     WorkApprovalRecord? Approval = null,
-    WorkArtifactRecord? Artifact = null);
+    WorkArtifactRecord? Artifact = null,
+    WorkRequestRecord? WorkRequest = null);
 
 // Retained for the provider boundary and legacy database compatibility.
 public sealed record ChatMessage(string Role, string Content, DateTimeOffset CreatedAt);

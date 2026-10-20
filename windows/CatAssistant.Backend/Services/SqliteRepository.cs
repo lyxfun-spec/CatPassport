@@ -6,6 +6,7 @@ namespace CatAssistant.Backend.Services;
 
 public sealed class SqliteRepository
 {
+    private const string WorkRequestSelect = "SELECT id,source_conversation_id,source_message_id,source_run_id,tool_call_id,title,prompt,context_summary,state,target_conversation_id,error_message,created_utc,updated_utc FROM work_requests";
     private readonly string _connectionString;
 
     public SqliteRepository(string? databasePath = null)
@@ -90,12 +91,16 @@ public sealed class SqliteRepository
                 id TEXT PRIMARY KEY,
                 source_conversation_id TEXT NOT NULL,
                 source_message_id TEXT NOT NULL,
+                source_run_id TEXT NOT NULL,
+                tool_call_id TEXT NOT NULL,
                 title TEXT NOT NULL,
                 prompt TEXT NOT NULL,
                 context_summary TEXT NOT NULL,
                 state TEXT NOT NULL,
                 target_conversation_id TEXT NULL,
-                created_utc TEXT NOT NULL
+                error_message TEXT NULL,
+                created_utc TEXT NOT NULL,
+                updated_utc TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS work_context_items (
                 id TEXT PRIMARY KEY,
@@ -169,10 +174,12 @@ public sealed class SqliteRepository
             CREATE INDEX IF NOT EXISTS idx_work_artifacts_conversation ON work_artifacts(conversation_id, created_utc);
             INSERT OR IGNORE INTO schema_migrations(version, applied_utc) VALUES(2, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
             INSERT OR IGNORE INTO schema_migrations(version, applied_utc) VALUES(3, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+            INSERT OR IGNORE INTO schema_migrations(version, applied_utc) VALUES(4, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
             """;
         await command.ExecuteNonQueryAsync();
         await transaction.CommitAsync();
         await EnsureConversationPinColumnAsync(db);
+        await EnsureWorkRequestColumnsAsync(db);
         await RecoverInterruptedRunsAsync(db);
     }
 
@@ -271,11 +278,17 @@ public sealed class SqliteRepository
         await transaction.CommitAsync();
     }
 
-    public async Task<ConversationSummary> CreateConversationAsync(string mode = "chat", string? originConversationId = null)
+    public async Task<ConversationSummary> CreateConversationAsync(
+        string mode = "chat",
+        string? originConversationId = null,
+        string? title = null,
+        string titleSource = "fallback")
     {
         if (mode is not ("chat" or "work")) throw new ArgumentOutOfRangeException(nameof(mode));
+        if (titleSource is not ("fallback" or "generated" or "user")) throw new ArgumentOutOfRangeException(nameof(titleSource));
         var now = DateTimeOffset.UtcNow;
-        var conversation = new ConversationSummary(Guid.NewGuid().ToString("N"), mode, "新对话", "fallback", now, now, false);
+        var normalizedTitle = title is null ? "新对话" : NormalizeTitle(title);
+        var conversation = new ConversationSummary(Guid.NewGuid().ToString("N"), mode, normalizedTitle, titleSource, now, now, false, originConversationId);
         await using var db = await OpenAsync();
         var command = db.CreateCommand();
         command.CommandText = """
@@ -298,7 +311,7 @@ public sealed class SqliteRepository
         var result = new List<ConversationSummary>();
         await using var db = await OpenAsync();
         var command = db.CreateCommand();
-        command.CommandText = "SELECT id,mode,title,title_source,created_utc,updated_utc,pinned_utc FROM conversations_v2 WHERE archived_utc IS NULL ORDER BY pinned_utc IS NULL, pinned_utc DESC, updated_utc DESC";
+        command.CommandText = "SELECT id,mode,title,title_source,created_utc,updated_utc,pinned_utc,origin_conversation_id FROM conversations_v2 WHERE archived_utc IS NULL ORDER BY pinned_utc IS NULL, pinned_utc DESC, updated_utc DESC";
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync()) result.Add(ReadConversation(reader));
         return result;
@@ -308,7 +321,7 @@ public sealed class SqliteRepository
     {
         await using var db = await OpenAsync();
         var command = db.CreateCommand();
-        command.CommandText = "SELECT id,mode,title,title_source,created_utc,updated_utc,pinned_utc FROM conversations_v2 WHERE id=$id AND archived_utc IS NULL";
+        command.CommandText = "SELECT id,mode,title,title_source,created_utc,updated_utc,pinned_utc,origin_conversation_id FROM conversations_v2 WHERE id=$id AND archived_utc IS NULL";
         command.Parameters.AddWithValue("$id", id);
         await using var reader = await command.ExecuteReaderAsync();
         return await reader.ReadAsync() ? ReadConversation(reader) : null;
@@ -320,7 +333,214 @@ public sealed class SqliteRepository
         if (conversation is null) return null;
         var messages = await LoadMessagesAsync(id);
         var citations = await LoadCitationsAsync(messages.Select(message => message.Id).ToArray());
-        return new ConversationDetail(conversation, messages, citations, activeRunId);
+        var workRequests = await ListWorkRequestsForConversationAsync(id);
+        return new ConversationDetail(conversation, messages, citations, activeRunId, workRequests);
+    }
+
+    public Task<WorkRequestRecord> CreateWorkRequestAsync(
+        string sourceConversationId,
+        string sourceMessageId,
+        string sourceRunId,
+        string toolCallId,
+        string title,
+        string prompt,
+        string contextSummary) =>
+        UpsertWorkRequestAsync(sourceConversationId, sourceMessageId, sourceRunId, toolCallId, "proposed",
+            NormalizeTitle(title),
+            NormalizeWorkRequestText(prompt, nameof(prompt), 12_000),
+            NormalizeWorkRequestText(contextSummary, nameof(contextSummary), 12_000),
+            errorMessage: null);
+
+    public Task<WorkRequestRecord> CreateFailedWorkRequestAsync(
+        string sourceConversationId,
+        string sourceMessageId,
+        string sourceRunId,
+        string toolCallId,
+        string errorMessage) =>
+        // An empty prompt marks the row as unparseable so the desktop client can hide "retry".
+        UpsertWorkRequestAsync(sourceConversationId, sourceMessageId, sourceRunId, toolCallId, "failed",
+            "Work 提议解析失败", string.Empty, string.Empty, errorMessage);
+
+    private async Task<WorkRequestRecord> UpsertWorkRequestAsync(
+        string sourceConversationId,
+        string sourceMessageId,
+        string sourceRunId,
+        string toolCallId,
+        string state,
+        string title,
+        string prompt,
+        string contextSummary,
+        string? errorMessage)
+    {
+        if (string.IsNullOrWhiteSpace(toolCallId)) throw new ArgumentException("工具调用 ID 不能为空。", nameof(toolCallId));
+        var now = DateTimeOffset.UtcNow;
+        await using var db = await OpenAsync();
+
+        // A model that proposes the same tool call twice reuses one row, otherwise a rejected or
+        // failed proposal could never be re-proposed: the insert would be swallowed by the unique key.
+        var existing = await GetWorkRequestByToolCallAsync(db, sourceConversationId, toolCallId);
+        if (existing is not null)
+        {
+            if (existing.State is "approved" or "started") return existing;
+            var update = db.CreateCommand();
+            update.CommandText = """
+                UPDATE work_requests
+                SET source_message_id=$message,source_run_id=$run,title=$title,prompt=$prompt,context_summary=$summary,
+                    state=$state,error_message=$error,updated_utc=$updated
+                WHERE id=$id AND state NOT IN ('approved','started')
+                """;
+            update.Parameters.AddWithValue("$message", sourceMessageId);
+            update.Parameters.AddWithValue("$run", sourceRunId);
+            update.Parameters.AddWithValue("$title", title);
+            update.Parameters.AddWithValue("$prompt", prompt);
+            update.Parameters.AddWithValue("$summary", contextSummary);
+            update.Parameters.AddWithValue("$state", state);
+            update.Parameters.AddWithValue("$error", (object?)errorMessage ?? DBNull.Value);
+            update.Parameters.AddWithValue("$updated", Format(now));
+            update.Parameters.AddWithValue("$id", existing.Id);
+            await update.ExecuteNonQueryAsync();
+            return await GetWorkRequestAsync(existing.Id) ?? throw new InvalidOperationException("无法保存 Work 请求。");
+        }
+
+        var insert = db.CreateCommand();
+        insert.CommandText = """
+            INSERT OR IGNORE INTO work_requests(
+                id,source_conversation_id,source_message_id,source_run_id,tool_call_id,title,prompt,context_summary,state,target_conversation_id,error_message,created_utc,updated_utc)
+            VALUES($id,$conversation,$message,$run,$tool,$title,$prompt,$summary,$state,NULL,$error,$created,$updated)
+            """;
+        insert.Parameters.AddWithValue("$id", Guid.NewGuid().ToString("N"));
+        insert.Parameters.AddWithValue("$conversation", sourceConversationId);
+        insert.Parameters.AddWithValue("$message", sourceMessageId);
+        insert.Parameters.AddWithValue("$run", sourceRunId);
+        insert.Parameters.AddWithValue("$tool", toolCallId);
+        insert.Parameters.AddWithValue("$title", title);
+        insert.Parameters.AddWithValue("$prompt", prompt);
+        insert.Parameters.AddWithValue("$summary", contextSummary);
+        insert.Parameters.AddWithValue("$state", state);
+        insert.Parameters.AddWithValue("$error", (object?)errorMessage ?? DBNull.Value);
+        insert.Parameters.AddWithValue("$created", Format(now));
+        insert.Parameters.AddWithValue("$updated", Format(now));
+        await insert.ExecuteNonQueryAsync();
+        return await GetWorkRequestByToolCallAsync(db, sourceConversationId, toolCallId)
+            ?? throw new InvalidOperationException("无法保存 Work 请求。");
+    }
+
+    public async Task<WorkRequestRecord?> GetWorkRequestAsync(string id)
+    {
+        await using var db = await OpenAsync();
+        var command = db.CreateCommand();
+        command.CommandText = WorkRequestSelect + " WHERE id=$id";
+        command.Parameters.AddWithValue("$id", id);
+        await using var reader = await command.ExecuteReaderAsync();
+        return await reader.ReadAsync() ? ReadWorkRequest(reader) : null;
+    }
+
+    public async Task<IReadOnlyList<WorkRequestRecord>> ListWorkRequestsForConversationAsync(string conversationId)
+    {
+        var result = new List<WorkRequestRecord>();
+        await using var db = await OpenAsync();
+        var command = db.CreateCommand();
+        command.CommandText = WorkRequestSelect + " WHERE source_conversation_id=$id OR target_conversation_id=$id ORDER BY created_utc";
+        command.Parameters.AddWithValue("$id", conversationId);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync()) result.Add(ReadWorkRequest(reader));
+        return result;
+    }
+
+    public async Task<IReadOnlyList<WorkRequestRecord>> ListWorkRequestsByStateAsync(string state)
+    {
+        if (state is not ("proposed" or "approved" or "rejected" or "started" or "failed"))
+            throw new ArgumentOutOfRangeException(nameof(state));
+        var result = new List<WorkRequestRecord>();
+        await using var db = await OpenAsync();
+        var command = db.CreateCommand();
+        command.CommandText = WorkRequestSelect + " WHERE state=$state ORDER BY created_utc";
+        command.Parameters.AddWithValue("$state", state);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync()) result.Add(ReadWorkRequest(reader));
+        return result;
+    }
+
+    public async Task<(ConversationSummary Conversation, bool Created)> CreateWorkConversationForRequestAsync(string requestId)
+    {
+        await using var db = await OpenAsync();
+        await using var transaction = await db.BeginTransactionAsync();
+
+        var requestCommand = db.CreateCommand();
+        requestCommand.Transaction = (SqliteTransaction)transaction;
+        requestCommand.CommandText = WorkRequestSelect + " WHERE id=$id";
+        requestCommand.Parameters.AddWithValue("$id", requestId);
+        WorkRequestRecord request;
+        await using (var reader = await requestCommand.ExecuteReaderAsync())
+        {
+            request = await reader.ReadAsync() ? ReadWorkRequest(reader) : throw new KeyNotFoundException("Work 请求不存在。");
+        }
+        if (request.State != "approved") throw new InvalidOperationException("只有已批准的 Work 请求可以创建对话。");
+
+        if (request.TargetConversationId is { } existingId)
+        {
+            var existing = await GetConversationAsync(db, (SqliteTransaction)transaction, existingId)
+                ?? throw new InvalidOperationException("此前创建的 Work 对话已不存在。");
+            await transaction.CommitAsync();
+            return (existing, false);
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var conversation = new ConversationSummary(
+            Guid.NewGuid().ToString("N"), "work", NormalizeTitle(request.Title), "generated", now, now, false, request.SourceConversationId);
+        var insert = db.CreateCommand();
+        insert.Transaction = (SqliteTransaction)transaction;
+        insert.CommandText = """
+            INSERT INTO conversations_v2(id,mode,title,title_source,created_utc,updated_utc,origin_conversation_id)
+            VALUES($id,'work',$title,'generated',$created,$updated,$origin)
+            """;
+        insert.Parameters.AddWithValue("$id", conversation.Id);
+        insert.Parameters.AddWithValue("$title", conversation.Title);
+        insert.Parameters.AddWithValue("$created", Format(now));
+        insert.Parameters.AddWithValue("$updated", Format(now));
+        insert.Parameters.AddWithValue("$origin", request.SourceConversationId);
+        await insert.ExecuteNonQueryAsync();
+
+        var link = db.CreateCommand();
+        link.Transaction = (SqliteTransaction)transaction;
+        link.CommandText = """
+            UPDATE work_requests SET target_conversation_id=$target,updated_utc=$updated
+            WHERE id=$id AND state='approved' AND target_conversation_id IS NULL
+            """;
+        link.Parameters.AddWithValue("$target", conversation.Id);
+        link.Parameters.AddWithValue("$updated", Format(now));
+        link.Parameters.AddWithValue("$id", requestId);
+        if (await link.ExecuteNonQueryAsync() != 1) throw new InvalidOperationException("Work 请求状态已经变化，请刷新后重试。");
+
+        await transaction.CommitAsync();
+        return (conversation, true);
+    }
+
+    public async Task<WorkRequestRecord> UpdateWorkRequestAsync(
+        string id,
+        string expectedState,
+        string state,
+        string? targetConversationId = null,
+        string? errorMessage = null)
+    {
+        if (expectedState is not ("proposed" or "approved" or "started" or "failed")) throw new ArgumentOutOfRangeException(nameof(expectedState));
+        if (state is not ("approved" or "rejected" or "started" or "failed")) throw new ArgumentOutOfRangeException(nameof(state));
+        await using var db = await OpenAsync();
+        var command = db.CreateCommand();
+        command.CommandText = """
+            UPDATE work_requests
+            SET state=$state,target_conversation_id=COALESCE($target,target_conversation_id),error_message=$error,updated_utc=$updated
+            WHERE id=$id AND state=$expected
+            """;
+        command.Parameters.AddWithValue("$state", state);
+        command.Parameters.AddWithValue("$target", (object?)targetConversationId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$error", (object?)errorMessage ?? DBNull.Value);
+        command.Parameters.AddWithValue("$updated", Format(DateTimeOffset.UtcNow));
+        command.Parameters.AddWithValue("$id", id);
+        command.Parameters.AddWithValue("$expected", expectedState);
+        if (await command.ExecuteNonQueryAsync() == 0)
+            throw new InvalidOperationException("Work 请求状态已经变化，请刷新后重试。");
+        return await GetWorkRequestAsync(id) ?? throw new KeyNotFoundException("Work 请求不存在。");
     }
 
     public async Task RenameConversationAsync(string id, string title, string source = "user")
@@ -525,6 +745,16 @@ public sealed class SqliteRepository
         await insert.ExecuteNonQueryAsync();
         await transaction.CommitAsync();
         return item;
+    }
+
+    public async Task<bool> HasWorkContextItemAsync(string conversationId, string name)
+    {
+        await using var db = await OpenAsync();
+        var command = db.CreateCommand();
+        command.CommandText = "SELECT EXISTS(SELECT 1 FROM work_context_items WHERE conversation_id=$conversation AND name=$name)";
+        command.Parameters.AddWithValue("$conversation", conversationId);
+        command.Parameters.AddWithValue("$name", name);
+        return Convert.ToInt64(await command.ExecuteScalarAsync()) != 0;
     }
 
     public async Task<IReadOnlyList<WorkContextItem>> LoadWorkContextItemsAsync(string conversationId)
@@ -852,7 +1082,33 @@ public sealed class SqliteRepository
     }
 
     private static ConversationSummary ReadConversation(SqliteDataReader reader) => new(
-        reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), Parse(reader.GetString(4)), Parse(reader.GetString(5)), !reader.IsDBNull(6));
+        reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), Parse(reader.GetString(4)), Parse(reader.GetString(5)), !reader.IsDBNull(6),
+        reader.IsDBNull(7) ? null : reader.GetString(7));
+
+    private static async Task<ConversationSummary?> GetConversationAsync(SqliteConnection db, SqliteTransaction transaction, string id)
+    {
+        var command = db.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT id,mode,title,title_source,created_utc,updated_utc,pinned_utc,origin_conversation_id FROM conversations_v2 WHERE id=$id AND archived_utc IS NULL";
+        command.Parameters.AddWithValue("$id", id);
+        await using var reader = await command.ExecuteReaderAsync();
+        return await reader.ReadAsync() ? ReadConversation(reader) : null;
+    }
+
+    private static WorkRequestRecord ReadWorkRequest(SqliteDataReader reader) => new(
+        reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetString(5), reader.GetString(6),
+        reader.GetString(7), reader.GetString(8), reader.IsDBNull(9) ? null : reader.GetString(9), reader.IsDBNull(10) ? null : reader.GetString(10),
+        Parse(reader.GetString(11)), Parse(reader.GetString(12)));
+
+    private static async Task<WorkRequestRecord?> GetWorkRequestByToolCallAsync(SqliteConnection db, string sourceConversationId, string toolCallId)
+    {
+        var command = db.CreateCommand();
+        command.CommandText = WorkRequestSelect + " WHERE source_conversation_id=$conversation AND tool_call_id=$tool";
+        command.Parameters.AddWithValue("$conversation", sourceConversationId);
+        command.Parameters.AddWithValue("$tool", toolCallId);
+        await using var reader = await command.ExecuteReaderAsync();
+        return await reader.ReadAsync() ? ReadWorkRequest(reader) : null;
+    }
 
     private static ConversationMessage ReadMessage(SqliteDataReader reader) => new(
         reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetInt64(5), reader.GetString(6),
@@ -863,6 +1119,14 @@ public sealed class SqliteRepository
         title = string.Join(' ', title.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
         if (title.Length == 0) throw new ArgumentException("标题不能为空。", nameof(title));
         return title.Length <= 80 ? title : title[..80];
+    }
+
+    private static string NormalizeWorkRequestText(string value, string parameterName, int maximumLength)
+    {
+        value = value.Trim();
+        if (value.Length == 0) throw new ArgumentException("Work 请求内容不能为空。", parameterName);
+        if (value.Length > maximumLength) throw new ArgumentException($"Work 请求内容不能超过 {maximumLength} 个字符。", parameterName);
+        return value;
     }
 
     internal static string FallbackTitle(string content)
@@ -899,6 +1163,35 @@ public sealed class SqliteRepository
         }
         var index = db.CreateCommand();
         index.CommandText = "CREATE INDEX IF NOT EXISTS idx_conversations_v2_pinned ON conversations_v2(pinned_utc DESC, updated_utc DESC)";
+        await index.ExecuteNonQueryAsync();
+    }
+
+    private static async Task EnsureWorkRequestColumnsAsync(SqliteConnection db)
+    {
+        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var inspect = db.CreateCommand();
+        inspect.CommandText = "PRAGMA table_info(work_requests)";
+        await using (var reader = await inspect.ExecuteReaderAsync())
+            while (await reader.ReadAsync()) columns.Add(reader.GetString(1));
+
+        foreach (var (name, definition) in new[]
+        {
+            ("source_run_id", "TEXT NOT NULL DEFAULT ''"),
+            ("tool_call_id", "TEXT NOT NULL DEFAULT ''"),
+            ("error_message", "TEXT NULL"),
+            ("updated_utc", "TEXT NULL")
+        })
+        {
+            if (columns.Contains(name)) continue;
+            var alter = db.CreateCommand();
+            alter.CommandText = $"ALTER TABLE work_requests ADD COLUMN {name} {definition}";
+            await alter.ExecuteNonQueryAsync();
+        }
+        var backfill = db.CreateCommand();
+        backfill.CommandText = "UPDATE work_requests SET updated_utc=created_utc WHERE updated_utc IS NULL";
+        await backfill.ExecuteNonQueryAsync();
+        var index = db.CreateCommand();
+        index.CommandText = "CREATE UNIQUE INDEX IF NOT EXISTS idx_work_requests_tool_call ON work_requests(source_conversation_id,tool_call_id) WHERE tool_call_id<>''";
         await index.ExecuteNonQueryAsync();
     }
 }

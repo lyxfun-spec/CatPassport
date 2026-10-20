@@ -2,7 +2,12 @@ using CatAssistant.Backend.Models;
 
 namespace CatAssistant.Backend.Services;
 
-public sealed record ChatStreamChunk(string? Delta = null, IReadOnlyList<CitationRecord>? Citations = null);
+public sealed record ChatToolCall(string ToolCallId, string Name, string ArgumentsJson);
+
+public sealed record ChatStreamChunk(
+    string? Delta = null,
+    IReadOnlyList<CitationRecord>? Citations = null,
+    ChatToolCall? ToolCall = null);
 
 public interface IChatProvider
 {

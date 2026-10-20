@@ -23,6 +23,7 @@ export interface ConversationSummary {
   createdAt: string;
   updatedAt: string;
   isPinned: boolean;
+  originConversationId?: string;
 }
 
 export interface ConversationMessage {
@@ -53,6 +54,23 @@ export interface ConversationDetail {
   messages: ConversationMessage[];
   citations: Citation[];
   activeRunId?: string;
+  workRequests?: WorkRequest[];
+}
+
+export interface WorkRequest {
+  id: string;
+  sourceConversationId: string;
+  sourceMessageId: string;
+  sourceRunId: string;
+  toolCallId: string;
+  title: string;
+  prompt: string;
+  contextSummary: string;
+  state: 'proposed' | 'approved' | 'rejected' | 'started' | 'failed';
+  targetConversationId?: string;
+  errorMessage?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface DeviceState {
@@ -104,6 +122,7 @@ export interface ConversationEvent {
   conversation?: ConversationSummary;
   status?: string;
   error?: string;
+  workRequest?: WorkRequest;
 }
 
 export type ConversationEventName =
@@ -126,7 +145,9 @@ export type ConversationEventName =
   | 'tool.failed'
   | 'tool.cancelled'
   | 'approval.requested'
-  | 'approval.resolved';
+  | 'approval.resolved'
+  | 'work.request.proposed'
+  | 'work.request.resolved';
 
 export type BackendEvent =
   | { event: 'backend.ready'; data: { version: number; state: BootstrapState } }
