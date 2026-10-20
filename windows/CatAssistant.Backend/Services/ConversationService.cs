@@ -40,6 +40,7 @@ public sealed class ConversationService : IAsyncDisposable
     private string? _desktopActiveConversationId;
     private string? _deviceActiveConversationId;
     private bool _deviceFollowDesktop = true;
+    private bool _devicePendingNewConversation;
 
     public ConversationService(
         SqliteRepository repository,
@@ -82,14 +83,16 @@ public sealed class ConversationService : IAsyncDisposable
         var savedDesktop = await _repository.GetAppStateAsync("desktop_active_conversation");
         var savedDevice = await _repository.GetAppStateAsync("device_active_conversation");
         var savedFollow = await _repository.GetAppStateAsync("device_follow_desktop");
+        var savedPending = await _repository.GetAppStateAsync("device_pending_new_conversation");
         var ids = conversations.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
         lock (_stateLock)
         {
             _desktopActiveConversationId = savedDesktop is not null && ids.Contains(savedDesktop) ? savedDesktop : conversations[0].Id;
-            _deviceFollowDesktop = savedFollow is null || savedFollow == "1";
-            _deviceActiveConversationId = _deviceFollowDesktop
-                ? _desktopActiveConversationId
-                : savedDevice is not null && ids.Contains(savedDevice) ? savedDevice : _desktopActiveConversationId;
+            _devicePendingNewConversation = savedPending == "1";
+            _deviceFollowDesktop = !_devicePendingNewConversation && (savedFollow is null || savedFollow == "1");
+            if (_devicePendingNewConversation) _deviceActiveConversationId = null;
+            else if (_deviceFollowDesktop) _deviceActiveConversationId = _desktopActiveConversationId;
+            else _deviceActiveConversationId = savedDevice is not null && ids.Contains(savedDevice) ? savedDevice : _desktopActiveConversationId;
         }
         await PersistBindingsAsync();
         foreach (var request in await _repository.ListWorkRequestsByStateAsync("approved"))
@@ -231,17 +234,30 @@ public sealed class ConversationService : IAsyncDisposable
         return path;
     }
 
-    public async Task<ConversationSummary> CreateForDeviceAsync()
+    // The Card opens a conversation only when its first message arrives, so a long press that is never
+    // followed by speech leaves no empty conversation behind — same deferral the desktop composer uses.
+    public async Task DetachDeviceForNewConversationAsync()
     {
-        var created = await _repository.CreateConversationAsync("chat");
+        lock (_stateLock)
+        {
+            _deviceActiveConversationId = null;
+            _deviceFollowDesktop = false;
+            _devicePendingNewConversation = true;
+        }
+        await PersistBindingsAsync();
+    }
+
+    public async Task<ConversationDetail> StartForDeviceAsync(string text)
+    {
+        var created = await CreateAsync("chat", activateDesktop: false);
         lock (_stateLock)
         {
             _deviceActiveConversationId = created.Id;
             _deviceFollowDesktop = false;
+            _devicePendingNewConversation = false;
         }
         await PersistBindingsAsync();
-        Publish(new ConversationEvent("conversation.created", created.Id, Conversation: created));
-        return created;
+        return await SendAsync(created.Id, text, "device");
     }
 
     public async Task ActivateDesktopAsync(string id)
@@ -266,6 +282,7 @@ public sealed class ConversationService : IAsyncDisposable
         {
             _deviceActiveConversationId = id;
             _deviceFollowDesktop = true;
+            _devicePendingNewConversation = false;
         }
         await PersistBindingsAsync();
         Publish(new ConversationEvent("device.binding", id));
@@ -559,15 +576,18 @@ public sealed class ConversationService : IAsyncDisposable
         string? desktop;
         string? device;
         bool follow;
+        bool pending;
         lock (_stateLock)
         {
             desktop = _desktopActiveConversationId;
             device = _deviceActiveConversationId;
             follow = _deviceFollowDesktop;
+            pending = _devicePendingNewConversation;
         }
         await _repository.SetAppStateAsync("desktop_active_conversation", desktop);
         await _repository.SetAppStateAsync("device_active_conversation", device);
         await _repository.SetAppStateAsync("device_follow_desktop", follow ? "1" : "0");
+        await _repository.SetAppStateAsync("device_pending_new_conversation", pending ? "1" : null);
     }
 
     private static string ErrorCode(Exception error) => error switch

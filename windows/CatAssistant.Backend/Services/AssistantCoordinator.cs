@@ -540,15 +540,17 @@ public sealed class AssistantCoordinator : IAsyncDisposable
     private async Task ConfirmTranscriptAsync(ushort id, CancellationToken token)
     {
         if (_recordingId != id || string.IsNullOrWhiteSpace(_transcript)) throw new ProtocolException("没有可确认的转写结果。");
-        var conversationId = _conversations.DeviceActiveConversationId ?? throw new InvalidOperationException("卡片没有活动对话。");
-        await _conversations.SendAsync(conversationId, _transcript, "device");
+        var text = _transcript;
+        if (_conversations.DeviceActiveConversationId is { } conversationId) await _conversations.SendAsync(conversationId, text, "device");
+        else await _conversations.StartForDeviceAsync(text);
         _transcript = null; _recordingId = null;
     }
 
     private async Task ResetConversationAsync(byte[] payload, bool notifyCard)
     {
         CancelAllTurns("已开始新对话");
-        await _conversations.CreateForDeviceAsync();
+        await _conversations.DetachDeviceForNewConversationAsync();
+        PublishState();
         if (notifyCard) await _ble.SendAsync(MessageType.SessionReset, payload.Length == 4 ? payload : [], _lifetime.Token);
     }
     private async Task RunCardOperationAsync(Func<CancellationToken, Task> operation)

@@ -349,13 +349,13 @@ deviceFollowDesktop: boolean
 
 ### 9.3 卡片新建会话
 
-卡片发送现有 `NewConversation` 控制消息后：
+卡片长按发送现有 `NewConversation` 控制消息时**不**创建会话。和桌面输入框一样，创建推迟到第一条消息真正存在时：
 
-1. ConversationService 创建新 Chat 会话。
-2. `deviceActiveConversationId` 指向新会话。
-3. `deviceFollowDesktop=false`。
-4. 不修改 `desktopActiveConversationId`。
-5. 发布会话列表更新事件，桌面侧边栏立即出现新对话。
+1. `deviceActiveConversationId` 置空，`deviceFollowDesktop=false`；app_state 记录待新建标记，后端重启后仍然保留。
+2. 卡片照常收到 `SessionReset`，显示"新对话已开启"提示。
+3. 卡片确认转写时，ConversationService 才创建 Chat 会话、把 `deviceActiveConversationId` 指向它，并把该转写作为首条消息写入；此时桌面侧边栏才通过列表事件出现新对话。
+4. 长按之后没有说话，不会留下任何空会话。
+5. 整个流程不修改 `desktopActiveConversationId`。
 
 ### 9.4 重新跟随
 

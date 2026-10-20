@@ -349,13 +349,13 @@ These are application conversation states and remain separate from BLE connectio
 
 ### 9.3 Card-created conversation
 
-When the Card sends the existing `NewConversation` control message:
+The Card long-press that sends the existing `NewConversation` control message does not create a conversation. Like the desktop composer, creation is deferred until the first message actually exists:
 
-1. ConversationService creates a Chat conversation.
-2. `deviceActiveConversationId` points to it.
-3. `deviceFollowDesktop=false`.
-4. `desktopActiveConversationId` does not change.
-5. A list event makes the new conversation appear immediately in the desktop sidebar.
+1. `deviceActiveConversationId` becomes empty and `deviceFollowDesktop=false`; app_state keeps a pending-new-conversation flag that survives a backend restart.
+2. The Card still receives `SessionReset` and shows its "新对话已开启" notice.
+3. When the Card confirms a transcript, ConversationService creates the Chat conversation, points `deviceActiveConversationId` at it, and writes that transcript as the first message; only then does a list event make the new conversation appear in the desktop sidebar.
+4. A long press followed by silence leaves no empty conversation behind.
+5. `desktopActiveConversationId` never changes during this flow.
 
 ### 9.4 Follow again
 

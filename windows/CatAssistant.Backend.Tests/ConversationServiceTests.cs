@@ -55,21 +55,44 @@ public sealed class ConversationServiceTests
     }
 
     [Fact]
-    public async Task CardConversationDetachesAndCanFollowDesktopAgain()
+    public async Task CardNewConversationIsCreatedByItsFirstMessageNotTheLongPress()
     {
         await using var fixture = await ConversationFixture.CreateAsync();
         var desktop = fixture.Service.DesktopActiveConversationId!;
 
-        var card = await fixture.Service.CreateForDeviceAsync();
+        await fixture.Service.DetachDeviceForNewConversationAsync();
 
-        Assert.NotEqual(desktop, card.Id);
-        Assert.Equal(card.Id, fixture.Service.DeviceActiveConversationId);
+        Assert.Null(fixture.Service.DeviceActiveConversationId);
         Assert.False(fixture.Service.DeviceFollowDesktop);
+        Assert.Single(await fixture.Service.ListAsync());
+
+        var detail = await fixture.Service.StartForDeviceAsync("卡片第一条");
+        await fixture.Provider.WaitForCallsAsync(1);
+
+        Assert.NotEqual(desktop, detail.Conversation.Id);
+        Assert.Equal(detail.Conversation.Id, fixture.Service.DeviceActiveConversationId);
+        Assert.Equal(desktop, fixture.Service.DesktopActiveConversationId);
+        Assert.Equal(2, (await fixture.Service.ListAsync()).Count);
+        Assert.Contains(detail.Messages, message => message.Role == "user" && message.Content == "卡片第一条");
 
         await fixture.Service.FollowDesktopAsync();
 
         Assert.Equal(desktop, fixture.Service.DeviceActiveConversationId);
         Assert.True(fixture.Service.DeviceFollowDesktop);
+    }
+
+    [Fact]
+    public async Task CardPendingNewConversationSurvivesARestart()
+    {
+        await using var fixture = await ConversationFixture.CreateAsync();
+        await fixture.Service.DetachDeviceForNewConversationAsync();
+
+        await using var restarted = new ConversationService(
+            fixture.Repository, new ControlledProvider(), () => new AppSettings(), () => "test-key", CancellationToken.None);
+        await restarted.InitializeAsync();
+
+        Assert.Null(restarted.DeviceActiveConversationId);
+        Assert.False(restarted.DeviceFollowDesktop);
     }
 
     [Fact]
