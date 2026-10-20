@@ -133,9 +133,11 @@ button:disabled, input:disabled { cursor: not-allowed; }
 .citation-ref > button:hover { color: #fff; background: var(--ui-accent); }
 .citation-ref > button:focus-visible { outline: 1px solid #a9b7c2; outline-offset: 1px; }
 .citation-ref.pending > span { color: #9aa5ae; background: #f0f3f5; }
-.message-actions { min-height: 30px; display: flex; align-items: center; gap: 8px; margin-top: 7px; color: var(--ui-muted); font-size: 11px; }
-.message-actions button { min-height: 30px; display: inline-flex; align-items: center; gap: 5px; padding: 2px 6px; border: 0; border-radius: 6px; color: var(--ui-muted); background: transparent; font-size: 11px; cursor: pointer; }
-.message-actions button:hover { color: var(--ui-text); background: #f3f4f5; }
+.message-actions, .timeline-actions { min-height: 30px; display: flex; align-items: center; gap: 8px; color: var(--ui-muted); font-size: 11px; }
+.message-actions { margin-top: 11px; }
+.timeline-actions { margin: -20px 0 22px; }
+.message-actions button, .timeline-actions button { min-height: 30px; display: inline-flex; align-items: center; gap: 5px; margin-left: -6px; padding: 2px 6px; border: 0; border-radius: 6px; color: var(--ui-muted); background: transparent; font-size: 11px; cursor: pointer; }
+.message-actions button:hover, .timeline-actions button:hover { color: var(--ui-text); background: #f3f4f5; }
 .failed-label { color: var(--ui-danger); }
 .thinking { display: flex; align-items: center; gap: 5px; height: 24px; }
 .thinking i { width: 4px; height: 4px; border-radius: 50%; background: var(--ui-accent); animation: thinking 1.1s ease-in-out infinite; }
@@ -184,15 +186,16 @@ button:disabled, input:disabled { cursor: not-allowed; }
 .work-request-actions button { min-height: 32px; }
 .work-request-actions .primary-button { display: inline-flex; align-items: center; gap: 4px; }
 .work-request-error { margin-top: 9px; color: var(--ui-danger); font-size: 11px; }
-.work-status-dot { width: 8px; height: 8px; border-radius: 50%; background: #aeb6bd; }
-.work-status-dot.active { background: var(--ui-accent); box-shadow: 0 0 0 4px var(--ui-accent-soft); animation: work-pulse 1.7s ease-in-out infinite; }
-@keyframes work-pulse { 50% { opacity: .5; } }
-.timeline-tool-group { margin: -8px 0 24px; color: #63717c; animation: message-in 190ms var(--ui-motion-ease); }
+.timeline-tool-group { margin: -12px 0 18px; color: #63717c; animation: message-in 190ms var(--ui-motion-ease); }
 .timeline-tool-group > summary { width: fit-content; min-height: 32px; display: flex; align-items: center; gap: 8px; padding: 0 4px 0 0; cursor: pointer; list-style: none; }
 .timeline-tool-group summary::-webkit-details-marker, .timeline-tool summary::-webkit-details-marker { display: none; }
 .timeline-tool-group > summary strong { color: #61717d; font-size: 12px; font-weight: 540; }
+.timeline-tool-group.is-running > summary strong, .timeline-tool-group.is-running > summary .timeline-disclosure { color: var(--ui-accent); }
 .timeline-disclosure { width: 17px; height: 22px; display: grid; place-items: center; flex: 0 0 auto; color: #9aa3aa; transition: transform 180ms var(--ui-motion-ease); }
 .timeline-tool-group[open] > summary .timeline-disclosure, .timeline-tool[open] > summary .timeline-disclosure { transform: rotate(90deg); }
+.timeline-tool-group, .timeline-tool { interpolate-size: allow-keywords; }
+.timeline-tool-group::details-content, .timeline-tool::details-content { block-size: 0; overflow: clip; opacity: 0; transition: block-size var(--ui-motion-disclosure) var(--ui-motion-ease), opacity 180ms ease, content-visibility var(--ui-motion-disclosure); transition-behavior: allow-discrete; }
+.timeline-tool-group[open]::details-content, .timeline-tool[open]::details-content { block-size: auto; opacity: 1; }
 .timeline-tool-list { margin-left: 8px; padding: 3px 0 2px 15px; border-left: 1px solid #e3e7ea; }
 .timeline-tool + .timeline-tool { border-top: 1px solid #eff1f2; }
 .timeline-tool > summary { min-height: 36px; display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none; }

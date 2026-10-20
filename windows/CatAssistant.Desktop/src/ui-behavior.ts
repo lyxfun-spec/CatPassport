@@ -74,16 +74,106 @@ export function buildWorkTimeline(
   for (const item of raw) {
     const previous = timeline.at(-1);
     if (item.kind === 'tool') {
-      if (previous?.kind === 'tools') previous.tools.push(item.tool);
+      if (previous?.kind === 'tools' && previous.tools[0]?.runId === item.tool.runId) previous.tools.push(item.tool);
       else timeline.push({ kind: 'tools', key: `tools-${item.tool.id}`, createdAt: item.createdAt, tools: [item.tool] });
       continue;
     }
     if (item.kind === 'artifact') {
-      if (previous?.kind === 'artifacts') previous.artifacts.push(item.artifact);
+      if (previous?.kind === 'artifacts' && previous.artifacts[0]?.runId === item.artifact.runId) previous.artifacts.push(item.artifact);
       else timeline.push({ kind: 'artifacts', key: `artifacts-${item.artifact.id}`, createdAt: item.createdAt, artifacts: [item.artifact] });
       continue;
     }
     timeline.push({ kind: 'message', key: item.key, createdAt: item.createdAt, message: item.message });
   }
   return timeline;
+}
+
+export function shouldShowWorkWaitingIndicator(
+  activeRunId: string | undefined,
+  messages: ConversationMessage[],
+  tools: WorkToolCall[],
+  hasPendingApproval: boolean
+): boolean {
+  if (!activeRunId || hasPendingApproval) return false;
+  const assistantIsStreaming = messages.some(message =>
+    message.runId === activeRunId && message.role === 'assistant' && message.status === 'streaming'
+  );
+  if (assistantIsStreaming) return false;
+  return !tools.some(tool =>
+    tool.runId === activeRunId && ['pending', 'waiting_approval', 'running'].includes(tool.state)
+  );
+}
+
+export function assistantCopyTargets(
+  messages: ConversationMessage[],
+  activeRunId?: string
+): Map<string, string> {
+  const runs = new Map<string, ConversationMessage[]>();
+  const standalone: ConversationMessage[] = [];
+  for (const message of messages) {
+    if (message.role !== 'assistant' || !message.content.trim()) continue;
+    if (!message.runId) { if (message.status !== 'streaming') standalone.push(message); continue; }
+    const grouped = runs.get(message.runId) ?? [];
+    grouped.push(message);
+    runs.set(message.runId, grouped);
+  }
+
+  const targets = new Map<string, string>();
+  for (const message of standalone) targets.set(message.id, message.content);
+  for (const [runId, output] of runs) {
+    if (runId === activeRunId) continue;
+    const last = output.at(-1);
+    if (last) targets.set(last.id, output.map(message => message.content.trim()).filter(Boolean).join('\n\n'));
+  }
+  return targets;
+}
+
+export function workTimelineCopyActions(
+  timeline: WorkTimelineItem[],
+  messages: ConversationMessage[],
+  activeRunId?: string
+): Map<string, string> {
+  const copyTargets = assistantCopyTargets(messages, activeRunId);
+  const lastItemByRun = new Map<string, string>();
+  for (const item of timeline) {
+    if (item.kind === 'message' && item.message.runId) lastItemByRun.set(item.message.runId, item.key);
+    if (item.kind === 'tools') for (const tool of item.tools) lastItemByRun.set(tool.runId, item.key);
+    if (item.kind === 'artifacts') for (const artifact of item.artifacts) {
+      if (artifact.runId) lastItemByRun.set(artifact.runId, item.key);
+    }
+  }
+
+  const actions = new Map<string, string>();
+  for (const message of messages) {
+    const content = copyTargets.get(message.id);
+    if (!content) continue;
+    const targetKey = message.runId ? lastItemByRun.get(message.runId) : message.id;
+    if (targetKey) actions.set(targetKey, content);
+  }
+  return actions;
+}
+
+export interface WorkToolGroupSummary {
+  label: string;
+  isActive: boolean;
+}
+
+export function summarizeWorkToolGroup(tools: WorkToolCall[]): WorkToolGroupSummary {
+  const active = tools.filter(tool => ['pending', 'waiting_approval', 'running'].includes(tool.state)).length;
+  const completed = tools.filter(tool => tool.state === 'completed').length;
+  const notExecuted = tools.filter(tool =>
+    ['rejected', 'cancelled'].includes(tool.state) || tool.errorCode === 'permission_rejected'
+  ).length;
+  const failed = Math.max(0, tools.length - active - completed - notExecuted);
+  if (active > 0) return { label: `工具调用 · ${completed}/${tools.length} 执行中`, isActive: true };
+
+  const parts = [
+    completed > 0 ? `${completed} 项已完成` : '',
+    notExecuted > 0 ? `${notExecuted} 项未执行` : '',
+    failed > 0 ? `${failed} 项失败` : ''
+  ].filter(Boolean);
+  return {
+    label: `工具调用 · ${parts.join(' · ') || '已结束'}`,
+    isActive: false
+  };
 }

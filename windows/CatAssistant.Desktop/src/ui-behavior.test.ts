@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ConversationMessage, WorkArtifact, WorkToolCall } from './shared';
-import { buildWorkTimeline, clampTextareaHeight, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldSubmitComposer } from './ui-behavior';
+import { assistantCopyTargets, buildWorkTimeline, clampTextareaHeight, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldShowWorkWaitingIndicator, shouldSubmitComposer, summarizeWorkToolGroup, workTimelineCopyActions } from './ui-behavior';
 
 describe('composer keyboard behavior', () => {
   it('submits on plain Enter', () => {
@@ -80,5 +80,78 @@ describe('Work timeline', () => {
 
     expect(timeline).toHaveLength(1);
     expect(timeline[0].kind === 'artifacts' && timeline[0].artifacts).toHaveLength(2);
+  });
+});
+
+describe('Work transient activity', () => {
+  const message = (id: string, role: 'user' | 'assistant', status: ConversationMessage['status'], content: string, runId = 'run-1'): ConversationMessage => ({
+    id, conversationId: 'work-1', role, source: 'runtime', status, sequence: 1, content,
+    createdAt: '2026-01-01T00:00:00Z', runId
+  });
+  const tool = (state: string): WorkToolCall => ({
+    id: `tool-${state}`, runId: 'run-1', roundId: 'round-1', batchId: 'batch-1', toolCallId: `call-${state}`,
+    ordinal: 0, toolName: 'read_file', argumentsJson: '{}', state, createdAt: '2026-01-01T00:00:01Z'
+  });
+
+  it('shows waiting while a run has no visible streaming output or active tool', () => {
+    expect(shouldShowWorkWaitingIndicator('run-1', [message('user-1', 'user', 'complete', '开始')], [], false)).toBe(true);
+    expect(shouldShowWorkWaitingIndicator('run-1', [message('assistant-1', 'assistant', 'complete', '正在处理')], [tool('completed')], false)).toBe(true);
+  });
+
+  it('hides waiting during streaming, tool execution, and approval', () => {
+    expect(shouldShowWorkWaitingIndicator('run-1', [message('assistant-1', 'assistant', 'streaming', '正在')], [], false)).toBe(false);
+    expect(shouldShowWorkWaitingIndicator('run-1', [], [tool('running')], false)).toBe(false);
+    expect(shouldShowWorkWaitingIndicator('run-1', [], [], true)).toBe(false);
+  });
+
+  it('places one copy target at the end of each completed run', () => {
+    const messages = [
+      message('assistant-1', 'assistant', 'complete', '先读取资料。'),
+      message('assistant-2', 'assistant', 'complete', '已经生成结果。'),
+      message('assistant-3', 'assistant', 'complete', '另一个回答。', 'run-2')
+    ];
+    const targets = assistantCopyTargets(messages);
+
+    expect([...targets.keys()]).toEqual(['assistant-2', 'assistant-3']);
+    expect(targets.get('assistant-2')).toBe('先读取资料。\n\n已经生成结果。');
+  });
+
+  it('does not expose a copy action before the active run finishes', () => {
+    const targets = assistantCopyTargets([
+      message('assistant-1', 'assistant', 'complete', '阶段输出。')
+    ], 'run-1');
+    expect(targets.size).toBe(0);
+  });
+
+  it('places the run copy action after trailing tools', () => {
+    const messages = [message('assistant-1', 'assistant', 'interrupted', '阶段输出。')];
+    const tools = [tool('cancelled')];
+    const timeline = buildWorkTimeline(messages, tools, []);
+    const actions = workTimelineCopyActions(timeline, messages);
+
+    expect([...actions.keys()]).toEqual(['tools-tool-cancelled']);
+    expect(actions.get('tools-tool-cancelled')).toBe('阶段输出。');
+  });
+});
+
+describe('Work tool group summary', () => {
+  const tool = (id: string, state: string, errorCode?: string): WorkToolCall => ({
+    id, runId: 'run-1', roundId: 'round-1', batchId: 'batch-1', toolCallId: `call-${id}`,
+    ordinal: 0, toolName: 'read_file', argumentsJson: '{}', state, errorCode, createdAt: '2026-01-01T00:00:01Z'
+  });
+
+  it('uses one consistent format while tools are running', () => {
+    expect(summarizeWorkToolGroup([tool('done', 'completed'), tool('active', 'running')])).toEqual({
+      label: '工具调用 · 1/2 执行中', isActive: true
+    });
+  });
+
+  it('uses the same format for completed and mixed outcomes', () => {
+    expect(summarizeWorkToolGroup([tool('one', 'completed'), tool('two', 'completed')]).label).toBe('工具调用 · 2 项已完成');
+    expect(summarizeWorkToolGroup([
+      tool('done', 'completed'), tool('denied', 'failed', 'permission_rejected'), tool('broken', 'failed')
+    ])).toEqual({
+      label: '工具调用 · 1 项已完成 · 1 项未执行 · 1 项失败', isActive: false
+    });
   });
 });

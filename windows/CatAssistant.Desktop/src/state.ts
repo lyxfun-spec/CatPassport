@@ -94,6 +94,20 @@ function reduceConversationEvent(state: UiState, event: ConversationEvent): UiSt
       : message);
     return { ...state, bootstrap: { ...bootstrap, activeConversation: { ...detail, messages, activeRunId: event.runId } } };
   }
+  if (event.type === 'message.completed' && event.message) {
+    const completed = event.message;
+    const index = detail.messages.findIndex(message => message.id === completed.id);
+    const messages = index < 0 ? [...detail.messages, completed] : detail.messages.map(message =>
+      message.id === completed.id ? completed : message
+    );
+    return {
+      ...state,
+      bootstrap: {
+        ...bootstrap,
+        activeConversation: { ...detail, messages, activeRunId: event.runId ?? detail.activeRunId }
+      }
+    };
+  }
   if (event.type === 'message.interrupted' && event.messageId) {
     const messages = detail.messages.map(message => message.id === event.messageId
       ? { ...message, status: 'interrupted' as const }

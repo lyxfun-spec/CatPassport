@@ -38,6 +38,19 @@ describe('conversation stream state', () => {
     expect(redelivered.bootstrap?.activeConversation?.messages.at(-1)?.content).toBe('正在生成');
   });
 
+  it('marks streamed text complete while the run continues', () => {
+    const completed: ConversationMessage = {
+      ...bootstrap.activeConversation!.messages[0], status: 'complete', content: '文字阶段已完成'
+    };
+    let state = reduceBackendEvent(initialState, { event: 'ui.bootstrap', data: bootstrap });
+    state = reduceBackendEvent(state, { event: 'message.completed', data: {
+      type: 'message.completed', conversationId: 'chat-1', messageId: completed.id, runId: 'run-1', message: completed
+    } });
+
+    expect(state.bootstrap?.activeConversation?.messages[0]).toEqual(completed);
+    expect(state.bootstrap?.activeConversation?.activeRunId).toBe('run-1');
+  });
+
   it('keeps assembled stream text when a refresh snapshot is older', () => {
     let state = reduceBackendEvent(initialState, { event: 'ui.bootstrap', data: bootstrap });
     state = reduceBackendEvent(state, { event: 'message.delta', data: { type: 'message.delta', conversationId: 'chat-1', messageId: 'assistant-1', runId: 'run-1', delta: '环境已确认' } });
