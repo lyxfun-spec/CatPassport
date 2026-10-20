@@ -4,6 +4,8 @@
 #include <string.h>
 
 #include "lvgl.h"
+#include "cat_markdown.h"
+#include "cat_protocol.h"
 #include "cat_sprite_assets.h"
 
 LV_FONT_DECLARE(cat_font_16);
@@ -29,6 +31,7 @@ static cat_app_state_t s_cat_state = CAT_STATE_DISCONNECTED;
 static cat_app_state_t s_layout_state = CAT_STATE_DISCONNECTED;
 static uint8_t s_animation_tick;
 static bool s_follow_latest = true;
+static char s_markdown_text[CAT_ANSWER_MAX + CAT_MARKDOWN_RENDER_EXTRA + 1U];
 
 /* 预录阶段保持原页面，超过 300 ms 后才切换到“正在听”。 */
 static cat_app_state_t display_state(const cat_app_model_t *model)
@@ -137,6 +140,7 @@ void cat_ui_init(void)
     lv_obj_set_style_text_font(s_text, &cat_font_16, 0);
     lv_obj_set_style_text_color(s_text, lv_color_hex(COLOR_INK), 0);
     lv_label_set_long_mode(s_text, LV_LABEL_LONG_WRAP);
+    lv_label_set_recolor(s_text, false);
     lv_label_set_text(s_text, "");
 
     s_hint = lv_label_create(screen);
@@ -218,6 +222,21 @@ bool cat_ui_scroll_text_pixels(int pixels)
     return target != current;
 }
 
+void cat_ui_settle_scroll(void)
+{
+    if (s_card == NULL || lv_obj_has_flag(s_card, LV_OBJ_FLAG_HIDDEN)) return;
+
+    /*
+     * The ST7789 is updated through a partial, single DMA buffer.  A moving
+     * viewport can therefore leave the panel between two scroll frames until
+     * LVGL's next refresh timer fires.  Redraw the final viewport immediately
+     * after inertia stops so text rows and Markdown colors become one coherent
+     * frame without a visible settling delay.
+     */
+    lv_obj_invalidate(s_card);
+    lv_refr_now(lv_obj_get_display(s_card));
+}
+
 void cat_ui_render(const cat_app_model_t *model, const char *text, size_t text_length,
                    int battery_percent, int minute_of_day)
 {
@@ -254,9 +273,16 @@ void cat_ui_render(const cat_app_model_t *model, const char *text, size_t text_l
     else strcpy(battery, "--%");
     lv_label_set_text(s_battery, battery);
 
-    if (text != NULL && text_length > 0) {
+    if (text != NULL && text_length > 0 && answer_text_state(shown_state)) {
+        const cat_markdown_result_t markdown =
+            cat_markdown_format(text, text_length, s_markdown_text, sizeof(s_markdown_text));
+        lv_label_set_recolor(s_text, markdown.formatted);
+        lv_label_set_text(s_text, s_markdown_text);
+    } else if (text != NULL && text_length > 0) {
+        lv_label_set_recolor(s_text, false);
         lv_label_set_text(s_text, text);
     } else {
+        lv_label_set_recolor(s_text, false);
         lv_label_set_text(s_text, "");
     }
     if (!lv_obj_has_flag(s_card, LV_OBJ_FLAG_HIDDEN)) {

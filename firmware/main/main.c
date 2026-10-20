@@ -35,6 +35,7 @@
 #define BLE_SEND_RETRY_MS 5U
 #define OK_HOLD_THRESHOLD_MS 300ULL
 #define INTERACTION_TICK_MS 16U
+#define SCROLL_RENDER_PERIOD_MS 40U
 #define BATTERY_REFRESH_MS 10000ULL
 #define HELLO_RETRY_MS 2000ULL
 #define NOTICE_DURATION_MS 1500ULL
@@ -90,6 +91,7 @@ static bool s_ok_held;
 static uint64_t s_ok_pressed_at_ms;
 static uint64_t s_scroll_tick_ms;
 static cat_scroll_motion_t s_scroll_motion;
+static bool s_ui_refresh_pending;
 
 static void apply(cat_app_event_t event);
 
@@ -166,10 +168,21 @@ static uint16_t next_message_id(void)
 
 static void render(void)
 {
+    /*
+     * Rebuilding a long, recolored label while its viewport is moving mixes a
+     * text-layout update with the panel's partial scroll redraw.  Keep the
+     * visible snapshot stable and coalesce streaming/clock/battery updates
+     * until scrolling has settled.
+     */
+    if (cat_scroll_is_active(&s_scroll_motion)) {
+        s_ui_refresh_pending = true;
+        return;
+    }
     if (!bsp_lvgl_lock(200)) return;
     cat_ui_render(&s_model, s_text, s_text_length, s_battery,
                   cat_clock_minute_of_day(&s_clock, monotonic_ms()));
     bsp_lvgl_unlock();
+    s_ui_refresh_pending = false;
 }
 
 static bool scroll_text_pixels(int pixels)
@@ -178,6 +191,17 @@ static bool scroll_text_pixels(int pixels)
     const bool moved = cat_ui_scroll_text_pixels(pixels);
     bsp_lvgl_unlock();
     return moved;
+}
+
+static void finish_scroll_frame(void)
+{
+    if (s_ui_refresh_pending) {
+        render();
+        return;
+    }
+    if (!bsp_lvgl_lock(200)) return;
+    cat_ui_settle_scroll();
+    bsp_lvgl_unlock();
 }
 
 static void set_text(const uint8_t *text, size_t length)
@@ -500,8 +524,10 @@ static void update_interactions(uint64_t now)
     if (s_ok_held && s_model.state != CAT_STATE_RECORDING) s_ok_held = false;
 
     if (!text_is_scrollable()) {
+        const bool was_active = cat_scroll_is_active(&s_scroll_motion);
         cat_scroll_stop(&s_scroll_motion);
         s_scroll_tick_ms = now;
+        if (was_active) finish_scroll_frame();
         return;
     }
     if (!cat_scroll_is_active(&s_scroll_motion)) {
@@ -511,9 +537,11 @@ static void update_interactions(uint64_t now)
     const uint32_t elapsed = s_scroll_tick_ms == 0 || now <= s_scroll_tick_ms
                                  ? INTERACTION_TICK_MS
                                  : (uint32_t)(now - s_scroll_tick_ms);
+    if (elapsed < SCROLL_RENDER_PERIOD_MS) return;
     s_scroll_tick_ms = now;
     const int32_t pixels = cat_scroll_update(&s_scroll_motion, elapsed);
     if (pixels != 0 && !scroll_text_pixels(pixels)) cat_scroll_stop(&s_scroll_motion);
+    if (!cat_scroll_is_active(&s_scroll_motion)) finish_scroll_frame();
 }
 
 static void handle_message(const cat_protocol_message_t *message)

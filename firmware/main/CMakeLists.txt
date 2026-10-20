@@ -4,6 +4,7 @@ idf_component_register(
          "cat_ble.c"
          "cat_clock.c"
          "cat_font_16.c"
+         "cat_markdown.c"
          "cat_protocol.c"
          "cat_scroll.c"
          "cat_screen.c"

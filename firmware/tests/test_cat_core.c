@@ -7,6 +7,7 @@
 
 #include "cat_adpcm.h"
 #include "cat_clock.h"
+#include "cat_markdown.h"
 #include "cat_protocol.h"
 #include "cat_scroll.h"
 #include "cat_screen.h"
@@ -51,6 +52,43 @@ static void test_clock(void)
     assert(cat_clock_minute_of_day(&clock, 2000) == 23 * 60 + 59);
     assert(cat_clock_minute_of_day(&clock, 32000) == 0);
     assert(cat_clock_minute_of_day(&clock, 92000) == 1);
+}
+
+static void test_markdown(void)
+{
+    char output[1024];
+    cat_markdown_result_t result = cat_markdown_format(
+        "# 标题\n普通 **重点** 和 *提示*、`code`。\n"
+        "- 第一项\n2. 第二项\n> 引用\n[官网](https://example.com)\n"
+        "```c\nint value = 1; # comment\n```\n---",
+        strlen("# 标题\n普通 **重点** 和 *提示*、`code`。\n"
+               "- 第一项\n2. 第二项\n> 引用\n[官网](https://example.com)\n"
+               "```c\nint value = 1; # comment\n```\n---"),
+        output, sizeof(output));
+    assert(result.formatted && !result.truncated);
+    assert(strstr(output, "#59C9B2 标题#") != NULL);
+    assert(strstr(output, "**") == NULL);
+    assert(strstr(output, "#9CCFD8 code#") != NULL);
+    assert(strstr(output, "https://example.com") == NULL);
+    assert(strstr(output, "[code: c]") != NULL);
+    assert(strstr(output, "\xef\xbc\x83 comment") != NULL);
+    assert(strstr(output, "----------------") != NULL);
+
+    result = cat_markdown_format("未闭合 **内容", strlen("未闭合 **内容"),
+                                 output, sizeof(output));
+    assert(!result.formatted && !result.truncated);
+    assert(strcmp(output, "未闭合 **内容") == 0);
+
+    result = cat_markdown_format("```\npartial", strlen("```\npartial"),
+                                 output, sizeof(output));
+    assert(result.formatted && !result.truncated);
+    assert(strstr(output, "#9CCFD8   partial#") != NULL);
+
+    char small[12];
+    result = cat_markdown_format("# 这是一个很长的标题", strlen("# 这是一个很长的标题"),
+                                 small, sizeof(small));
+    assert(result.formatted && result.truncated);
+    assert(small[sizeof(small) - 1] == '\0' || strlen(small) < sizeof(small));
 }
 
 static void test_screen_timeout(void)
@@ -215,6 +253,7 @@ static void test_scroll_motion(void)
 int main(void)
 {
     test_protocol();
+    test_markdown();
     test_clock();
     test_screen_timeout();
     test_adpcm();
