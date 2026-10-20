@@ -108,7 +108,8 @@ public sealed class ConversationServiceTests
         Assert.Equal(detail.Conversation.Id, fixture.Service.DesktopActiveConversationId);
         Assert.Equal("chat", detail.Conversation.Mode);
         Assert.Contains(detail.Messages, message => message.Role == "user" && message.Content == "你好世界");
-        Assert.NotEqual("fallback", detail.Conversation.TitleSource);
+        Assert.Equal("你好世界", detail.Conversation.Title);
+        Assert.Equal("fallback", detail.Conversation.TitleSource);
     }
 
     [Fact]
@@ -167,6 +168,111 @@ public sealed class ConversationServiceTests
         var conversation = (await fixture.Service.GetAsync(id)).Conversation;
         Assert.Equal("我的自定义名称", conversation.Title);
         Assert.Equal("user", conversation.TitleSource);
+    }
+
+    [Fact]
+    public async Task TurnThatOnlyProposesWorkStillGetsATitle()
+    {
+        await using var fixture = await ConversationFixture.CreateAsync();
+        var titled = WaitForGeneratedTitleAsync(fixture);
+        var id = fixture.Service.DesktopActiveConversationId!;
+
+        await fixture.Service.SendAsync(id, "把聊天内容整理成一份演示文稿", "desktop");
+        await fixture.Provider.WaitForCallsAsync(1);
+        await fixture.Provider.EmitAsync(0, new ChatStreamChunk(ToolCall: new ChatToolCall(
+            "call-work-1",
+            "request_work",
+            """{"title":"项目演示文稿","prompt":"整理当前讨论并制作演示文稿。","contextSummary":"用户希望把当前讨论整理成演示文稿。"}""")));
+        fixture.Provider.CompleteStream(0);
+
+        Assert.Equal("自动生成的标题", await titled);
+        Assert.Equal(("把聊天内容整理成一份演示文稿", ""), fixture.Provider.TitleRequests.Single());
+    }
+
+    [Fact]
+    public async Task StoppedFirstAnswerStillLeadsToATitle()
+    {
+        await using var fixture = await ConversationFixture.CreateAsync();
+        var titled = WaitForGeneratedTitleAsync(fixture);
+        var deltaSeen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Service.Changed += (_, update) =>
+        {
+            if (update.Type == "message.delta") deltaSeen.TrySetResult();
+        };
+        var id = fixture.Service.DesktopActiveConversationId!;
+
+        await fixture.Service.SendAsync(id, "写一篇长文", "desktop");
+        await fixture.Provider.WaitForCallsAsync(1);
+        await fixture.Provider.EmitAsync(0, new ChatStreamChunk(Delta: "写到一半"));
+        await deltaSeen.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await fixture.Service.CancelAsync(id);
+
+        Assert.Equal("自动生成的标题", await titled);
+        Assert.Equal(("写一篇长文", "写到一半"), fixture.Provider.TitleRequests.Single());
+    }
+
+    [Fact]
+    public async Task TitleGenerationRetriesAfterATransientFailure()
+    {
+        await using var fixture = await ConversationFixture.CreateAsync();
+        fixture.Provider.FailTitleAttempts(1);
+        var titled = WaitForGeneratedTitleAsync(fixture);
+
+        var detail = await fixture.Service.StartAsync("chat", "帮我写一首关于秋天的诗", "desktop");
+        await fixture.Provider.WaitForCallsAsync(1);
+        await fixture.Provider.EmitAsync(0, new ChatStreamChunk(Delta: "秋天来了。"));
+        fixture.Provider.CompleteStream(0);
+
+        Assert.Equal("自动生成的标题", await titled);
+        Assert.Equal(2, fixture.Provider.TitleRequests.Count);
+        Assert.Equal("自动生成的标题", (await fixture.Service.GetAsync(detail.Conversation.Id)).Conversation.Title);
+    }
+
+    [Fact]
+    public async Task UntitledConversationKeepsTheOpeningMessageAsItsFallbackTitle()
+    {
+        await using var fixture = await ConversationFixture.CreateAsync();
+        fixture.Provider.FailTitleAttempts(99);
+        var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Service.Changed += (_, update) =>
+        {
+            if (update.Type == "message.completed") completed.TrySetResult();
+        };
+        var id = fixture.Service.DesktopActiveConversationId!;
+
+        await fixture.Service.SendAsync(id, "第一条", "desktop");
+        await fixture.Provider.WaitForCallsAsync(1);
+        fixture.Provider.CompleteStream(0);
+        await completed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        await fixture.Service.SendAsync(id, "第二条", "desktop");
+
+        var conversation = (await fixture.Service.GetAsync(id)).Conversation;
+        Assert.Equal("第一条", conversation.Title);
+        Assert.Equal("fallback", conversation.TitleSource);
+    }
+
+    [Fact]
+    public async Task WorkConversationIsTitledFromItsRequest()
+    {
+        await using var fixture = await ConversationFixture.CreateAsync(enableWork: true);
+        var titled = WaitForGeneratedTitleAsync(fixture);
+
+        await fixture.Service.StartAsync("work", "整理下载文件夹里的发票", "desktop");
+
+        Assert.Equal("自动生成的标题", await titled);
+        Assert.Equal("整理下载文件夹里的发票", fixture.Provider.TitleRequests.Single().User);
+    }
+
+    private static Task<string> WaitForGeneratedTitleAsync(ConversationFixture fixture)
+    {
+        var source = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Service.Changed += (_, update) =>
+        {
+            if (update.Type == "conversation.updated" && update.Conversation?.TitleSource == "generated")
+                source.TrySetResult(update.Conversation.Title);
+        };
+        return source.Task.WaitAsync(TimeSpan.FromSeconds(8));
     }
 
     [Fact]
@@ -507,6 +613,9 @@ public sealed class ConversationServiceTests
         private TaskCompletionSource _changed = NewSignal();
         private TaskCompletionSource _titleChanged = NewSignal();
         private string _titleResult = "自动生成的标题";
+        private int _titleFailures;
+
+        public IReadOnlyList<(string User, string Assistant)> TitleRequests { get { lock (_lock) return _titles.ToArray(); } }
 
         public IReadOnlyList<IReadOnlyList<ConversationMessage>> Histories { get { lock (_lock) return _histories.ToArray(); } }
 
@@ -541,9 +650,16 @@ public sealed class ConversationServiceTests
                 _titles.Add((userMessage, assistantMessage));
                 _titleChanged.TrySetResult();
                 _titleChanged = NewSignal();
+                if (_titleFailures > 0)
+                {
+                    _titleFailures--;
+                    return Task.FromException<string>(new InvalidOperationException("标题服务暂时不可用。"));
+                }
                 return Task.FromResult(_titleResult);
             }
         }
+
+        public void FailTitleAttempts(int count) { lock (_lock) _titleFailures = count; }
 
         public void CompleteTitle(string value) { lock (_lock) _titleResult = value; }
 

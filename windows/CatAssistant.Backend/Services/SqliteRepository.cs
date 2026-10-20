@@ -7,6 +7,9 @@ namespace CatAssistant.Backend.Services;
 public sealed class SqliteRepository
 {
     private const string WorkRequestSelect = "SELECT id,source_conversation_id,source_message_id,source_run_id,tool_call_id,title,prompt,context_summary,state,target_conversation_id,error_message,created_utc,updated_utc FROM work_requests";
+    // A conversation keeps this title and title_source='fallback' until a model-generated title lands, so
+    // 'fallback' is the only durable marker for "still needs a title".
+    internal const string UntitledTitle = "新对话";
     private readonly string _connectionString;
 
     public SqliteRepository(string? databasePath = null)
@@ -287,7 +290,7 @@ public sealed class SqliteRepository
         if (mode is not ("chat" or "work")) throw new ArgumentOutOfRangeException(nameof(mode));
         if (titleSource is not ("fallback" or "generated" or "user")) throw new ArgumentOutOfRangeException(nameof(titleSource));
         var now = DateTimeOffset.UtcNow;
-        var normalizedTitle = title is null ? "新对话" : NormalizeTitle(title);
+        var normalizedTitle = title is null ? UntitledTitle : NormalizeTitle(title);
         var conversation = new ConversationSummary(Guid.NewGuid().ToString("N"), mode, normalizedTitle, titleSource, now, now, false, originConversationId);
         await using var db = await OpenAsync();
         var command = db.CreateCommand();
@@ -1132,7 +1135,7 @@ public sealed class SqliteRepository
     internal static string FallbackTitle(string content)
     {
         var title = string.Join(' ', content.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
-        if (title.Length == 0) return "新对话";
+        if (title.Length == 0) return UntitledTitle;
         return title.Length <= 28 ? title : title[..28] + "…";
     }
 

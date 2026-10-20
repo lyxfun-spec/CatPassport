@@ -11,6 +11,9 @@ public sealed class ConversationService : IAsyncDisposable
 {
     // The streamed row is only a crash checkpoint; the completion, failure and interrupt paths all store the full text.
     private static readonly TimeSpan StreamPersistInterval = TimeSpan.FromMilliseconds(250);
+    private const int TitleAttemptCount = 2;
+    private static readonly TimeSpan TitleRequestTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan TitleRetryDelay = TimeSpan.FromSeconds(2);
 
     private sealed class ActiveRun(string id, string conversationId, string triggerMessageId, string assistantMessageId, CancellationTokenSource cancellation)
     {
@@ -36,6 +39,7 @@ public sealed class ConversationService : IAsyncDisposable
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new();
     private readonly ConcurrentDictionary<string, ActiveRun> _runs = new();
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _workRequestGates = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, Task> _titlesInFlight = new(StringComparer.Ordinal);
     private readonly object _stateLock = new();
     private string? _desktopActiveConversationId;
     private string? _deviceActiveConversationId;
@@ -328,12 +332,16 @@ public sealed class ConversationService : IAsyncDisposable
         {
             if (_workAgent is null) throw new InvalidOperationException("Work Runtime 尚未启用。");
             if (source != "desktop") throw new InvalidOperationException("Work 第一版只接受桌面消息。");
-            if (conversation.TitleSource == "fallback")
+            if (IsUntitled(conversation))
             {
-                await _repository.RenameConversationAsync(conversationId, SqliteRepository.FallbackTitle(text), "generated");
+                await _repository.RenameConversationAsync(conversationId, SqliteRepository.FallbackTitle(text), "fallback");
                 Publish(new ConversationEvent("conversation.updated", conversationId, Conversation: await _repository.GetConversationAsync(conversationId)));
             }
-            return await _workAgent.SendAsync(conversationId, text, source);
+            var detail = await _workAgent.SendAsync(conversationId, text, source);
+            // A Work conversation is titled from its request alone; the answer lands minutes later and the
+            // sidebar cannot stay on a truncated prompt that long.
+            ScheduleTitleGeneration(conversationId);
+            return detail;
         }
         if (conversation.Mode != "chat") throw new InvalidOperationException("该对话不使用 Chat Runtime。");
         var gate = Gate(conversationId);
@@ -343,9 +351,9 @@ public sealed class ConversationService : IAsyncDisposable
         {
             await InterruptLockedAsync(conversationId);
             var user = await _repository.AddMessageAsync(conversationId, "user", source, "complete", text);
-            if (conversation.TitleSource == "fallback")
+            if (IsUntitled(conversation))
             {
-                await _repository.RenameConversationAsync(conversationId, SqliteRepository.FallbackTitle(text), "generated");
+                await _repository.RenameConversationAsync(conversationId, SqliteRepository.FallbackTitle(text), "fallback");
                 conversation = (await _repository.GetConversationAsync(conversationId))!;
             }
             var runId = Guid.NewGuid().ToString("N");
@@ -436,9 +444,7 @@ public sealed class ConversationService : IAsyncDisposable
             var message = (await _repository.LoadMessagesAsync(run.ConversationId)).SingleOrDefault(item => item.Id == run.AssistantMessageId);
             if (message is not null) Publish(new ConversationEvent("message.completed", run.ConversationId, run.AssistantMessageId, run.Id, Message: message, Status: "completed"));
             else Publish(new ConversationEvent("run.completed", run.ConversationId, RunId: run.Id, Status: "completed"));
-            var userMessages = history.Where(item => item.Role == "user").Take(2).ToArray();
-            if (userMessages.Length == 1 && !string.IsNullOrWhiteSpace(content))
-                _ = GenerateTitleObservedAsync(run.ConversationId, userMessages[0].Content, CitationMarkers.Strip(content));
+            ScheduleTitleGeneration(run.ConversationId);
         }
         finally
         {
@@ -459,6 +465,7 @@ public sealed class ConversationService : IAsyncDisposable
             await _repository.UpdateMessageAsync(run.AssistantMessageId, content, "failed");
             await _repository.FinishRunAsync(run.Id, "failed", "error", ErrorCode(error));
             Publish(new ConversationEvent("run.failed", run.ConversationId, run.AssistantMessageId, run.Id, Status: "failed", Error: error.Message));
+            ScheduleTitleGeneration(run.ConversationId);
         }
         finally
         {
@@ -518,6 +525,9 @@ public sealed class ConversationService : IAsyncDisposable
         else await _repository.UpdateMessageAsync(previous.AssistantMessageId, content, "interrupted");
         await _repository.FinishRunAsync(previous.Id, "interrupted", "interrupted");
         Publish(new ConversationEvent("message.interrupted", conversationId, previous.AssistantMessageId, previous.Id, Status: "interrupted"));
+        // A stopped first answer is still answer enough to name the conversation; without this the title
+        // would wait for a later turn that may never come.
+        ScheduleTitleGeneration(conversationId);
     }
 
     private static IReadOnlyList<ConversationMessage> BuildContext(IReadOnlyList<ConversationMessage> messages)
@@ -539,21 +549,65 @@ public sealed class ConversationService : IAsyncDisposable
         return selected;
     }
 
-    private async Task GenerateTitleObservedAsync(string conversationId, string userMessage, string assistantMessage)
+    private static bool IsUntitled(ConversationSummary conversation) =>
+        conversation.TitleSource == "fallback" && conversation.Title == SqliteRepository.UntitledTitle;
+
+    // Fire-and-forget while the app runs, but tracked so shutdown drains the request instead of abandoning a
+    // conversation on its truncated title.
+    private void ScheduleTitleGeneration(string conversationId)
+    {
+        var settled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_titlesInFlight.TryAdd(conversationId, settled.Task)) return;
+        _ = Task.Run(async () =>
+        {
+            try { await GenerateTitleAsync(conversationId); }
+            finally { _titlesInFlight.TryRemove(conversationId, out _); settled.SetResult(); }
+        });
+    }
+
+    private async Task GenerateTitleAsync(string conversationId)
     {
         try
         {
             var conversation = await _repository.GetConversationAsync(conversationId);
-            if (conversation is null || conversation.TitleSource == "user") return;
+            if (conversation is null || conversation.TitleSource != "fallback") return;
+            var history = await _repository.LoadMessagesAsync(conversationId);
+            var userMessage = history.FirstOrDefault(item => item.Role == "user");
+            if (userMessage is null) return;
+            var assistantMessage = history
+                .Where(item => item.Role == "assistant")
+                .Select(item => item with { Content = CitationMarkers.Strip(item.Content) })
+                .FirstOrDefault(item => !string.IsNullOrWhiteSpace(item.Content));
             var settings = _settings();
-            var candidate = await _provider.GenerateTitleAsync(userMessage, assistantMessage, settings.ChatModel, _apiKey(), _lifetime);
-            var title = NormalizeGeneratedTitle(candidate);
-            if (title is null || !await _repository.TrySetGeneratedTitleAsync(conversationId, title)) return;
+            var apiKey = _apiKey();
+            if (string.IsNullOrWhiteSpace(apiKey)) return;
+            string? title = null;
+            string? failure = null;
+            for (var attempt = 1; attempt <= TitleAttemptCount && title is null; attempt++)
+            {
+                if (attempt > 1) await Task.Delay(TitleRetryDelay * (attempt - 1), _lifetime);
+                try
+                {
+                    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(_lifetime);
+                    timeout.CancelAfter(TitleRequestTimeout);
+                    title = NormalizeGeneratedTitle(await _provider.GenerateTitleAsync(
+                        userMessage.Content, assistantMessage?.Content ?? "", settings.ChatModel, apiKey, timeout.Token));
+                }
+                catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { return; }
+                catch (Exception error) { failure = error.Message; }
+            }
+            if (title is null)
+            {
+                // Stay on 'fallback': the next completed turn retries this conversation.
+                Console.Error.WriteLine($"[title] conversation {conversationId} left untitled after {TitleAttemptCount} attempts: {failure}");
+                return;
+            }
+            if (!await _repository.TrySetGeneratedTitleAsync(conversationId, title)) return;
             conversation = await _repository.GetConversationAsync(conversationId);
             Publish(new ConversationEvent("conversation.updated", conversationId, Conversation: conversation));
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
-        catch { }
+        catch (Exception error) { Console.Error.WriteLine($"[title] conversation {conversationId}: {error.Message}"); }
     }
 
     internal static string? NormalizeGeneratedTitle(string value)
@@ -616,6 +670,8 @@ public sealed class ConversationService : IAsyncDisposable
             await _repository.FinishRunAsync(run.Id, "interrupted", "interrupted");
         }));
         _runs.Clear();
+        await Task.WhenAll(_titlesInFlight.Values);
+        _titlesInFlight.Clear();
         foreach (var gate in _gates.Values) gate.Dispose();
         _gates.Clear();
         foreach (var gate in _workRequestGates.Values) gate.Dispose();
