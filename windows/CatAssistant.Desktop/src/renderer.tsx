@@ -478,10 +478,66 @@ const MessageItem = memo(function MessageItem({ message, citations }: { message:
 });
 
 const markdownPlugins = [remarkCitations];
+
+const codeLanguageLabels: Record<string, string> = {
+  c: 'C', cpp: 'C++', 'c++': 'C++', csharp: 'C#', 'c#': 'C#', cs: 'C#',
+  js: 'JavaScript', javascript: 'JavaScript', jsx: 'JSX', ts: 'TypeScript', typescript: 'TypeScript', tsx: 'TSX',
+  py: 'Python', python: 'Python', sh: 'Shell', bash: 'Shell', shell: 'Shell', zsh: 'Shell',
+  ps1: 'PowerShell', powershell: 'PowerShell', json: 'JSON', yaml: 'YAML', yml: 'YAML', xml: 'XML',
+  html: 'HTML', css: 'CSS', sql: 'SQL', go: 'Go', rust: 'Rust', java: 'Java', kotlin: 'Kotlin',
+  swift: 'Swift', lua: 'Lua', ruby: 'Ruby', php: 'PHP', dart: 'Dart', diff: 'Diff',
+  md: 'Markdown', markdown: 'Markdown', text: '纯文本', txt: '纯文本', plaintext: '纯文本'
+};
+
+function codeText(node: React.ReactNode): string {
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(codeText).join('');
+  if (React.isValidElement<{ children?: React.ReactNode }>(node)) return codeText(node.props.children);
+  return '';
+}
+
+function codeLanguageLabel(raw: string | undefined): string {
+  if (!raw) return '代码';
+  return codeLanguageLabels[raw.toLowerCase()] ?? raw.charAt(0).toUpperCase() + raw.slice(1);
+}
+
+function CodeBlock({ language, children }: { language?: string; children: React.ReactNode }) {
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(copyTimer.current), []);
+  const code = codeText(children).replace(/\n$/, '');
+  const copy = async () => {
+    clearTimeout(copyTimer.current);
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopyState('copied');
+    } catch {
+      setCopyState('failed');
+    }
+    copyTimer.current = setTimeout(() => setCopyState('idle'), 1650);
+  };
+  return <div className="code-block">
+    {code.trim() !== '' && <div className="code-head">
+      <span className="code-lang">{codeLanguageLabel(language)}</span>
+      <button type="button" className="code-copy" onClick={() => void copy()} aria-label="复制代码">
+        <Icon name={copyState === 'copied' ? 'check' : 'copy'} size={13}/>
+        {copyState === 'copied' ? '已复制' : copyState === 'failed' ? '复制失败' : '复制'}
+      </button>
+    </div>}
+    <div className="code-scroll"><pre>{children}</pre></div>
+  </div>;
+}
+
 function AssistantMarkdown({ content, streaming, citations, onCite }: { content: string; streaming: boolean; citations: Citation[]; onCite(ordinal: number): void }) {
   const components = useMemo<Components>(() => {
     const byOrdinal = new Map(citations.map(citation => [citation.ordinal, citation]));
     return {
+      pre: ({ children }) => {
+        const child = React.Children.toArray(children)[0];
+        if (!React.isValidElement<{ className?: string }>(child)) return <pre>{children}</pre>;
+        const language = /language-([\w+#-]+)/.exec(child.props.className ?? '')?.[1];
+        return <CodeBlock language={language}>{child}</CodeBlock>;
+      },
       a: ({ href, children }) => {
         const ordinal = citationOrdinal(href);
         if (ordinal === undefined) return safeHttpUrl(href) ? <a href={href} target="_blank" rel="noreferrer">{children}</a> : <span>{children}</span>;

@@ -102,7 +102,7 @@ button:disabled, input:disabled { cursor: not-allowed; }
 .message.user { display: flex; flex-direction: column; align-items: flex-end; }
 .message.user .message-body { max-width: min(88%, 650px); padding: 11px 15px; border: 0; border-radius: 15px 15px 5px 15px; color: #2e4152; background: var(--ui-accent-soft); }
 .message.user .message-body p { margin: 0; white-space: pre-wrap; }
-.message.assistant { padding-right: 30px; }
+.message.assistant { padding-right: 30px; --code-font: "Cascadia Mono", "Cascadia Code", ui-monospace, Consolas, monospace; }
 .message.assistant .message-body { line-height: 1.72; overflow-wrap: anywhere; }
 .message.assistant .message-body > :first-child { margin-top: 0; }
 .message.assistant .message-body > :last-child { margin-bottom: 0; }
@@ -111,8 +111,16 @@ button:disabled, input:disabled { cursor: not-allowed; }
 .message.assistant h1 { font-size: 20px; } .message.assistant h2 { font-size: 18px; } .message.assistant h3 { font-size: 16px; }
 .message.assistant ul, .message.assistant ol { padding-left: 23px; }
 .message.assistant blockquote { margin: 14px 0; padding-left: 13px; border-left: 2px solid #bdc9d2; color: #596571; }
-.message.assistant pre { overflow-x: auto; padding: 14px; border-radius: 8px; color: #edf2f5; background: #29323a; font: 12px/1.65 "Cascadia Code", Consolas, monospace; scrollbar-width: thin; scrollbar-color: #65717b transparent; }
-.message.assistant code:not(pre code) { padding: 2px 5px; border-radius: 4px; color: #355b78; background: #eef3f6; font: 12px "Cascadia Code", Consolas, monospace; }
+.message.assistant .code-block { --code-bg: color-mix(in srgb, var(--ui-accent) 7%, var(--ui-surface)); --code-keyline: color-mix(in srgb, var(--ui-accent) 16%, var(--ui-border)); --code-bar: color-mix(in srgb, var(--ui-accent) 12%, var(--ui-surface)); --code-bar-line: color-mix(in srgb, var(--ui-accent) 14%, var(--ui-border)); margin: 0 0 13px; border: 1px solid var(--code-keyline); border-radius: var(--ui-radius-control); background: var(--code-bg); overflow: hidden; }
+.message.assistant .code-head { min-height: 28px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 8px 0 12px; border-bottom: 1px solid var(--code-bar-line); background: var(--code-bar); }
+.message.assistant .code-lang { color: var(--ui-accent-hover); font: 500 11px/1 var(--code-font); letter-spacing: .045em; }
+.message.assistant .code-copy { min-height: 22px; display: inline-flex; align-items: center; gap: 4px; padding: 0 6px; border: 0; border-radius: 5px; color: var(--ui-accent-hover); background: transparent; font: 500 11px/1 var(--ui-font-family); cursor: pointer; opacity: 0; transition: opacity 160ms, background 160ms; }
+.message.assistant .code-block:hover .code-copy, .message.assistant .code-block:focus-within .code-copy { opacity: 1; }
+.message.assistant .code-copy:hover { background: color-mix(in srgb, var(--ui-accent) 12%, transparent); }
+.message.assistant .code-copy:focus-visible { opacity: 1; outline: 1px solid color-mix(in srgb, var(--ui-accent) 45%, transparent); outline-offset: 1px; }
+.message.assistant .code-scroll { overflow-x: auto; scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--ui-accent) 45%, #fff) transparent; background-color: var(--code-bg); background-image: linear-gradient(to right, var(--code-bg) 40%, transparent), linear-gradient(to left, var(--code-bg) 40%, transparent), linear-gradient(to right, color-mix(in srgb, var(--ui-text) 12%, transparent), transparent), linear-gradient(to left, color-mix(in srgb, var(--ui-text) 12%, transparent), transparent); background-position: left center, right center, left center, right center; background-repeat: no-repeat; background-size: 40px 100%, 40px 100%, 18px 100%, 18px 100%; background-attachment: local, local, scroll, scroll; }
+.message.assistant .code-block pre { margin: 0; padding: 12px 14px; color: var(--ui-text); font: 12px/1.7 var(--code-font); font-variant-ligatures: none; tab-size: 4; }
+.message.assistant code:not(pre code) { padding: 1px 5px; border: 1px solid color-mix(in srgb, var(--ui-accent) 14%, transparent); border-radius: 5px; color: var(--ui-accent-hover); background: color-mix(in srgb, var(--ui-accent) 6%, #fff); font: 12px/1.4 var(--code-font); }
 .message.assistant table { width: 100%; border-collapse: collapse; margin: 14px 0; }
 .message.assistant th, .message.assistant td { padding: 8px 10px; border-bottom: 1px solid var(--ui-border); text-align: left; }
 .message.assistant a { color: var(--ui-accent); text-decoration-color: #aebec9; text-underline-offset: 3px; }
