@@ -6,7 +6,7 @@ import remarkGfm from 'remark-gfm';
 import type { BackendEvent, BootstrapState, CatDevice, Citation, ConversationDetail, ConversationMessage, ConversationSummary, PublicSettings, WorkApproval, WorkArtifact, WorkRequest, WorkToolCall } from './shared';
 import { citationOrdinal, hidePartialCitationMarker, remarkCitations, stripCitationMarkers } from './citations';
 import { deviceDiscoveryMessage, initialState, reduceBackendEvent } from './state';
-import { clampTextareaHeight, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldSubmitComposer, workPhaseLabel } from './ui-behavior';
+import { buildWorkTimeline, clampTextareaHeight, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldSubmitComposer } from './ui-behavior';
 import { textMenuEntries, type TextMenuAction, type TextMenuScene } from './text-context-menu';
 import { AnchorRect, AnchoredSurface, rectOf, ScrollArea } from './ui-primitives';
 import './ui-tokens.css';
@@ -302,7 +302,13 @@ function App() {
           ? <SettingsPage settings={bootstrap.settings} onboarding={!bootstrap.settings.hasApiKey} busy={isBusy('settings')} onBack={() => setRequestedView('conversation')} onSave={saveSettings}/>
           : displayedView === 'compose' || !active
             ? <DraftConversation mode={draftMode} onMode={setDraftMode} value={draft} onChange={setDraft} onSend={() => void send()} onAttach={() => void attachFiles()} hasApiKey={bootstrap.settings.hasApiKey} sending={isBusy('send')} focusSignal={composerFocusSignal} onOpenSettings={() => setRequestedView('settings')}/>
-            : <><ConversationHeader conversation={active.conversation} origin={active.conversation.originConversationId ? bootstrap.conversations.find(item => item.id === active.conversation.originConversationId) : undefined} onOpenConversation={id => void selectConversation(id)} onAction={(kind, anchor) => setActionSurface({ kind, anchor, conversation: active.conversation })}/>{active.conversation.mode === 'work' ? <div className="work-content"><WorkActivity active={active} approvals={bootstrap.pendingApprovals ?? []} tools={bootstrap.workToolCalls ?? noWorkToolCalls} artifacts={bootstrap.workArtifacts ?? []} busy={busy} onResolve={(approval, approved) => void resolveApproval(approval, approved)} onReveal={artifactId => void window.catAssistant.revealArtifact(active.conversation.id, artifactId)}/><MessageList detail={active} runError={state.runError} busy={busy} onResolveWorkRequest={(request, approved) => void resolveWorkRequest(request, approved)} onOpenConversation={id => void selectConversation(id)}/></div> : <MessageList detail={active} runError={state.runError} busy={busy} onResolveWorkRequest={(request, approved) => void resolveWorkRequest(request, approved)} onOpenConversation={id => void selectConversation(id)}/>}<Composer value={draft} onChange={setDraft} onSend={() => void send()} onAttach={active.conversation.mode === 'work' ? () => void attachFiles() : undefined} onStop={active.conversation.mode === 'work' && active.activeRunId ? () => void stopWork() : undefined} hasApiKey={bootstrap.settings.hasApiKey} sending={isBusy('send')} focusSignal={composerFocusSignal} onOpenSettings={() => setRequestedView('settings')}/></>
+            : <>
+              <ConversationHeader conversation={active.conversation} origin={active.conversation.originConversationId ? bootstrap.conversations.find(item => item.id === active.conversation.originConversationId) : undefined} onOpenConversation={id => void selectConversation(id)} onAction={(kind, anchor) => setActionSurface({ kind, anchor, conversation: active.conversation })}/>
+              <MessageList detail={active} runError={state.runError} busy={busy} tools={active.conversation.mode === 'work' ? bootstrap.workToolCalls ?? noWorkToolCalls : noWorkToolCalls} artifacts={active.conversation.mode === 'work' ? bootstrap.workArtifacts ?? noWorkArtifacts : noWorkArtifacts} onReveal={artifactId => void window.catAssistant.revealArtifact(active.conversation.id, artifactId)} onResolveWorkRequest={(request, approved) => void resolveWorkRequest(request, approved)} onOpenConversation={id => void selectConversation(id)}/>
+              {active.conversation.mode === 'work' && (bootstrap.pendingApprovals?.length ?? 0) > 0
+                ? <ApprovalComposer approvals={bootstrap.pendingApprovals!} busy={busy} onResolve={(approval, approved) => void resolveApproval(approval, approved)} onStop={active.activeRunId ? () => void stopWork() : undefined}/>
+                : <Composer value={draft} onChange={setDraft} onSend={() => void send()} onAttach={active.conversation.mode === 'work' ? () => void attachFiles() : undefined} onStop={active.conversation.mode === 'work' && active.activeRunId ? () => void stopWork() : undefined} hasApiKey={bootstrap.settings.hasApiKey} sending={isBusy('send')} focusSignal={composerFocusSignal} onOpenSettings={() => setRequestedView('settings')}/>}
+            </>
         }
       </main>
     </div>
@@ -464,34 +470,42 @@ function ConversationHeader({ conversation, origin, onOpenConversation, onAction
   return <header className="conversation-header"><div className="conversation-heading"><h1>{conversation.title}</h1>{origin && <button className="origin-link" onClick={() => onOpenConversation(origin.id)} title={`返回来源 Chat：${origin.title}`}><Icon name="back" size={13}/>来源：{origin.title}</button>}</div><div className="header-menu" ref={wrapper}><button ref={trigger} className="icon-button" onClick={toggleMenu} aria-label="对话选项" aria-haspopup="menu" aria-expanded={menuOpen}><Icon name="menu"/></button>{menuRendered && <div className={`popover-menu ${menuOpen ? 'is-open' : 'is-closing'}`} role="menu" aria-hidden={!menuOpen} inert={!menuOpen}><button ref={firstItem} role="menuitem" onClick={event => choose('rename', event.currentTarget)}><Icon name="rename"/>重命名</button><button role="menuitem" className="danger" onClick={event => choose('delete', event.currentTarget)}><Icon name="delete"/>删除</button></div>}</div></header>;
 }
 
-function WorkActivity({ active, approvals, tools, artifacts, busy, onResolve, onReveal }: {
-  active: ConversationDetail; approvals: WorkApproval[]; tools: WorkToolCall[]; artifacts: WorkArtifact[]; busy: Set<string>;
-  onResolve(approval: WorkApproval, approved: boolean): void; onReveal(path: string): void;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const currentTools = active.activeRunId ? tools.filter(tool => tool.runId === active.activeRunId) : [];
-  const latest = (currentTools.length ? currentTools : tools).at(-1);
-  const phase = workPhaseLabel(active.messages, active.activeRunId);
-  const toolInProgress = latest && (latest.state === 'pending' || latest.state === 'running');
-  const status = approvals.length ? '等待你的批准' : active.activeRunId
-    ? toolInProgress ? `${toolStateLabel(latest.state)}：${latest.toolName}` : phase ? `当前阶段：${phase}` : '正在分析并规划任务'
-    : latest?.state === 'cancelled' ? '任务已停止' : '任务记录';
-  const toolHistory = useMemo(() => <div className="tool-history">{tools.map(tool => <details key={tool.id}><summary><span>{tool.toolName}</span><em className={`tool-state state-${tool.state}`}>{toolStateLabel(tool.state)}</em>{tool.durationMilliseconds !== undefined && <small>{tool.durationMilliseconds} ms</small>}</summary><div><b>参数</b><pre>{maskSensitiveJson(tool.argumentsJson)}</pre>{tool.resultJson && <><b>结果</b><pre>{maskSensitiveJson(tool.resultJson)}</pre></>}{tool.errorMessage && <p className="tool-error">{tool.errorMessage}</p>}</div></details>)}</div>, [tools]);
-  return <section className="work-activity" aria-label="Work 执行状态">
-    <div className="work-status-row"><span className={`work-status-dot ${active.activeRunId ? 'active' : ''}`}/><strong>{status}</strong>{tools.length > 0 && <button className="text-button" onClick={() => setExpanded(value => !value)} aria-expanded={expanded}>{expanded ? '收起详情' : `查看详情 (${tools.length})`}</button>}</div>
-    {approvals.map(approval => <div className="approval-card" key={approval.id}>
-      <div><Icon name="shield"/><span><b>{approval.capability === 'execute' ? '运行外部命令' : approval.capability === 'write' ? '修改外部文件' : '读取外部文件'}</b><small>{approval.targetPath}</small></span></div>
-      <pre>{maskSensitiveJson(approval.operationJson)}</pre>
-      <p>{approval.scope === 'task_directory' ? '批准后，本任务期间可在该目录内复用相同权限。' : '仅批准这一次明确操作。'}</p>
-      <div className="approval-actions"><button className="text-button" disabled={busy.has(`approval-${approval.id}`)} onClick={() => onResolve(approval, false)}>拒绝</button><button className="primary-button" disabled={busy.has(`approval-${approval.id}`)} onClick={() => onResolve(approval, true)}>批准</button></div>
-    </div>)}
-    {expanded && toolHistory}
-    {artifacts.length > 0 && <div className="artifact-list">{artifacts.map(artifact => <button key={artifact.id} onClick={() => onReveal(artifact.id)} title={artifact.label}><Icon name="file"/><span><b>{artifact.label}</b><small>在文件资源管理器中显示</small></span><Icon name="external" size={14}/></button>)}</div>}
+function toolStateLabel(tool: WorkToolCall): string {
+  if (tool.state === 'failed' && tool.errorCode === 'permission_rejected') return '未执行';
+  return ({ pending: '等待中', waiting_approval: '等待批准', running: '执行中', completed: '已完成', failed: '失败', cancelled: '已取消', rejected: '未执行' } as Record<string, string>)[tool.state] ?? tool.state;
+}
+
+function toolDisplayName(name: string): string {
+  return ({ execute_command: '运行命令', read_file: '读取文件', write_file: '写入文件', list_directory: '查看文件夹', web_search: '搜索网络', deliver_files: '交付成果', load_skill: '读取技能' } as Record<string, string>)[name] ?? name;
+}
+
+function ToolGroup({ tools }: { tools: WorkToolCall[] }) {
+  const active = tools.filter(tool => ['pending', 'waiting_approval', 'running'].includes(tool.state)).length;
+  const completed = tools.filter(tool => tool.state === 'completed').length;
+  const notExecuted = tools.filter(tool => ['rejected', 'cancelled'].includes(tool.state) || tool.errorCode === 'permission_rejected').length;
+  const failed = tools.length - active - completed - notExecuted;
+  const incomplete = notExecuted + failed;
+  const label = active > 0 ? `正在执行操作… ${completed} / ${tools.length}`
+    : incomplete > 0 ? `完成情况：${completed} 项成功${notExecuted ? ` · ${notExecuted} 项未执行` : ''}${failed ? ` · ${failed} 项失败` : ''}`
+    : `已完成 ${tools.length} 项操作`;
+  return <details className={`timeline-tool-group ${active > 0 ? 'is-running' : incomplete > 0 ? 'has-issues' : ''}`}>
+    <summary><span className="timeline-disclosure"><Icon name="chevron" size={14}/></span><span className={`work-status-dot ${active > 0 ? 'active' : ''}`}/><strong>{label}</strong></summary>
+    <div className="timeline-tool-list">{tools.map(tool => <details className="timeline-tool" key={tool.id}>
+      <summary><span className="timeline-disclosure"><Icon name="chevron" size={13}/></span><span>{toolDisplayName(tool.toolName)}</span><em className={`tool-state state-${tool.errorCode === 'permission_rejected' ? 'rejected' : tool.state}`}>{toolStateLabel(tool)}</em>{tool.durationMilliseconds !== undefined && <small>{formatDuration(tool.durationMilliseconds)}</small>}</summary>
+      <div className="timeline-tool-detail"><b>工具</b><code>{tool.toolName}</code><b>参数</b><pre>{maskSensitiveJson(tool.argumentsJson)}</pre>{tool.resultJson && <><b>结果</b><pre>{maskSensitiveJson(tool.resultJson)}</pre></>}{tool.errorMessage && <p className="tool-error">{tool.errorMessage}</p>}</div>
+    </details>)}</div>
+  </details>;
+}
+
+function ArtifactGroup({ artifacts, onReveal }: { artifacts: WorkArtifact[]; onReveal(id: string): void }) {
+  return <section className="timeline-artifacts" aria-label={artifacts.length === 1 ? '交付成果' : `交付 ${artifacts.length} 个成果`}>
+    {artifacts.length > 1 && <span className="artifact-group-label">本次生成了 {artifacts.length} 个文件</span>}
+    <div>{artifacts.map(artifact => <button key={artifact.id} onClick={() => onReveal(artifact.id)} title={artifact.label}><span className="artifact-file-icon"><Icon name="file"/></span><span><b>{artifact.label}</b><small>在文件资源管理器中显示</small></span><Icon name="external" size={14}/></button>)}</div>
   </section>;
 }
 
-function toolStateLabel(state: string): string {
-  return ({ pending: '等待中', running: '执行中', completed: '已完成', failed: '失败', cancelled: '已取消', rejected: '已拒绝' } as Record<string, string>)[state] ?? state;
+function formatDuration(milliseconds: number): string {
+  return milliseconds < 1000 ? `${milliseconds} ms` : `${(milliseconds / 1000).toFixed(milliseconds < 10000 ? 1 : 0)} s`;
 }
 
 function maskSensitiveJson(value: string): string {
@@ -510,9 +524,11 @@ function maskSensitiveJson(value: string): string {
 
 const noCitations: Citation[] = [];
 const noWorkToolCalls: WorkToolCall[] = [];
+const noWorkArtifacts: WorkArtifact[] = [];
 
-function MessageList({ detail, runError, busy, onResolveWorkRequest, onOpenConversation }: {
+function MessageList({ detail, runError, busy, tools, artifacts, onReveal, onResolveWorkRequest, onOpenConversation }: {
   detail: ConversationDetail; runError?: string; busy: Set<string>;
+  tools: WorkToolCall[]; artifacts: WorkArtifact[]; onReveal(id: string): void;
   onResolveWorkRequest(request: WorkRequest, approved: boolean): void; onOpenConversation(id: string): void;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
@@ -532,12 +548,15 @@ function MessageList({ detail, runError, busy, onResolveWorkRequest, onOpenConve
     return grouped;
   }, [detail.conversation.id, detail.workRequests]);
   const tail = detail.messages.at(-1);
-  const awaitingFirstToken = Boolean(detail.activeRunId) && tail?.role === 'user';
+  const timeline = useMemo(() => detail.conversation.mode === 'work' ? buildWorkTimeline(detail.messages, tools, artifacts) : undefined, [detail.conversation.mode, detail.messages, tools, artifacts]);
+  const activeRunHasTools = Boolean(detail.activeRunId && tools.some(tool => tool.runId === detail.activeRunId));
+  const awaitingFirstToken = Boolean(detail.activeRunId) && tail?.role === 'user' && !activeRunHasTools;
   useEffect(() => { pinned.current = true; requestAnimationFrame(() => scroller.current?.scrollTo({ top: scroller.current.scrollHeight })); }, [detail.conversation.id]);
-  useEffect(() => { if (pinned.current) requestAnimationFrame(() => scroller.current?.scrollTo({ top: scroller.current.scrollHeight })); }, [detail.messages.length, lastContent, runError]);
+  useEffect(() => { if (pinned.current) requestAnimationFrame(() => scroller.current?.scrollTo({ top: scroller.current.scrollHeight })); }, [detail.messages.length, tools.length, artifacts.length, lastContent, runError]);
   const onScroll = () => { const element = scroller.current; if (element) pinned.current = isNearScrollEnd(element.scrollHeight, element.scrollTop, element.clientHeight); };
+  const renderMessage = (message: ConversationMessage) => <React.Fragment key={message.id}><MessageItem message={message} citations={citationsByMessage.get(message.id) ?? noCitations}/>{(requestsByMessage.get(message.id) ?? []).map(request => <WorkRequestCard key={request.id} request={request} busy={busy.has(`work-request-${request.id}`)} onResolve={onResolveWorkRequest} onOpenConversation={onOpenConversation}/>)}</React.Fragment>;
   return <ScrollArea ref={scroller} className="message-scroll" viewportClassName={`messages ${detail.messages.length ? '' : 'empty-chat'}`} onScroll={onScroll}>
-    {detail.messages.length === 0 ? <div className="empty-greeting"><BrandMark large/><h2>{greetingForHour(new Date().getHours())}</h2></div> : <div className="message-column">{detail.messages.map(message => <React.Fragment key={message.id}><MessageItem message={message} citations={citationsByMessage.get(message.id) ?? noCitations}/>{(requestsByMessage.get(message.id) ?? []).map(request => <WorkRequestCard key={request.id} request={request} busy={busy.has(`work-request-${request.id}`)} onResolve={onResolveWorkRequest} onOpenConversation={onOpenConversation}/>)}</React.Fragment>)}{awaitingFirstToken && <ThinkingBubble/>}{runError && <div className="run-error" role="alert"><Icon name="info"/><span>{runError}</span></div>}</div>}
+    {detail.messages.length === 0 ? <div className="empty-greeting"><BrandMark large/><h2>{greetingForHour(new Date().getHours())}</h2></div> : <div className="message-column">{timeline ? timeline.map(item => item.kind === 'message' ? renderMessage(item.message) : item.kind === 'tools' ? <ToolGroup key={item.key} tools={item.tools}/> : <ArtifactGroup key={item.key} artifacts={item.artifacts} onReveal={onReveal}/>) : detail.messages.map(renderMessage)}{awaitingFirstToken && <ThinkingBubble/>}{runError && <div className="run-error" role="alert"><Icon name="info"/><span>{runError}</span></div>}</div>}
   </ScrollArea>;
 }
 
@@ -784,6 +803,23 @@ function Composer({ value, onChange, onSend, onAttach, onStop, hasApiKey, sendin
   useEffect(() => { if (focusSignal) textarea.current?.focus({ preventScroll: true }); }, [focusSignal]);
   useEffect(() => () => clearTimeout(hideTimer.current), []);
   return <div className="composer-wrap"><div className="composer">{onAttach && <button className="composer-tool" onClick={onAttach} aria-label="添加本地文件" title="添加本地文件"><Icon name="attach"/></button>}<div className={`composer-editor ${scrollActive ? 'scroll-active' : ''}`}><textarea ref={textarea} value={value} rows={1} placeholder="输入消息" aria-label="输入消息" onScroll={() => { updateThumb(); revealThumb(); }} onChange={event => onChange(event.target.value)} onKeyDown={event => { if (shouldSubmitComposer(event.key, event.shiftKey, event.nativeEvent.isComposing)) { event.preventDefault(); if (canSend) onSend(); } }}/><div ref={rail} className={`textarea-rail ${thumb.visible ? 'has-overflow' : ''}`} aria-hidden="true"><i style={{ height: thumb.size, transform: `translateY(${thumb.offset}px)` }}/></div></div>{onStop && <button className="stop-button" onClick={onStop} aria-label="停止任务" title="停止任务"><Icon name="stop"/></button>}<button className={`send-button ${canSend ? 'ready' : ''}`} disabled={!canSend} onClick={onSend} aria-label={sending ? '正在发送' : '发送消息'}><Icon name="send"/></button></div>{!hasApiKey && value.trim() ? <button className="key-hint" onClick={onOpenSettings}><Icon name="key" size={14}/>配置 API Key 后即可发送</button> : <p>AI 生成的内容可能不准确，请核实重要信息。</p>}</div>;
+}
+
+function ApprovalComposer({ approvals, busy, onResolve, onStop }: {
+  approvals: WorkApproval[]; busy: Set<string>; onResolve(approval: WorkApproval, approved: boolean): void; onStop?: () => void;
+}) {
+  const approval = approvals[0];
+  const resolving = busy.has(`approval-${approval.id}`);
+  const action = approval.capability === 'execute' ? '运行外部命令' : approval.capability === 'write' ? '修改外部文件' : '读取外部文件';
+  const scope = approval.scope === 'task_directory' ? '本次任务期间' : '仅限这一次操作';
+  return <div className="composer-wrap approval-composer-wrap">
+    <section className="approval-composer" role="dialog" aria-label="操作确认" aria-live="polite">
+      <span className="approval-composer-icon"><Icon name="shield"/></span>
+      <div className="approval-composer-copy"><div><strong>允许小猫助手{action}吗？</strong>{approvals.length > 1 && <em>确认请求 1 / {approvals.length}</em>}</div>{approval.targetPath && <code title={approval.targetPath}>{approval.targetPath}</code>}<small>{approval.capability === 'read' ? '只读' : approval.capability === 'write' ? '读写' : '执行'} · {scope}</small></div>
+      <div className="approval-composer-actions">{onStop && <button className="stop-button" onClick={onStop} disabled={resolving} aria-label="停止任务" title="停止任务"><Icon name="stop"/></button>}<button className="secondary-button" disabled={resolving} onClick={() => onResolve(approval, false)}>拒绝</button><button className="primary-button" disabled={resolving} onClick={() => onResolve(approval, true)}>{resolving ? '处理中…' : '允许'}</button></div>
+    </section>
+    <p>确认后任务会自动继续。</p>
+  </div>;
 }
 
 function DraftConversation({ mode, onMode, value, onChange, onSend, onAttach, hasApiKey, sending, focusSignal, onOpenSettings }: {

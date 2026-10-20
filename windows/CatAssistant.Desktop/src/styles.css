@@ -184,45 +184,39 @@ button:disabled, input:disabled { cursor: not-allowed; }
 .work-request-actions button { min-height: 32px; }
 .work-request-actions .primary-button { display: inline-flex; align-items: center; gap: 4px; }
 .work-request-error { margin-top: 9px; color: var(--ui-danger); font-size: 11px; }
-.work-content { min-height: 0; display: flex; flex-direction: column; }
-.work-content .message-scroll { flex: 1; }
-.work-activity { z-index: 3; width: min(calc(100% - 56px), 790px); flex: 0 0 auto; max-height: 45vh; margin: 10px auto 0; overflow: auto; border: 1px solid #dfe5e9; border-radius: 10px; background: #fbfcfc; box-shadow: 0 3px 12px rgba(42,57,69,.04); }
-.work-status-row { min-height: 42px; display: flex; align-items: center; gap: 9px; padding: 5px 11px; }
-.work-status-row strong { min-width: 0; flex: 1; overflow: hidden; color: #4b5c69; font-size: 12px; font-weight: 560; text-overflow: ellipsis; white-space: nowrap; }
-.work-status-row .text-button { min-height: 30px; font-size: 11px; }
 .work-status-dot { width: 8px; height: 8px; border-radius: 50%; background: #aeb6bd; }
 .work-status-dot.active { background: var(--ui-accent); box-shadow: 0 0 0 4px var(--ui-accent-soft); animation: work-pulse 1.7s ease-in-out infinite; }
 @keyframes work-pulse { 50% { opacity: .5; } }
-.approval-card { margin: 0 10px 10px; padding: 13px; border: 1px solid #e2cda9; border-radius: 9px; background: #fffaf1; }
-.approval-card > div:first-child { display: flex; align-items: flex-start; gap: 9px; color: #68583d; }
-.approval-card > div:first-child span { min-width: 0; }
-.approval-card b, .approval-card small { display: block; }
-.approval-card b { font-size: 13px; }
-.approval-card small { margin-top: 3px; overflow-wrap: anywhere; color: #86765c; font-size: 11px; }
-.approval-card pre, .tool-history pre { max-height: 150px; overflow: auto; margin: 10px 0 0; padding: 8px; border-radius: 6px; color: #42515d; background: rgba(239,242,244,.75); font: 11px/1.5 "Cascadia Code", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
-.approval-card > p { margin: 8px 0 0; color: #84755f; font-size: 11px; }
-.approval-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px; }
-.approval-actions .primary-button, .approval-actions .text-button { min-height: 32px; }
-.tool-history { border-top: 1px solid #e8ecef; }
-.tool-history details + details { border-top: 1px solid #edf0f2; }
-.tool-history summary { min-height: 38px; display: flex; align-items: center; gap: 9px; padding: 0 12px; cursor: pointer; list-style: none; }
-.tool-history summary::-webkit-details-marker { display: none; }
-.tool-history summary span { min-width: 0; flex: 1; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.tool-history summary small { color: var(--ui-muted); font-size: 10px; }
-.tool-history details > div { padding: 0 12px 12px; }
-.tool-history details > div > b { display: block; margin-top: 8px; color: var(--ui-muted); font-size: 10px; font-weight: 560; text-transform: uppercase; }
+.timeline-tool-group { margin: -8px 0 24px; color: #63717c; animation: message-in 190ms var(--ui-motion-ease); }
+.timeline-tool-group > summary { width: fit-content; min-height: 32px; display: flex; align-items: center; gap: 8px; padding: 0 4px 0 0; cursor: pointer; list-style: none; }
+.timeline-tool-group summary::-webkit-details-marker, .timeline-tool summary::-webkit-details-marker { display: none; }
+.timeline-tool-group > summary strong { color: #61717d; font-size: 12px; font-weight: 540; }
+.timeline-disclosure { width: 17px; height: 22px; display: grid; place-items: center; flex: 0 0 auto; color: #9aa3aa; transition: transform 180ms var(--ui-motion-ease); }
+.timeline-tool-group[open] > summary .timeline-disclosure, .timeline-tool[open] > summary .timeline-disclosure { transform: rotate(90deg); }
+.timeline-tool-list { margin-left: 8px; padding: 3px 0 2px 15px; border-left: 1px solid #e3e7ea; }
+.timeline-tool + .timeline-tool { border-top: 1px solid #eff1f2; }
+.timeline-tool > summary { min-height: 36px; display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none; }
+.timeline-tool > summary > span:nth-child(2) { min-width: 0; flex: 1; overflow: hidden; color: #52626e; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.timeline-tool > summary small { color: var(--ui-muted); font-size: 10px; }
+.timeline-tool-detail { padding: 0 4px 12px 25px; }
+.timeline-tool-detail > b { display: block; margin-top: 8px; color: var(--ui-muted); font-size: 10px; font-weight: 560; text-transform: uppercase; }
+.timeline-tool-detail > code { display: block; margin-top: 4px; color: #516471; font: 11px/1.5 "Cascadia Code", Consolas, monospace; }
+.timeline-tool-detail pre { max-height: 170px; overflow: auto; margin: 5px 0 0; padding: 9px; border-radius: 7px; color: #42515d; background: #f3f5f6; font: 11px/1.5 "Cascadia Code", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .tool-state { font-size: 10px; font-style: normal; }
 .tool-state.state-completed { color: var(--ui-success); }
-.tool-state.state-failed, .tool-state.state-cancelled { color: var(--ui-danger); }
-.tool-state.state-running { color: var(--ui-accent); }
+.tool-state.state-failed, .tool-state.state-cancelled, .tool-state.state-rejected { color: var(--ui-danger); }
+.tool-state.state-running, .tool-state.state-waiting_approval { color: var(--ui-accent); }
 .tool-error { color: var(--ui-danger); font-size: 11px; }
-.artifact-list { display: flex; flex-wrap: wrap; gap: 7px; padding: 10px; border-top: 1px solid #e8ecef; }
-.artifact-list > button { min-width: 190px; max-width: 280px; display: flex; align-items: center; gap: 9px; padding: 9px 10px; border: 1px solid #dce3e8; border-radius: 8px; color: #40576a; background: #fff; cursor: pointer; text-align: left; }
-.artifact-list > button:hover { border-color: #adbecb; background: #f7fafb; }
-.artifact-list > button span { min-width: 0; flex: 1; }
-.artifact-list b, .artifact-list small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.artifact-list b { font-size: 12px; }
-.artifact-list small { margin-top: 2px; color: var(--ui-muted); font-size: 10px; }
+.timeline-artifacts { margin: -7px 0 27px; animation: message-in 190ms var(--ui-motion-ease); }
+.artifact-group-label { display: block; margin-bottom: 7px; color: var(--ui-muted); font-size: 11px; }
+.timeline-artifacts > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.timeline-artifacts button { min-width: 220px; max-width: 310px; display: flex; align-items: center; gap: 10px; padding: 11px; border: 1px solid #d9e1e6; border-radius: 10px; color: #40576a; background: #fff; box-shadow: 0 3px 12px rgba(42,57,69,.04); cursor: pointer; text-align: left; }
+.timeline-artifacts button:hover { border-color: #adbecb; background: #f9fbfc; }
+.timeline-artifacts button > span:nth-child(2) { min-width: 0; flex: 1; }
+.timeline-artifacts b, .timeline-artifacts small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.timeline-artifacts b { font-size: 13px; font-weight: 560; }
+.timeline-artifacts small { margin-top: 3px; color: var(--ui-muted); font-size: 10px; }
+.artifact-file-icon { width: 34px; height: 34px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 8px; color: var(--ui-accent); background: var(--ui-accent-soft); }
 .empty-chat { display: grid; place-items: center; }
 .empty-greeting { display: grid; justify-items: center; gap: 15px; padding-bottom: 7vh; text-align: center; }
 .empty-greeting h2 { margin: 0; font-size: 21px; font-weight: 530; }
@@ -247,6 +241,17 @@ button:disabled, input:disabled { cursor: not-allowed; }
 .stop-button:hover { background: #f5dedb; }
 .composer-wrap > p { margin: 6px 0 0; color: #949ba3; font-size: 11px; text-align: center; }
 .key-hint { min-height: 30px; display: flex; align-items: center; gap: 5px; margin: 5px auto 0; padding: 0 7px; border: 0; color: var(--ui-accent); background: transparent; font-size: 11px; cursor: pointer; }
+.approval-composer { min-height: 76px; display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 12px; padding: 11px 12px; border: 1px solid #dfc99f; border-radius: 11px; background: #fffaf1; box-shadow: 0 4px 16px rgba(74,58,32,.07); }
+.approval-composer-icon { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 9px; color: #80683e; background: #f4e8cf; }
+.approval-composer-copy { min-width: 0; }
+.approval-composer-copy > div { display: flex; align-items: center; gap: 8px; }
+.approval-composer-copy strong { overflow: hidden; color: #5d513d; font-size: 13px; font-weight: 580; text-overflow: ellipsis; white-space: nowrap; }
+.approval-composer-copy em { flex: 0 0 auto; color: #988567; font-size: 10px; font-style: normal; }
+.approval-composer-copy code { display: block; overflow: hidden; margin-top: 4px; color: #77674e; font: 11px/1.45 "Cascadia Code", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.approval-composer-copy small { display: block; margin-top: 3px; color: #93836a; font-size: 10px; }
+.approval-composer-actions { display: flex; align-items: center; gap: 7px; }
+.approval-composer-actions .primary-button, .approval-composer-actions .secondary-button { min-height: 34px; padding-inline: 12px; }
+.approval-composer-actions .stop-button { height: 34px; margin-right: 2px; }
 
 .loading-screen { height: 100%; display: grid; place-content: center; justify-items: center; text-align: center; background: #fff; }
 .loading-screen h1 { margin: 16px 0 13px; font-size: 21px; font-weight: 530; }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { clampTextareaHeight, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldSubmitComposer, workPhaseLabel } from './ui-behavior';
+import type { ConversationMessage, WorkArtifact, WorkToolCall } from './shared';
+import { buildWorkTimeline, clampTextareaHeight, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldSubmitComposer } from './ui-behavior';
 
 describe('composer keyboard behavior', () => {
   it('submits on plain Enter', () => {
@@ -38,18 +39,46 @@ describe('empty conversation greeting', () => {
   });
 });
 
-describe('Work phase status', () => {
-  it('uses the latest public agent update from the active run', () => {
-    expect(workPhaseLabel([
-      { role: 'assistant', source: 'runtime', runId: 'old', content: '旧任务' },
-      { role: 'assistant', source: 'runtime', runId: 'run-1', content: '**计划**\n\n- 收集资料' },
-      { role: 'assistant', source: 'runtime', runId: 'run-1', content: '正在整理最终文件。' }
-    ], 'run-1')).toBe('正在整理最终文件。');
+describe('Work timeline', () => {
+  const message = (id: string, createdAt: string): ConversationMessage => ({
+    id, conversationId: 'work-1', role: id.startsWith('user') ? 'user' : 'assistant', source: 'runtime',
+    status: 'complete', sequence: 1, content: id, createdAt, runId: 'run-1'
+  });
+  const tool = (id: string, createdAt: string): WorkToolCall => ({
+    id, runId: 'run-1', roundId: 'round-1', batchId: 'batch-1', toolCallId: `call-${id}`, ordinal: 0,
+    toolName: 'read_file', argumentsJson: '{}', state: 'completed', createdAt
+  });
+  const artifact = (id: string, createdAt: string): WorkArtifact => ({
+    id, conversationId: 'work-1', runId: 'run-1', path: `C:\\${id}.docx`, label: `${id}.docx`, createdAt
   });
 
-  it('does not expose another run as the current phase', () => {
-    expect(workPhaseLabel([
-      { role: 'assistant', source: 'runtime', runId: 'old', content: '旧任务状态' }
-    ], 'run-1')).toBeUndefined();
+  it('groups consecutive tools between visible messages', () => {
+    const timeline = buildWorkTimeline(
+      [message('user-1', '2026-01-01T00:00:00Z'), message('assistant-1', '2026-01-01T00:00:03Z')],
+      [tool('tool-1', '2026-01-01T00:00:01Z'), tool('tool-2', '2026-01-01T00:00:02Z')],
+      []
+    );
+
+    expect(timeline.map(item => item.kind)).toEqual(['message', 'tools', 'message']);
+    expect(timeline[1].kind === 'tools' && timeline[1].tools.map(item => item.id)).toEqual(['tool-1', 'tool-2']);
+  });
+
+  it('uses delivered artifacts as a boundary between tool groups', () => {
+    const timeline = buildWorkTimeline(
+      [message('user-1', '2026-01-01T00:00:00Z')],
+      [tool('tool-1', '2026-01-01T00:00:01Z'), tool('tool-2', '2026-01-01T00:00:03Z')],
+      [artifact('result', '2026-01-01T00:00:02Z')]
+    );
+
+    expect(timeline.map(item => item.kind)).toEqual(['message', 'tools', 'artifacts', 'tools']);
+  });
+
+  it('groups artifacts delivered together', () => {
+    const timeline = buildWorkTimeline([], [], [
+      artifact('deck', '2026-01-01T00:00:01Z'), artifact('notes', '2026-01-01T00:00:02Z')
+    ]);
+
+    expect(timeline).toHaveLength(1);
+    expect(timeline[0].kind === 'artifacts' && timeline[0].artifacts).toHaveLength(2);
   });
 });

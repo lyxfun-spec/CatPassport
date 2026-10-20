@@ -1,3 +1,5 @@
+import type { ConversationMessage, WorkArtifact, WorkToolCall } from './shared';
+
 export function shouldSubmitComposer(key: string, shiftKey: boolean, isComposing: boolean): boolean {
   return key === 'Enter' && !shiftKey && !isComposing;
 }
@@ -44,23 +46,44 @@ export function greetingForHour(hour: number): string {
   return '晚上好，想聊些什么？';
 }
 
-export function workPhaseLabel(
-  messages: Array<{ role: string; source: string; content: string; runId?: string }>,
-  activeRunId?: string,
-  maximumLength = 72
-): string | undefined {
-  if (!activeRunId) return undefined;
-  const message = [...messages].reverse().find(item =>
-    item.role === 'assistant'
-    && item.source === 'runtime'
-    && item.runId === activeRunId
-    && item.content.trim().length > 0
-  );
-  if (!message) return undefined;
-  const line = message.content.split(/\r?\n/).map(value => value.trim()).find(Boolean)
-    ?.replace(/^[#>*\-\s]+/, '')
-    .replace(/^\*\*(.+)\*\*:?$/, '$1')
-    .trim();
-  if (!line) return undefined;
-  return line.length > maximumLength ? `${line.slice(0, maximumLength - 1)}…` : line;
+export type WorkTimelineItem =
+  | { kind: 'message'; key: string; createdAt: string; message: ConversationMessage }
+  | { kind: 'tools'; key: string; createdAt: string; tools: WorkToolCall[] }
+  | { kind: 'artifacts'; key: string; createdAt: string; artifacts: WorkArtifact[] };
+
+type RawWorkTimelineItem =
+  | { kind: 'message'; key: string; createdAt: string; order: number; message: ConversationMessage }
+  | { kind: 'tool'; key: string; createdAt: string; order: number; tool: WorkToolCall }
+  | { kind: 'artifact'; key: string; createdAt: string; order: number; artifact: WorkArtifact };
+
+export function buildWorkTimeline(
+  messages: ConversationMessage[],
+  tools: WorkToolCall[],
+  artifacts: WorkArtifact[]
+): WorkTimelineItem[] {
+  const raw: RawWorkTimelineItem[] = [
+    ...messages.map((message, order): RawWorkTimelineItem => ({ kind: 'message', key: message.id, createdAt: message.createdAt, order, message })),
+    ...tools.map((tool, order): RawWorkTimelineItem => ({ kind: 'tool', key: tool.id, createdAt: tool.createdAt, order: messages.length + order, tool })),
+    ...artifacts.map((artifact, order): RawWorkTimelineItem => ({ kind: 'artifact', key: artifact.id, createdAt: artifact.createdAt, order: messages.length + tools.length + order, artifact }))
+  ].sort((left, right) => {
+    const time = Date.parse(left.createdAt) - Date.parse(right.createdAt);
+    return Number.isNaN(time) || time === 0 ? left.order - right.order : time;
+  });
+
+  const timeline: WorkTimelineItem[] = [];
+  for (const item of raw) {
+    const previous = timeline.at(-1);
+    if (item.kind === 'tool') {
+      if (previous?.kind === 'tools') previous.tools.push(item.tool);
+      else timeline.push({ kind: 'tools', key: `tools-${item.tool.id}`, createdAt: item.createdAt, tools: [item.tool] });
+      continue;
+    }
+    if (item.kind === 'artifact') {
+      if (previous?.kind === 'artifacts') previous.artifacts.push(item.artifact);
+      else timeline.push({ kind: 'artifacts', key: `artifacts-${item.artifact.id}`, createdAt: item.createdAt, artifacts: [item.artifact] });
+      continue;
+    }
+    timeline.push({ kind: 'message', key: item.key, createdAt: item.createdAt, message: item.message });
+  }
+  return timeline;
 }
