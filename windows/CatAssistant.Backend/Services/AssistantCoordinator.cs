@@ -28,6 +28,7 @@ public sealed class AssistantCoordinator : IAsyncDisposable
     private readonly Dictionary<ulong, CatDevice> _devices = [];
     private readonly Dictionary<string, int> _cardRunBytes = [];
     private readonly Dictionary<string, CitationMarkerStreamFilter> _cardRunMarkerFilters = [];
+    private readonly Dictionary<string, CardMarkdownStream> _cardRunMasks = [];
     private readonly object _stateLock = new();
     private readonly object _audioLock = new();
     private readonly SemaphoreSlim _audioArrived = new(0);
@@ -285,7 +286,12 @@ public sealed class AssistantCoordinator : IAsyncDisposable
             switch (update.Type)
             {
                 case "run.started" when update.RunId is not null:
-                    lock (_stateLock) { _cardRunBytes[update.RunId] = 0; _cardRunMarkerFilters[update.RunId] = new CitationMarkerStreamFilter(); }
+                    lock (_stateLock)
+                    {
+                        _cardRunBytes[update.RunId] = 0;
+                        _cardRunMarkerFilters[update.RunId] = new CitationMarkerStreamFilter();
+                        _cardRunMasks[update.RunId] = new CardMarkdownStream();
+                    }
                     await _ble.SendAsync(MessageType.ChatStarted, ReadOnlyMemory<byte>.Empty, _lifetime.Token);
                     SetStatus("AI 正在回答", "正在生成回复");
                     break;
@@ -295,16 +301,22 @@ public sealed class AssistantCoordinator : IAsyncDisposable
                     {
                         if (!_cardRunMarkerFilters.TryGetValue(update.RunId, out var markerFilter))
                             _cardRunMarkerFilters[update.RunId] = markerFilter = new CitationMarkerStreamFilter();
-                        visible = markerFilter.Push(update.Delta);
+                        if (!_cardRunMasks.TryGetValue(update.RunId, out var mask))
+                            _cardRunMasks[update.RunId] = mask = new CardMarkdownStream();
+                        // 只遮蔽发往卡片的这一份副本；引用标记要先去掉，它不该参与行结构判断。
+                        visible = mask.Push(markerFilter.Push(update.Delta));
                     }
                     await SendCardDeltaAsync(update.RunId, visible);
                     break;
                 case "message.completed" when update.RunId is not null:
                 case "message.interrupted" when update.RunId is not null:
-                    string tail = "";
+                    string tail;
                     lock (_stateLock)
                     {
-                        if (_cardRunMarkerFilters.Remove(update.RunId, out var markerFilter)) tail = markerFilter.Flush();
+                        var markers = _cardRunMarkerFilters.Remove(update.RunId, out var markerFilter)
+                            ? markerFilter.Flush() : "";
+                        tail = _cardRunMasks.Remove(update.RunId, out var mask)
+                            ? mask.Push(markers) + mask.Flush() : markers;
                     }
                     await SendCardDeltaAsync(update.RunId, tail);
                     int count;
@@ -319,7 +331,12 @@ public sealed class AssistantCoordinator : IAsyncDisposable
                     SetStatus(update.Type == "message.interrupted" ? "回答已打断" : "回答完成", "可继续提问");
                     break;
                 case "run.failed":
-                    if (update.RunId is not null) lock (_stateLock) _cardRunMarkerFilters.Remove(update.RunId);
+                    if (update.RunId is not null)
+                        lock (_stateLock)
+                        {
+                            _cardRunMarkerFilters.Remove(update.RunId);
+                            _cardRunMasks.Remove(update.RunId);
+                        }
                     await _ble.SendAsync(MessageType.ChatError, CatProtocol.Utf8("服务暂时不可用，请稍后重试", 256), _lifetime.Token);
                     SetStatus("AI 服务错误", update.Error ?? "服务暂时不可用");
                     break;
