@@ -12,8 +12,8 @@
 #include "cat_adpcm.h"
 #include "cat_ble.h"
 #include "cat_clock.h"
+#include "cat_page.h"
 #include "cat_protocol.h"
-#include "cat_scroll.h"
 #include "cat_screen.h"
 #include "cat_state.h"
 #include "cat_ui.h"
@@ -35,7 +35,14 @@
 #define BLE_SEND_RETRY_MS 5U
 #define OK_HOLD_THRESHOLD_MS 300ULL
 #define INTERACTION_TICK_MS 16U
-#define SCROLL_RENDER_PERIOD_MS 40U
+/*
+ * 这块屏只能用 40 行 DMA 缓冲分块顺序推屏，一次整屏重绘要十几毫秒才能落地，所以阅读
+ * 交互改成翻页：一次按键一帧，屏幕几乎总是停在完整且整行对齐的画面上。
+ * 按住连续翻页的节奏下限取 300 ms，再快就退化成频繁整屏重绘。
+ */
+#define PAGE_HOLD_REPEAT_MS 300U
+/* 流式回答期间的正文重建节奏：delta 比这密得多，逐条重排整段文字扛不住。 */
+#define ANSWER_RENDER_PERIOD_MS 300U
 #define BATTERY_REFRESH_MS 10000ULL
 #define HELLO_RETRY_MS 2000ULL
 #define NOTICE_DURATION_MS 1500ULL
@@ -64,6 +71,7 @@ typedef struct {
 } input_t;
 
 static const char *TAG = "cat_app";
+
 static QueueHandle_t s_queue;
 static TaskHandle_t s_audio_task;
 static cat_app_model_t s_model;
@@ -89,9 +97,12 @@ static uint64_t s_notice_until_ms;
 static bool s_suppress_button_action[3];
 static bool s_ok_held;
 static uint64_t s_ok_pressed_at_ms;
-static uint64_t s_scroll_tick_ms;
-static cat_scroll_motion_t s_scroll_motion;
-static bool s_ui_refresh_pending;
+static cat_page_view_t s_page;
+static bool s_content_dirty;
+static bool s_follow_bottom = true;
+static uint64_t s_content_rendered_at_ms;
+static int8_t s_page_held;
+static uint64_t s_page_next_ms;
 
 static void apply(cat_app_event_t event);
 
@@ -166,42 +177,77 @@ static uint16_t next_message_id(void)
     return s_message_id;
 }
 
+/* 用面板实际几何与当前偏移反推页码：UI 层复位视口时，这里会自然回到第 0 页。 */
+static void sync_page_locked(void)
+{
+    cat_ui_answer_view_t view;
+    cat_ui_answer_view(&view);
+    cat_page_set_geometry(&s_page, view.line_height, view.content_height, view.viewport_height);
+    cat_page_set_y(&s_page, view.scroll_y);
+}
+
+/*
+ * 面板当前是否停在正文底部（末页偏移与最大偏移最多差一行）。用实际偏移判定，不用
+ * 页码，因为正文被整段换掉时页码是上一个回答的旧值，照它跟随会把新回答直接翻到末页。
+ */
+static bool shown_at_last_locked(void)
+{
+    cat_ui_answer_view_t view;
+    cat_ui_answer_view(&view);
+    const int32_t max_y = view.content_height - view.viewport_height;
+    if (max_y <= 0) return true;
+    return view.scroll_y + view.line_height >= max_y;
+}
+
+/* 调用方必须持有 LVGL 锁。 */
+static void render_now_locked(void)
+{
+    const bool follow = shown_at_last_locked();
+    cat_ui_render(&s_model, s_text, s_text_length, s_battery,
+                  cat_clock_minute_of_day(&s_clock, monotonic_ms()));
+    sync_page_locked();
+    /* 只有本来就停在正文底部时才跟随新内容，中途阅读的人不该被流式刷新推走。 */
+    if (follow) cat_page_last(&s_page);
+    cat_ui_show_y(cat_page_y(&s_page));
+    s_follow_bottom = follow;
+    s_content_dirty = false;
+    s_content_rendered_at_ms = monotonic_ms();
+}
+
+static void render_now(void)
+{
+    if (!bsp_lvgl_lock(200)) return;
+    render_now_locked();
+    bsp_lvgl_unlock();
+}
+
 static void render(void)
 {
     /*
-     * Rebuilding a long, recolored label while its viewport is moving mixes a
-     * text-layout update with the panel's partial scroll redraw.  Keep the
-     * visible snapshot stable and coalesce streaming/clock/battery updates
-     * until scrolling has settled.
+     * 流式期间 delta 远比这密，而重排整段正文要几十毫秒，所以只标脏，由
+     * update_interactions 按 ANSWER_RENDER_PERIOD_MS 的节奏落地。
      */
-    if (cat_scroll_is_active(&s_scroll_motion)) {
-        s_ui_refresh_pending = true;
+    if (s_model.state == CAT_STATE_AI_STREAMING) {
+        s_content_dirty = true;
         return;
     }
-    if (!bsp_lvgl_lock(200)) return;
-    cat_ui_render(&s_model, s_text, s_text_length, s_battery,
-                  cat_clock_minute_of_day(&s_clock, monotonic_ms()));
-    bsp_lvgl_unlock();
-    s_ui_refresh_pending = false;
+    render_now();
 }
 
-static bool scroll_text_pixels(int pixels)
+/*
+ * 一次按键一帧：锁内补上待刷新内容、移动一页、立即推屏。返回 false 只表示没拿到锁，
+ * 这一次翻页意图必须留给调用方重试，不能当成已经完成。
+ */
+static bool turn_page(int direction)
 {
-    if (!bsp_lvgl_lock(100)) return false;
-    const bool moved = cat_ui_scroll_text_pixels(pixels);
+    if (!bsp_lvgl_lock(300)) return false;
+    if (s_content_dirty) render_now_locked();
+    else sync_page_locked();
+    cat_page_move_by(&s_page, direction);
+    cat_ui_show_y(cat_page_y(&s_page));
+    s_follow_bottom = shown_at_last_locked();
     bsp_lvgl_unlock();
-    return moved;
-}
-
-static void finish_scroll_frame(void)
-{
-    if (s_ui_refresh_pending) {
-        render();
-        return;
-    }
-    if (!bsp_lvgl_lock(200)) return;
-    cat_ui_settle_scroll();
-    bsp_lvgl_unlock();
+    return true;
 }
 
 static void set_text(const uint8_t *text, size_t length)
@@ -484,7 +530,7 @@ static void apply(cat_app_event_t event)
     execute(actions);
 }
 
-static bool text_is_scrollable(void)
+static bool text_is_paged(void)
 {
     return s_model.state == CAT_STATE_TRANSCRIPT_REVIEW ||
            s_model.state == CAT_STATE_AI_STREAMING ||
@@ -523,25 +569,20 @@ static void update_interactions(uint64_t now)
     }
     if (s_ok_held && s_model.state != CAT_STATE_RECORDING) s_ok_held = false;
 
-    if (!text_is_scrollable()) {
-        const bool was_active = cat_scroll_is_active(&s_scroll_motion);
-        cat_scroll_stop(&s_scroll_motion);
-        s_scroll_tick_ms = now;
-        if (was_active) finish_scroll_frame();
+    if (!text_is_paged()) {
+        s_page_held = 0;
         return;
     }
-    if (!cat_scroll_is_active(&s_scroll_motion)) {
-        s_scroll_tick_ms = now;
-        return;
+    /* 按住连续翻页；首次翻页在按下那一刻已经完成，这里只负责重复。 */
+    if (s_page_held != 0 && now >= s_page_next_ms && turn_page(s_page_held)) {
+        s_page_next_ms = now + PAGE_HOLD_REPEAT_MS;
     }
-    const uint32_t elapsed = s_scroll_tick_ms == 0 || now <= s_scroll_tick_ms
-                                 ? INTERACTION_TICK_MS
-                                 : (uint32_t)(now - s_scroll_tick_ms);
-    if (elapsed < SCROLL_RENDER_PERIOD_MS) return;
-    s_scroll_tick_ms = now;
-    const int32_t pixels = cat_scroll_update(&s_scroll_motion, elapsed);
-    if (pixels != 0 && !scroll_text_pixels(pixels)) cat_scroll_stop(&s_scroll_motion);
-    if (!cat_scroll_is_active(&s_scroll_motion)) finish_scroll_frame();
+    /*
+     * 只有跟着正文底部读的读者才需要即时看到新内容；停在中途的人，追加的文字要等他
+     * 翻页时才用得上，在此之前一帧都不必重绘。
+     */
+    if (s_content_dirty && s_follow_bottom &&
+        now - s_content_rendered_at_ms >= ANSWER_RENDER_PERIOD_MS) render_now();
 }
 
 static void handle_message(const cat_protocol_message_t *message)
@@ -635,15 +676,17 @@ static void handle_button(bsp_btn_t button, bsp_btn_ev_t event)
         }
     }
     note_screen_activity();
-    if (text_is_scrollable() && (button == BSP_BTN_UP || button == BSP_BTN_DOWN)) {
+    if (text_is_paged() && (button == BSP_BTN_UP || button == BSP_BTN_DOWN)) {
         const int direction = button == BSP_BTN_DOWN ? 1 : -1;
         if (event == BSP_BTN_PRESS) {
-            cat_scroll_press(&s_scroll_motion, direction);
-            s_scroll_tick_ms = monotonic_ms();
+            s_page_held = (int8_t)direction;
+            /* 拿不到锁就不推进节奏，交给 16ms 循环立刻重试，别让一次按键凭空消失。 */
+            s_page_next_ms = turn_page(direction) ? monotonic_ms() + PAGE_HOLD_REPEAT_MS
+                                                  : monotonic_ms();
         } else if (event == BSP_BTN_RELEASE) {
-            cat_scroll_release(&s_scroll_motion, direction);
+            s_page_held = 0;
         }
-        /* CLICK/LONG 在阅读页全部被消费，永远不会落入业务状态机。 */
+        /* CLICK/DOUBLE/LONG 在阅读页全部被消费，永远不会落入业务状态机。 */
         return;
     }
     if (button == BSP_BTN_OK) handle_ok_button(event, monotonic_ms());
@@ -706,7 +749,7 @@ static void handle_pending_ble_state(void)
         atomic_store_explicit(&s_recording, false, memory_order_release);
         s_ok_held = false;
         s_last_hello_ms = 0;
-        cat_scroll_stop(&s_scroll_motion);
+        s_page_held = 0;
         cat_protocol_reassembler_init(&s_reassembler, s_rx_buffer, sizeof(s_rx_buffer));
         apply(CAT_EVENT_BLE_DISCONNECTED);
     }
@@ -720,7 +763,7 @@ static void app_task(void *context)
     (void)context;
     input_t input;
     for (;;) {
-        const bool interaction_active = s_ok_held || cat_scroll_is_active(&s_scroll_motion);
+        const bool interaction_active = s_ok_held || s_page_held != 0;
         const TickType_t wait = pdMS_TO_TICKS(interaction_active ? INTERACTION_TICK_MS : 250U);
         if (xQueueReceive(s_queue, &input, wait) == pdTRUE) {
             switch (input.type) {
@@ -786,7 +829,7 @@ void app_main(void)
     }
     bsp_display_backlight(SCREEN_ACTIVE_BRIGHTNESS);
     cat_state_init(&s_model);
-    cat_scroll_init(&s_scroll_motion);
+    cat_page_reset(&s_page);
     cat_clock_init(&s_clock);
     cat_screen_init(&s_screen, load_screen_timeout(), monotonic_ms());
     cat_protocol_reassembler_init(&s_reassembler, s_rx_buffer, sizeof(s_rx_buffer));

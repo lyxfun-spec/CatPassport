@@ -4,7 +4,6 @@
 #include <string.h>
 
 #include "lvgl.h"
-#include "cat_markdown.h"
 #include "cat_protocol.h"
 #include "cat_sprite_assets.h"
 
@@ -17,8 +16,13 @@ LV_FONT_DECLARE(cat_font_16);
 #define COLOR_ACCENT 0x59C9B2
 #define COLOR_MUTED 0x87918F
 #define TEXT_BODY_Y 42
-#define TEXT_BODY_HEIGHT 268
-#define FOLLOW_LATEST_MARGIN 20
+/*
+ * 可视正文高度必须是行高的整数倍：268 时内容区只有 238px，8 行余 8px，卡片底边永远
+ * 会切掉一行的尾巴。262 - 上下边框 2 - 上下 padding 20 = 240 = 正好 8 行。
+ */
+#define TEXT_BODY_HEIGHT 262
+#define CARD_PAD 10
+#define CARD_BORDER 1
 
 static lv_obj_t *s_time;
 static lv_obj_t *s_status;
@@ -30,8 +34,11 @@ static lv_obj_t *s_cat_image;
 static cat_app_state_t s_cat_state = CAT_STATE_DISCONNECTED;
 static cat_app_state_t s_layout_state = CAT_STATE_DISCONNECTED;
 static uint8_t s_animation_tick;
-static bool s_follow_latest = true;
-static char s_markdown_text[CAT_ANSWER_MAX + CAT_MARKDOWN_RENDER_EXTRA + 1U];
+
+/* 上一次真正写进 label 的正文指纹：长度、内容散列和是否非空。 */
+static uint32_t s_applied_hash;
+static size_t s_applied_length;
+static uint8_t s_applied_branch;
 
 /* 预录阶段保持原页面，超过 300 ms 后才切换到“正在听”。 */
 static cat_app_state_t display_state(const cat_app_model_t *model)
@@ -128,7 +135,7 @@ void cat_ui_init(void)
     lv_obj_set_style_border_color(s_card, lv_color_hex(COLOR_BORDER), 0);
     lv_obj_set_style_border_width(s_card, 1, 0);
     lv_obj_set_style_radius(s_card, 10, 0);
-    lv_obj_set_style_pad_all(s_card, 10, 0);
+    lv_obj_set_style_pad_all(s_card, CARD_PAD, 0);
     lv_obj_set_scroll_dir(s_card, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(s_card, LV_SCROLLBAR_MODE_AUTO);
     lv_obj_set_style_bg_color(s_card, lv_color_hex(COLOR_ACCENT), LV_PART_SCROLLBAR);
@@ -198,43 +205,73 @@ static void set_layout(cat_app_state_t state)
     if (state != s_layout_state) {
         const bool preserve_answer_position =
             answer_text_state(state) && answer_text_state(s_layout_state);
-        if (!preserve_answer_position) {
-            s_follow_latest = answer_text_state(state);
-            lv_obj_scroll_to_y(s_card, 0, LV_ANIM_OFF);
-        }
+        /* 当前页由调用方按面板实际偏移反推，这里只负责复位，不另存状态。 */
+        if (!preserve_answer_position) lv_obj_scroll_to_y(s_card, 0, LV_ANIM_OFF);
     }
     s_layout_state = state;
 }
 
-bool cat_ui_scroll_text_pixels(int pixels)
+/*
+ * 阅读布局把可视正文区补到整行的整数倍：多余的零头收进底部 padding，于是任何一页的
+ * 底边都落在行与行之间，不会露出被横切的半行。卡片尺寸以后怎么改都成立。
+ * 其余布局（例如错误卡片）不分页，恢复基础 padding，免得白白压掉一行正文。
+ */
+static void snap_answer_viewport(bool reading_layout)
 {
-    if (s_card == NULL || lv_obj_has_flag(s_card, LV_OBJ_FLAG_HIDDEN) || pixels == 0)
-        return false;
-    lv_obj_update_layout(s_card);
-    const int32_t current = lv_obj_get_scroll_y(s_card);
-    const int32_t maximum = current + lv_obj_get_scroll_bottom(s_card);
-    int32_t target = current + pixels;
-    if (target < 0) target = 0;
-    if (target > maximum) target = maximum;
-    if (pixels < 0) s_follow_latest = false;
-    else if (target >= maximum - FOLLOW_LATEST_MARGIN) s_follow_latest = true;
-    lv_obj_scroll_to_y(s_card, target, LV_ANIM_OFF);
-    return target != current;
+    if (s_card == NULL || s_text == NULL) return;
+    const lv_font_t *font = lv_obj_get_style_text_font(s_text, LV_PART_MAIN);
+    const int32_t line = font == NULL ? 0 : lv_font_get_line_height(font);
+    if (line <= 0) return;
+    if (!reading_layout) {
+        lv_obj_set_style_pad_bottom(s_card, CARD_PAD, 0);
+        return;
+    }
+    const int32_t usable = lv_obj_get_height(s_card) - 2 * CARD_BORDER -
+                           lv_obj_get_style_pad_top(s_card, 0) - CARD_PAD;
+    lv_obj_set_style_pad_bottom(s_card, CARD_PAD + usable % line, 0);
 }
 
-void cat_ui_settle_scroll(void)
+void cat_ui_answer_view(cat_ui_answer_view_t *view)
+{
+    if (view == NULL) return;
+    *view = (cat_ui_answer_view_t){0};
+    if (s_card == NULL || s_text == NULL) return;
+    lv_obj_update_layout(s_card);
+    const lv_font_t *font = lv_obj_get_style_text_font(s_text, LV_PART_MAIN);
+    view->line_height = font == NULL ? 0 : (int)lv_font_get_line_height(font);
+    view->viewport_height = (int)lv_obj_get_content_height(s_card);
+    view->content_height = (int)lv_obj_get_height(s_text);
+    view->scroll_y = (int)lv_obj_get_scroll_y(s_card);
+}
+
+void cat_ui_show_y(int32_t y)
 {
     if (s_card == NULL || lv_obj_has_flag(s_card, LV_OBJ_FLAG_HIDDEN)) return;
-
-    /*
-     * The ST7789 is updated through a partial, single DMA buffer.  A moving
-     * viewport can therefore leave the panel between two scroll frames until
-     * LVGL's next refresh timer fires.  Redraw the final viewport immediately
-     * after inertia stops so text rows and Markdown colors become one coherent
-     * frame without a visible settling delay.
-     */
+    if (y == lv_obj_get_scroll_y(s_card)) return;
+    lv_obj_scroll_to_y(s_card, y, LV_ANIM_OFF);
+    /* 一次按键一帧：立刻推屏，不等 LVGL 的下一个刷新 tick。偏移没变则完全不重绘。 */
     lv_obj_invalidate(s_card);
     lv_refr_now(lv_obj_get_display(s_card));
+}
+
+/*
+ * 正文指纹没变时跳过 label 重排。电量、时钟、通知都会触发整段刷新，而一次 12KB 正文的
+ * 重排是几十毫秒量级，足以挤掉一次翻页帧。
+ */
+static void apply_answer_text(const char *text, size_t text_length)
+{
+    const uint8_t branch = (text == NULL || text_length == 0) ? 0 : 1;
+    uint32_t hash = 2166136261U;
+    if (text != NULL) {
+        for (size_t i = 0; i < text_length; ++i) hash = (hash ^ (uint8_t)text[i]) * 16777619U;
+    }
+    if (branch != 0 && branch == s_applied_branch && text_length == s_applied_length &&
+        hash == s_applied_hash)
+        return;
+    s_applied_hash = hash;
+    s_applied_length = text_length;
+    s_applied_branch = branch;
+    lv_label_set_text(s_text, branch == 1 ? text : "");
 }
 
 void cat_ui_render(const cat_app_model_t *model, const char *text, size_t text_length,
@@ -273,20 +310,6 @@ void cat_ui_render(const cat_app_model_t *model, const char *text, size_t text_l
     else strcpy(battery, "--%");
     lv_label_set_text(s_battery, battery);
 
-    if (text != NULL && text_length > 0 && answer_text_state(shown_state)) {
-        const cat_markdown_result_t markdown =
-            cat_markdown_format(text, text_length, s_markdown_text, sizeof(s_markdown_text));
-        lv_label_set_recolor(s_text, markdown.formatted);
-        lv_label_set_text(s_text, s_markdown_text);
-    } else if (text != NULL && text_length > 0) {
-        lv_label_set_recolor(s_text, false);
-        lv_label_set_text(s_text, text);
-    } else {
-        lv_label_set_recolor(s_text, false);
-        lv_label_set_text(s_text, "");
-    }
-    if (!lv_obj_has_flag(s_card, LV_OBJ_FLAG_HIDDEN)) {
-        lv_obj_update_layout(s_card);
-        if (s_follow_latest) lv_obj_scroll_to_y(s_card, LV_COORD_MAX, LV_ANIM_OFF);
-    }
+    apply_answer_text(text, text_length);
+    snap_answer_viewport(full_text_state(shown_state));
 }

@@ -29,7 +29,7 @@ run_static_checks() {
         -o "${test_dir}/test_ui_pixel_math"
     "${test_dir}/test_ui_pixel_math"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
-        tests/test_cat_core.c main/cat_protocol.c main/cat_adpcm.c main/cat_clock.c main/cat_markdown.c main/cat_scroll.c main/cat_screen.c main/cat_state.c \
+        tests/test_cat_core.c main/cat_protocol.c main/cat_adpcm.c main/cat_clock.c main/cat_page.c main/cat_screen.c main/cat_state.c \
         -lm -o "${test_dir}/test_cat_core"
     "${test_dir}/test_cat_core"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \

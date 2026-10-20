@@ -7,9 +7,8 @@
 
 #include "cat_adpcm.h"
 #include "cat_clock.h"
-#include "cat_markdown.h"
+#include "cat_page.h"
 #include "cat_protocol.h"
-#include "cat_scroll.h"
 #include "cat_screen.h"
 #include "cat_state.h"
 
@@ -52,43 +51,6 @@ static void test_clock(void)
     assert(cat_clock_minute_of_day(&clock, 2000) == 23 * 60 + 59);
     assert(cat_clock_minute_of_day(&clock, 32000) == 0);
     assert(cat_clock_minute_of_day(&clock, 92000) == 1);
-}
-
-static void test_markdown(void)
-{
-    char output[1024];
-    cat_markdown_result_t result = cat_markdown_format(
-        "# 标题\n普通 **重点** 和 *提示*、`code`。\n"
-        "- 第一项\n2. 第二项\n> 引用\n[官网](https://example.com)\n"
-        "```c\nint value = 1; # comment\n```\n---",
-        strlen("# 标题\n普通 **重点** 和 *提示*、`code`。\n"
-               "- 第一项\n2. 第二项\n> 引用\n[官网](https://example.com)\n"
-               "```c\nint value = 1; # comment\n```\n---"),
-        output, sizeof(output));
-    assert(result.formatted && !result.truncated);
-    assert(strstr(output, "#59C9B2 标题#") != NULL);
-    assert(strstr(output, "**") == NULL);
-    assert(strstr(output, "#9CCFD8 code#") != NULL);
-    assert(strstr(output, "https://example.com") == NULL);
-    assert(strstr(output, "[code: c]") != NULL);
-    assert(strstr(output, "\xef\xbc\x83 comment") != NULL);
-    assert(strstr(output, "----------------") != NULL);
-
-    result = cat_markdown_format("未闭合 **内容", strlen("未闭合 **内容"),
-                                 output, sizeof(output));
-    assert(!result.formatted && !result.truncated);
-    assert(strcmp(output, "未闭合 **内容") == 0);
-
-    result = cat_markdown_format("```\npartial", strlen("```\npartial"),
-                                 output, sizeof(output));
-    assert(result.formatted && !result.truncated);
-    assert(strstr(output, "#9CCFD8   partial#") != NULL);
-
-    char small[12];
-    result = cat_markdown_format("# 这是一个很长的标题", strlen("# 这是一个很长的标题"),
-                                 small, sizeof(small));
-    assert(result.formatted && result.truncated);
-    assert(small[sizeof(small) - 1] == '\0' || strlen(small) < sizeof(small));
 }
 
 static void test_screen_timeout(void)
@@ -228,38 +190,82 @@ static void test_button_interactions(void)
     assert(model.state == CAT_STATE_ANSWER_READY);
 }
 
-static void test_scroll_motion(void)
+static void test_page_paging(void)
 {
-    cat_scroll_motion_t motion;
-    cat_scroll_init(&motion);
-    assert(!cat_scroll_is_active(&motion));
+    enum { LINE = 30, VIEW = 240 };
+    cat_page_view_t view;
 
-    cat_scroll_press(&motion, 1);
-    assert(cat_scroll_is_active(&motion));
-    assert(cat_scroll_update(&motion, 16) > 0);
+    /* 度量还没拿到时按单页处理，偏移只能是 0。 */
+    cat_page_reset(&view);
+    cat_page_set_geometry(&view, 0, 0, 0);
+    assert(view.page_count == 1 && cat_page_y(&view) == 0 && view.page == view.page_count - 1);
 
-    int32_t held_distance = 0;
-    for (int i = 0; i < 50; ++i) held_distance += cat_scroll_update(&motion, 20);
-    assert(held_distance > 180 && held_distance < 350);
+    /* 内容不足一屏：单页，翻页不产生任何新帧。 */
+    cat_page_reset(&view);
+    cat_page_set_geometry(&view, LINE, VIEW, VIEW);
+    assert(view.page_count == 1);
+    cat_page_move_by(&view, 1);
+    assert(cat_page_y(&view) == 0);
 
-    cat_scroll_press(&motion, -1);
-    assert(cat_scroll_update(&motion, 16) < 0);
-    cat_scroll_release(&motion, -1);
-    for (int i = 0; i < 100 && cat_scroll_is_active(&motion); ++i)
-        (void)cat_scroll_update(&motion, 20);
-    assert(!cat_scroll_is_active(&motion));
+    /* 两屏内容：页步长 = 可视高 - 行高，相邻页重叠正好一行。 */
+    cat_page_reset(&view);
+    cat_page_set_geometry(&view, LINE, 480, VIEW);
+    assert(view.page_step == VIEW - LINE);
+    assert(view.page_count == 3);
+    assert(cat_page_y(&view) == 0);
+    cat_page_move_by(&view, 1);
+    assert(cat_page_y(&view) == 210);
+    cat_page_move_by(&view, 1);
+    /* 末页夹到行网格，且必须真的把最后一行露出来。 */
+    assert(cat_page_y(&view) == 240 && view.page == view.page_count - 1);
+    cat_page_move_by(&view, 1);
+    assert(cat_page_y(&view) == 240);
+
+    /* 每一页的偏移都落在行网格上，任何一页都不会有字被横切。 */
+    cat_page_reset(&view);
+    cat_page_set_geometry(&view, LINE, 1230, VIEW);
+    assert(view.page_count == 6);
+    for (int page = 0; page < view.page_count; ++page) {
+        view.page = page;
+        const int32_t y = cat_page_y(&view);
+        assert(y % LINE == 0 && y >= 0 && y <= 1230 - VIEW);
+    }
+
+    /* 向上翻到顶、向下越界都停在边界，不会绕回另一头。 */
+    view.page = 0;
+    cat_page_move_by(&view, -3);
+    assert(view.page == 0 && cat_page_y(&view) == 0);
+    cat_page_move_by(&view, 99);
+    assert(view.page == view.page_count - 1);
+
+    /* 回答继续变长后页码夹取到新范围；UI 复位视口时按实际偏移反推页码。 */
+    cat_page_reset(&view);
+    cat_page_set_geometry(&view, LINE, 1230, VIEW);
+    cat_page_last(&view);
+    cat_page_set_geometry(&view, LINE, 480, VIEW);
+    assert(view.page == 2 && cat_page_y(&view) == 240);
+    cat_page_set_y(&view, 0);
+    assert(view.page == 0);
+    cat_page_set_y(&view, 210);
+    assert(view.page == 1);
+    cat_page_set_y(&view, 9999);
+    assert(view.page == view.page_count - 1);
+
+    /* 可视高没对齐到整行时按能装下的行数算，页步长仍是行高倍数。 */
+    cat_page_reset(&view);
+    cat_page_set_geometry(&view, LINE, 900, 238);
+    assert(view.line_height == LINE && view.page_step == 6 * LINE);
 }
 
 int main(void)
 {
     test_protocol();
-    test_markdown();
     test_clock();
     test_screen_timeout();
     test_adpcm();
     test_state();
     test_button_interactions();
-    test_scroll_motion();
+    test_page_paging();
     puts("Cat assistant core tests: PASS");
     return 0;
 }
