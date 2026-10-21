@@ -35,6 +35,7 @@ typedef enum {
     CAT_MSG_APP_STATUS = 0x8a,
     CAT_MSG_TIME_SYNC = 0x8b,
     CAT_MSG_SCREEN_TIMEOUT = 0x8c,
+    CAT_MSG_CONVERSATION_TITLE = 0x8d,
     CAT_MSG_PONG = 0xfe,
 } cat_message_type_t;
 

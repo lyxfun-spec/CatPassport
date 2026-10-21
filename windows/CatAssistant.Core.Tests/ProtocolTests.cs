@@ -31,6 +31,10 @@ public class ProtocolTests
     }
 
     [Fact]
+    public void ConversationTitleHasStableWireValue()
+        => Assert.Equal(0x8D, (byte)MessageType.ConversationTitle);
+
+    [Fact]
     public void FiltersUnsupportedUnicodeButKeepsCommonText()
         => Assert.Equal("你好，cat!\n", DisplayText.Filter("你好，cat!🐈\n𝄞"));
 

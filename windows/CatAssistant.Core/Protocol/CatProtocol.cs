@@ -56,6 +56,7 @@ public enum MessageType : byte
     AppReady = 0x81, AsrStarted = 0x82, AsrResult = 0x83, AsrError = 0x84,
     ChatStarted = 0x85, ChatDelta = 0x86, ChatDone = 0x87, ChatError = 0x88,
     SessionReset = 0x89, AppStatus = 0x8A, TimeSync = 0x8B, ScreenTimeout = 0x8C,
+    ConversationTitle = 0x8D,
     Pong = 0xFE
 }
 

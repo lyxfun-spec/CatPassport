@@ -25,6 +25,7 @@ LV_FONT_DECLARE(cat_font_16);
 #define CARD_BORDER 1
 
 static lv_obj_t *s_time;
+static lv_obj_t *s_conversation_caption;
 static lv_obj_t *s_status;
 static lv_obj_t *s_hint;
 static lv_obj_t *s_text;
@@ -121,11 +122,20 @@ void cat_ui_init(void)
 
     build_cat(screen);
 
+    s_conversation_caption = lv_label_create(screen);
+    lv_obj_set_width(s_conversation_caption, 210);
+    lv_obj_set_style_text_font(s_conversation_caption, &cat_font_16, 0);
+    lv_obj_set_style_text_align(s_conversation_caption, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(s_conversation_caption, lv_color_hex(COLOR_MUTED), 0);
+    lv_label_set_text(s_conversation_caption, "当前对话");
+    lv_obj_align(s_conversation_caption, LV_ALIGN_TOP_MID, 0, 122);
+
     s_status = lv_label_create(screen);
     lv_obj_set_width(s_status, 210);
     lv_obj_set_style_text_font(s_status, &cat_font_16, 0);
     lv_obj_set_style_text_align(s_status, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_status, lv_color_hex(COLOR_ACCENT), 0);
+    lv_label_set_long_mode(s_status, LV_LABEL_LONG_DOT);
     lv_obj_align(s_status, LV_ALIGN_TOP_MID, 0, 128);
 
     s_card = lv_obj_create(screen);
@@ -183,6 +193,7 @@ static void set_layout(cat_app_state_t state)
     const bool show_error = state == CAT_STATE_ERROR;
     if (full_text) {
         lv_obj_add_flag(s_cat_image, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_conversation_caption, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(s_card, LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_width(s_status, 100);
         lv_obj_align(s_status, LV_ALIGN_TOP_MID, 0, 8);
@@ -192,7 +203,13 @@ static void set_layout(cat_app_state_t state)
     } else {
         lv_obj_remove_flag(s_cat_image, LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_width(s_status, 210);
-        lv_obj_align(s_status, LV_ALIGN_TOP_MID, 0, 128);
+        if (state == CAT_STATE_IDLE) {
+            lv_obj_remove_flag(s_conversation_caption, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_align(s_status, LV_ALIGN_TOP_MID, 0, 146);
+        } else {
+            lv_obj_add_flag(s_conversation_caption, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_align(s_status, LV_ALIGN_TOP_MID, 0, 128);
+        }
         lv_obj_remove_flag(s_hint, LV_OBJ_FLAG_HIDDEN);
         if (show_error) {
             lv_obj_remove_flag(s_card, LV_OBJ_FLAG_HIDDEN);
@@ -275,23 +292,25 @@ static void apply_answer_text(const char *text, size_t text_length)
 }
 
 void cat_ui_render(const cat_app_model_t *model, const char *text, size_t text_length,
-                   int battery_percent, int minute_of_day)
+                   const char *conversation_title, int battery_percent, int minute_of_day)
 {
     if (model == NULL) return;
     static const char *STATUS[] = {
-        "等待手机连接", "随时可以说话", "正在听", "正在识别",
+        "等待客户端连接", "新对话", "正在听", "正在识别",
         "识别结果", "正在思考", "AI 回复", "AI 回复", "遇到一点问题",
         "新对话已开启"
     };
     static const char *HINT[] = {
-        "请在手机打开小猫助手", "按住 OK 说话", "松开发送", "长按下键取消",
+        "请打开小猫助手客户端", "按住 OK 说话", "松开发送", "长按下键取消",
         "", "长按下键取消", "", "",
         "OK返回  长按上键回首页", "可以开始新的聊天了"
     };
     const cat_app_state_t shown_state = display_state(model);
     const unsigned index = (unsigned)shown_state < sizeof(STATUS) / sizeof(STATUS[0])
                                ? (unsigned)shown_state : 0;
-    lv_label_set_text(s_status, STATUS[index]);
+    lv_label_set_text(s_status, shown_state == CAT_STATE_IDLE && conversation_title != NULL &&
+                                   conversation_title[0] != '\0'
+                               ? conversation_title : STATUS[index]);
     lv_label_set_text(s_hint, HINT[index]);
     set_cat_state(shown_state);
     set_layout(shown_state);

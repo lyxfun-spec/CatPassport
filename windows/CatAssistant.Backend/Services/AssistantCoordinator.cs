@@ -275,7 +275,13 @@ public sealed class AssistantCoordinator : IAsyncDisposable
     {
         if (update.Type is "conversation.created" or "conversation.activated" or "conversation.deleted" or "device.binding")
             PublishState();
-        if (!IsLinkReady() || update.ConversationId != _conversations.DeviceActiveConversationId) return;
+        if (!IsLinkReady()) return;
+        if (update.Type == "conversation.deleted")
+        {
+            _ = SendCurrentConversationTitleIgnoringFailureAsync();
+            return;
+        }
+        if (update.ConversationId != _conversations.DeviceActiveConversationId) return;
         _ = RelayConversationToCardAsync(update);
     }
 
@@ -285,6 +291,9 @@ public sealed class AssistantCoordinator : IAsyncDisposable
         {
             switch (update.Type)
             {
+                case "conversation.updated":
+                    await SendCurrentConversationTitleAsync();
+                    break;
                 case "run.started" when update.RunId is not null:
                     lock (_stateLock)
                     {
@@ -342,6 +351,7 @@ public sealed class AssistantCoordinator : IAsyncDisposable
                     break;
                 case "conversation.activated" when _conversations.DeviceFollowDesktop:
                 case "device.binding":
+                    await SendCurrentConversationTitleAsync();
                     await _ble.SendAsync(MessageType.SessionReset, ReadOnlyMemory<byte>.Empty, _lifetime.Token);
                     SetStatus("卡片已就绪", "已跟随电脑当前对话");
                     break;
@@ -452,6 +462,7 @@ public sealed class AssistantCoordinator : IAsyncDisposable
             throw new ProtocolException("卡片协议版本不兼容。");
         var ready = JsonSerializer.SerializeToUtf8Bytes(new { app = "windows", protocol = 1, asr = "dashscope", chat = "dashscope" });
         await _ble.SendAsync(MessageType.AppReady, ready, _lifetime.Token);
+        await SendCurrentConversationTitleAsync();
         await SendAppStatusAsync();
         await SendUInt32Async(MessageType.TimeSync, (uint)DateTime.Now.TimeOfDay.TotalSeconds);
         await SendUInt32Async(MessageType.ScreenTimeout, Settings.ScreenTimeoutSeconds);
@@ -569,6 +580,7 @@ public sealed class AssistantCoordinator : IAsyncDisposable
         await _conversations.DetachDeviceForNewConversationAsync();
         PublishState();
         if (notifyCard) await _ble.SendAsync(MessageType.SessionReset, payload.Length == 4 ? payload : [], _lifetime.Token);
+        await SendCurrentConversationTitleAsync();
     }
     private async Task RunCardOperationAsync(Func<CancellationToken, Task> operation)
     {
@@ -717,7 +729,14 @@ public sealed class AssistantCoordinator : IAsyncDisposable
     }
     private void OnNetworkStatusChanged(object sender) { if (IsLinkReady()) _ = SendAppStatusIgnoringFailureAsync(); }
     private async Task SendAppStatusIgnoringFailureAsync() { try { await SendAppStatusAsync(); } catch { } }
+    private async Task SendCurrentConversationTitleIgnoringFailureAsync() { try { await SendCurrentConversationTitleAsync(); } catch { } }
     private Task SendUInt32Async(MessageType type, uint value) { var payload = new byte[4]; BinaryPrimitives.WriteUInt32LittleEndian(payload, value); return _ble.SendAsync(type, payload, _lifetime.Token); }
+    private async Task SendCurrentConversationTitleAsync()
+    {
+        var id = _conversations.DeviceActiveConversationId;
+        var title = id is null ? SqliteRepository.UntitledTitle : (await _conversations.GetAsync(id)).Conversation.Title;
+        await _ble.SendAsync(MessageType.ConversationTitle, CatProtocol.Utf8(title, 256), _lifetime.Token);
+    }
     private Task SendAppStatusAsync()
     {
         var online = NetworkInformation.GetInternetConnectionProfile()?.GetNetworkConnectivityLevel() == NetworkConnectivityLevel.InternetAccess;

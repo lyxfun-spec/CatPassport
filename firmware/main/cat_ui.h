@@ -17,6 +17,6 @@ typedef struct {
 
 void cat_ui_init(void);
 void cat_ui_render(const cat_app_model_t *model, const char *text, size_t text_length,
-                   int battery_percent, int minute_of_day);
+                   const char *conversation_title, int battery_percent, int minute_of_day);
 void cat_ui_answer_view(cat_ui_answer_view_t *view);
 void cat_ui_show_y(int32_t y);

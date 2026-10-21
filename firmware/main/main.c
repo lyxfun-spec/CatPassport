@@ -49,6 +49,7 @@
 #define SCREEN_ACTIVE_BRIGHTNESS 80
 #define SCREEN_NVS_NAMESPACE "cat_cfg"
 #define SCREEN_NVS_KEY "screen_s"
+#define CONVERSATION_TITLE_MAX 256U
 
 typedef enum {
     INPUT_BUTTON, INPUT_BLE_STATE, INPUT_BLE_FRAGMENT, INPUT_AUDIO_FINISHED,
@@ -79,6 +80,7 @@ static cat_protocol_reassembler_t s_reassembler;
 static uint8_t s_rx_buffer[CAT_ANSWER_MAX];
 static char s_text[CAT_ANSWER_MAX + 1U];
 static size_t s_text_length;
+static char s_conversation_title[CONVERSATION_TITLE_MAX + 1U] = "新对话";
 static atomic_bool s_recording;
 static atomic_bool s_recording_active;
 static atomic_bool s_cancel_recording;
@@ -203,7 +205,7 @@ static bool shown_at_last_locked(void)
 static void render_now_locked(void)
 {
     const bool follow = shown_at_last_locked();
-    cat_ui_render(&s_model, s_text, s_text_length, s_battery,
+    cat_ui_render(&s_model, s_text, s_text_length, s_conversation_title, s_battery,
                   cat_clock_minute_of_day(&s_clock, monotonic_ms()));
     sync_page_locked();
     /* 只有本来就停在正文底部时才跟随新内容，中途阅读的人不该被流式刷新推走。 */
@@ -647,6 +649,14 @@ static void handle_message(const cat_protocol_message_t *message)
             }
         }
         break;
+    case CAT_MSG_CONVERSATION_TITLE:
+        if (message->payload_length <= CONVERSATION_TITLE_MAX &&
+            cat_protocol_utf8_valid(message->payload, message->payload_length)) {
+            memcpy(s_conversation_title, message->payload, message->payload_length);
+            s_conversation_title[message->payload_length] = '\0';
+            render();
+        }
+        break;
     case CAT_MSG_PING:
         {
             const esp_err_t result = send_control_with_retry(
@@ -837,7 +847,7 @@ void app_main(void)
     s_battery = bsp_battery_soc();
     if (bsp_lvgl_lock(1000)) {
         cat_ui_init();
-        cat_ui_render(&s_model, NULL, 0, s_battery, -1);
+        cat_ui_render(&s_model, NULL, 0, s_conversation_title, s_battery, -1);
         bsp_lvgl_unlock();
     }
 
