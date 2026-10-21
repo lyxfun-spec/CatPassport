@@ -13,11 +13,13 @@
 - 同一会话收到新消息时立即打断旧生成；已产生的部分回复保存为 `interrupted`，并参与后续上下文。
 - DashScope/Qwen 文本对话，可在设置中开启或关闭阿里云联网搜索。
 - AI 回复支持 Markdown 展示、复制和搜索来源链接。
-- Chat / Work 使用统一会话列表和界面；Work 入口已保留但尚未启用，未来接入独立 Agent 后端与沙箱。
+- Chat / Work 使用统一会话列表和界面；Work 已接入独立 Agent 后端、Windows 沙箱、审批、并行工具与成果交付。
 - AI Passport 卡片只接入 Chat：默认跟随电脑当前 Chat，也可在卡片上创建独立对话，再由电脑继续。
 - API Key 使用 Windows DPAPI 保存，不进入 renderer、SQLite、日志或 BLE 数据。
 
-V1 不包含图片/文件消息、消息编辑、重新生成、Work Agent、本地工具或旧演示会话导入。
+当前版本不包含 Chat 图片/文件消息、消息编辑、重新生成或旧演示会话导入。
+
+Chat 与 Work 的上下文预算、自动压缩、原始历史回溯和 Work 历史副本见[上下文管理实现说明](../docs/context-management.zh_CN.md)。
 
 ## 架构
 
@@ -58,7 +60,7 @@ CatAssistant.Core（设备协议、分片与音频）
 
 - SQLite：`%LOCALAPPDATA%\FoloToy\CatAssistant\cat-assistant.db`
 - DashScope Key：`%LOCALAPPDATA%\FoloToy\CatAssistant\dashscope.key`
-- 新数据写入 `conversations_v2`、`messages_v2`、`runs`、`citations`、`app_state` 和 `work_requests`。
+- 新数据写入 `conversations_v2`、`messages_v2`、`runs`、`citations`、`app_state`、Work 运行表及上下文摘要/诊断/检索索引表。
 - 原 `conversations`、`messages` 和设置表不会被删除，也不会自动混入新版会话列表。
 - 异常退出后启动恢复会把悬空 run 和有内容的生成消息标为 `interrupted`，移除空占位。
 - 原 BLE UUID、加密配对、通知订阅、分片、音频序号和 PDU 要求保持不变。

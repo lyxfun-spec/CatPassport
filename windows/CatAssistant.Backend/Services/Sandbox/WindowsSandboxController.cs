@@ -22,7 +22,9 @@ public sealed record SandboxCommandResult(
     string StandardOutput,
     string StandardError,
     bool OutputTruncated,
-    TimeSpan Duration);
+    TimeSpan Duration,
+    string? CompleteStandardOutputPath = null,
+    string? CompleteStandardErrorPath = null);
 
 /// <summary>
 /// Launches an untrusted process in a per-conversation AppContainer and a non-breakaway Job Object.
@@ -339,6 +341,7 @@ public sealed class WindowsSandboxController : IDisposable
             {
                 NativeMethods.TerminateJobObject(jobHandle, 1);
                 await WaitForProcessAsync(processHandle, CancellationToken.None);
+                await Task.WhenAll(DeleteTemporaryDrainOutputAsync(stdoutTask), DeleteTemporaryDrainOutputAsync(stderrTask));
                 if (cancellationToken.IsCancellationRequested) throw;
                 throw new TimeoutException($"命令执行超过 {command.Timeout.TotalSeconds:0.#} 秒，进程树已终止。");
             }
@@ -347,7 +350,8 @@ public sealed class WindowsSandboxController : IDisposable
             var output = await stdoutTask;
             var error = await stderrTask;
             stopwatch.Stop();
-            return new SandboxCommandResult((int)exitCode, output.Text, error.Text, output.Truncated || error.Truncated, stopwatch.Elapsed);
+            return new SandboxCommandResult((int)exitCode, output.Text, error.Text, output.Truncated || error.Truncated, stopwatch.Elapsed,
+                output.CompleteOutputPath, error.CompleteOutputPath);
         }
         finally
         {
@@ -412,35 +416,70 @@ public sealed class WindowsSandboxController : IDisposable
         }
     }
 
-    private static async Task<(string Text, bool Truncated)> DrainAsync(Stream stream, int maximumCharacters)
+    private static async Task<(string Text, bool Truncated, string? CompleteOutputPath)> DrainAsync(Stream stream, int maximumCharacters)
     {
         // Collect raw bytes rather than decoding inline: sandboxed cmd/PowerShell output can be
         // UTF-8 (chcp 65001, PYTHONUTF8) or the OEM code page (GBK on zh-CN). Decoding happens once
         // the full buffer is available so SandboxText can pick the right encoding for the whole stream.
         var maximumBytes = checked(maximumCharacters * 4);
         using var buffer = new MemoryStream();
+        FileStream? complete = null;
+        string? completePath = null;
         var chunk = new byte[8192];
         var truncated = false;
         while (true)
         {
             var count = await stream.ReadAsync(chunk);
             if (count == 0) break;
-            if (truncated) continue;
             if (buffer.Length + count > maximumBytes)
             {
-                var allowed = (int)(maximumBytes - buffer.Length);
-                if (allowed > 0) buffer.Write(chunk, 0, allowed);
-                truncated = true;
+                if (!truncated)
+                {
+                    var allowed = (int)(maximumBytes - buffer.Length);
+                    if (allowed > 0) buffer.Write(chunk, 0, allowed);
+                    completePath = Path.Combine(Path.GetTempPath(), $"cat-assistant-output-{Guid.NewGuid():N}.bin");
+                    complete = new FileStream(completePath, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 81920, FileOptions.Asynchronous | FileOptions.SequentialScan);
+                    buffer.Position = 0;
+                    await buffer.CopyToAsync(complete);
+                    if (allowed < count) await complete.WriteAsync(chunk.AsMemory(allowed, count - allowed));
+                    truncated = true;
+                }
+                else await complete!.WriteAsync(chunk.AsMemory(0, count));
             }
+            else if (truncated) await complete!.WriteAsync(chunk.AsMemory(0, count));
             else buffer.Write(chunk, 0, count);
+        }
+        if (complete is not null)
+        {
+            await complete.FlushAsync();
+            await complete.DisposeAsync();
         }
         var text = SandboxText.Decode(buffer.ToArray());
         if (text.Length > maximumCharacters)
         {
+            if (completePath is null)
+            {
+                completePath = Path.Combine(Path.GetTempPath(), $"cat-assistant-output-{Guid.NewGuid():N}.bin");
+                await File.WriteAllBytesAsync(completePath, buffer.ToArray());
+            }
             text = text[..maximumCharacters];
             truncated = true;
         }
-        return (text, truncated);
+        return (text, truncated, completePath);
+    }
+
+    private static async Task DeleteTemporaryDrainOutputAsync(
+        Task<(string Text, bool Truncated, string? CompleteOutputPath)> drainTask)
+    {
+        try
+        {
+            var drained = await drainTask;
+            if (drained.CompleteOutputPath is not null) File.Delete(drained.CompleteOutputPath);
+        }
+        catch
+        {
+            // Cancellation cleanup is best-effort; preserve the original cancellation/timeout.
+        }
     }
 
     private static string ProfileName(string conversationId) => $"FoloToy.CatAssistant.Work.{conversationId}";

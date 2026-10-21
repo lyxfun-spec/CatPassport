@@ -44,12 +44,16 @@ public sealed class ExecuteCommandTool(WindowsSandboxController sandbox, WorkApp
             {
                 result = await sandbox.ExecuteAsync(context.ConversationId, context.WorkspaceRoot, command, cancellationToken);
             }
+            var completeStdout = await PreserveCompleteOutputAsync(context, result.CompleteStandardOutputPath, "stdout", cancellationToken);
+            var completeStderr = await PreserveCompleteOutputAsync(context, result.CompleteStandardErrorPath, "stderr", cancellationToken);
             var payload = new
             {
                 exit_code = result.ExitCode,
                 stdout = result.StandardOutput,
                 stderr = result.StandardError,
                 output_truncated = result.OutputTruncated,
+                complete_stdout_path = completeStdout,
+                complete_stderr_path = completeStderr,
                 duration_ms = (long)result.Duration.TotalMilliseconds
             };
             return result.ExitCode == 0
@@ -58,6 +62,35 @@ public sealed class ExecuteCommandTool(WindowsSandboxController sandbox, WorkApp
         }
         catch (TimeoutException error) { return WorkToolResult.Error("command_timeout", error.Message); }
         catch (UnauthorizedAccessException error) { return WorkToolResult.Error("access_denied", error.Message); }
+    }
+
+    private static async Task<string?> PreserveCompleteOutputAsync(
+        WorkToolExecutionContext context,
+        string? temporaryPath,
+        string streamName,
+        CancellationToken cancellationToken)
+    {
+        if (temporaryPath is null) return null;
+        var directory = Path.Combine(context.WorkspaceRoot, "work", ".context", "tool-results");
+        Directory.CreateDirectory(directory);
+        var safeId = string.Concat($"{context.RunId}-{context.ToolCallId}".Select(character =>
+            char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.' ? character : '_'));
+        var fileName = $"{safeId}-{streamName}.log";
+        var destination = Path.Combine(directory, fileName);
+        var staging = destination + ".tmp";
+        try
+        {
+            await using (var input = new FileStream(temporaryPath, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, FileOptions.Asynchronous | FileOptions.SequentialScan))
+            await using (var output = new FileStream(staging, FileMode.Create, FileAccess.Write, FileShare.None, 81920, FileOptions.Asynchronous | FileOptions.SequentialScan))
+                await input.CopyToAsync(output, cancellationToken);
+            File.Move(staging, destination, true);
+            return Path.GetRelativePath(context.WorkspaceRoot, destination).Replace('\\', '/');
+        }
+        finally
+        {
+            try { File.Delete(temporaryPath); } catch { }
+            try { File.Delete(staging); } catch { }
+        }
     }
 
     internal static string BuildPowerShellPrelude(string workspaceRoot, string workingDirectory)

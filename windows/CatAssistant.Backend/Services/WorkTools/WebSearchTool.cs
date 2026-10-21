@@ -26,8 +26,7 @@ public sealed class WebSearchTool(
         var current = settings();
         await foreach (var chunk in provider.StreamAsync([prompt], current.WorkModel, apiKey(), enableWebSearch: true, cancellationToken))
         {
-            if (!string.IsNullOrEmpty(chunk.Delta) && answer.Length < 48_000)
-                answer.Append(chunk.Delta.AsSpan(0, Math.Min(chunk.Delta.Length, 48_000 - answer.Length)));
+            if (!string.IsNullOrEmpty(chunk.Delta)) answer.Append(chunk.Delta);
             if (chunk.Citations is null) continue;
             foreach (var citation in chunk.Citations) citations[citation.Url] = citation;
         }

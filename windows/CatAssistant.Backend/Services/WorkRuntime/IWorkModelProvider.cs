@@ -6,7 +6,16 @@ public sealed record WorkToolDefinition(string Name, string Description, string 
 
 public sealed record WorkModelToolCall(string ToolCallId, string Name, string ArgumentsJson);
 
-public sealed record WorkModelResponse(string? Content, IReadOnlyList<WorkModelToolCall> ToolCalls);
+public sealed record WorkModelResponse(string? Content, IReadOnlyList<WorkModelToolCall> ToolCalls, ModelUsage? Usage = null);
+
+public interface IWorkRequestBudgetProvider
+{
+    ContextBudgetAssessment AssessWorkRequest(
+        IReadOnlyList<WorkContextItem> context,
+        IReadOnlyList<WorkToolDefinition> tools,
+        WorkEnvironmentInfo environment,
+        string model);
+}
 
 public sealed record WorkEnvironmentInfo(
     string WorkspaceRoot,

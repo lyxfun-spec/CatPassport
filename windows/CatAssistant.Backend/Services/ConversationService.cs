@@ -36,6 +36,8 @@ public sealed class ConversationService : IAsyncDisposable
     private readonly WorkWorkspaceService _workspaces;
     private readonly WorkAgentService? _workAgent;
     private readonly WorkApprovalService? _workApprovals;
+    private readonly ConversationContextManager _contextManager;
+    private readonly HistorySearchService _historySearch;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new();
     private readonly ConcurrentDictionary<string, ActiveRun> _runs = new();
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _workRequestGates = new(StringComparer.Ordinal);
@@ -64,6 +66,8 @@ public sealed class ConversationService : IAsyncDisposable
         _workspaces = workspaces ?? new WorkWorkspaceService();
         _workAgent = workAgent;
         _workApprovals = workApprovals;
+        _contextManager = new ConversationContextManager(repository, provider, apiKey);
+        _historySearch = new HistorySearchService(repository);
         if (_workAgent is not null) _workAgent.Changed += OnWorkChanged;
         if (_workApprovals is not null) _workApprovals.Changed += OnWorkChanged;
     }
@@ -400,30 +404,28 @@ public sealed class ConversationService : IAsyncDisposable
     private async Task ExecuteRunAsync(ActiveRun run)
     {
         var history = await _repository.LoadMessagesAsync(run.ConversationId);
-        var context = BuildContext(history.Where(message => message.Id != run.AssistantMessageId).ToArray());
         var citations = new Dictionary<int, CitationRecord>();
         var settings = _settings();
-        await foreach (var chunk in _provider.StreamAsync(context, settings.ChatModel, _apiKey(), settings.WebSearchEnabled, run.Cancellation.Token))
+        var prepared = await _contextManager.PrepareChatAsync(
+            run.ConversationId,
+            history.Where(message => message.Id != run.AssistantMessageId).ToArray(),
+            settings.ChatModel,
+            settings.WebSearchEnabled,
+            run.Cancellation.Token);
+        var context = prepared.Messages;
+        ModelUsage? usage = null;
+        if (_provider is IChatToolLoopProvider toolLoop)
+        {
+            usage = await ExecuteChatToolLoopAsync(run, toolLoop, context, settings, citations);
+        }
+        else await foreach (var chunk in _provider.StreamAsync(context, settings.ChatModel, _apiKey(), settings.WebSearchEnabled, run.Cancellation.Token))
         {
             if (!IsCurrent(run)) return;
-            if (!string.IsNullOrEmpty(chunk.Delta))
-            {
-                string? checkpoint = null;
-                lock (run.ContentLock)
-                {
-                    run.Content.Append(chunk.Delta);
-                    if (run.LastContentPersistedAt is null || DateTimeOffset.UtcNow - run.LastContentPersistedAt >= StreamPersistInterval)
-                    {
-                        run.LastContentPersistedAt = DateTimeOffset.UtcNow;
-                        checkpoint = run.Content.ToString();
-                    }
-                }
-                if (checkpoint is not null) await _repository.UpdateMessageAsync(run.AssistantMessageId, checkpoint, "streaming");
-                Publish(new ConversationEvent("message.delta", run.ConversationId, run.AssistantMessageId, run.Id, chunk.Delta));
-            }
+            if (!string.IsNullOrEmpty(chunk.Delta)) await AppendChatDeltaAsync(run, chunk.Delta);
             if (chunk.Citations is not null)
                 foreach (var citation in chunk.Citations) citations.TryAdd(citation.Ordinal, citation);
             if (chunk.ToolCall is { } toolCall) await ProposeWorkRequestAsync(run, toolCall);
+            if (chunk.Usage is not null) usage = chunk.Usage;
         }
         var gate = Gate(run.ConversationId);
         await gate.WaitAsync(_lifetime);
@@ -441,6 +443,8 @@ public sealed class ConversationService : IAsyncDisposable
                 await _repository.ReplaceCitationsAsync(run.AssistantMessageId, normalized);
             }
             await _repository.FinishRunAsync(run.Id, "completed", "stop");
+            if (usage is not null) await _repository.SetRunUsageAsync(run.Id, usage);
+            await _repository.RecordRequestDiagnosticAsync(run.ConversationId, run.Id, "chat", settings.ChatModel, "completed", prepared.Budget, usage);
             var message = (await _repository.LoadMessagesAsync(run.ConversationId)).SingleOrDefault(item => item.Id == run.AssistantMessageId);
             if (message is not null) Publish(new ConversationEvent("message.completed", run.ConversationId, run.AssistantMessageId, run.Id, Message: message, Status: "completed"));
             else Publish(new ConversationEvent("run.completed", run.ConversationId, RunId: run.Id, Status: "completed"));
@@ -450,6 +454,120 @@ public sealed class ConversationService : IAsyncDisposable
         {
             gate.Release();
         }
+    }
+
+    private async Task<ModelUsage?> ExecuteChatToolLoopAsync(
+        ActiveRun run,
+        IChatToolLoopProvider provider,
+        IReadOnlyList<ConversationMessage> context,
+        AppSettings settings,
+        Dictionary<int, CitationRecord> citations)
+    {
+        var messages = context.Select(item => new ChatModelMessage(item.Role, item.Content)).ToList();
+        ModelUsage? usage = null;
+        for (var turn = 0; turn < 4; turn++)
+        {
+            var calls = new List<ChatToolCall>();
+            var turnContent = new StringBuilder();
+            await foreach (var chunk in provider.StreamTurnAsync(messages, settings.ChatModel, _apiKey(), settings.WebSearchEnabled, run.Cancellation.Token))
+            {
+                if (!IsCurrent(run)) return usage;
+                if (!string.IsNullOrEmpty(chunk.Delta))
+                {
+                    turnContent.Append(chunk.Delta);
+                    await AppendChatDeltaAsync(run, chunk.Delta);
+                }
+                if (chunk.Citations is not null)
+                    foreach (var citation in chunk.Citations) citations.TryAdd(citation.Ordinal, citation);
+                if (chunk.ToolCall is not null) calls.Add(chunk.ToolCall);
+                if (chunk.Usage is not null) usage = chunk.Usage;
+            }
+            if (calls.Count == 0) return usage;
+
+            messages.Add(new ChatModelMessage("assistant", turnContent.Length == 0 ? null : turnContent.ToString(), calls));
+            foreach (var call in calls)
+            {
+                string output;
+                if (call.Name == "search_conversation_history") output = await ExecuteHistorySearchToolAsync(run.ConversationId, call.ArgumentsJson, run.Cancellation.Token);
+                else if (call.Name == "request_work")
+                {
+                    var proposed = await ProposeWorkRequestAsync(run, call);
+                    output = JsonSerializer.Serialize(proposed
+                        ? new { proposed = true, requiresUserApproval = true, error = (string?)null }
+                        : new { proposed = false, requiresUserApproval = true, error = (string?)"invalid_or_duplicate_proposal" });
+                }
+                else output = JsonSerializer.Serialize(new { error = "unknown_tool" });
+                messages.Add(new ChatModelMessage("tool", output, ToolCallId: call.ToolCallId));
+            }
+        }
+        throw new InvalidOperationException("Chat 工具调用轮次过多，已停止以避免循环。");
+    }
+
+    private async Task<string> ExecuteHistorySearchToolAsync(string conversationId, string argumentsJson, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var arguments = JsonDocument.Parse(argumentsJson);
+            var root = arguments.RootElement;
+            var messageId = root.TryGetProperty("messageId", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null;
+            var full = root.TryGetProperty("full", out var fullValue) && fullValue.ValueKind == JsonValueKind.True;
+            if (!string.IsNullOrWhiteSpace(messageId))
+            {
+                var message = await _historySearch.GetMessageAsync(conversationId, messageId!);
+                if (message is null) return JsonSerializer.Serialize(new { found = false, messageId });
+                var offset = root.TryGetProperty("offset", out var offsetValue) && offsetValue.TryGetInt32(out var parsedOffset)
+                    ? Math.Clamp(parsedOffset, 0, message.Content.Length)
+                    : 0;
+                var requested = root.TryGetProperty("maxCharacters", out var maxValue) && maxValue.TryGetInt32(out var parsedMaximum)
+                    ? Math.Clamp(parsedMaximum, 200, 20_000)
+                    : full ? 12_000 : 2_000;
+                var length = Math.Min(requested, message.Content.Length - offset);
+                var content = message.Content.Substring(offset, length);
+                var nextOffset = offset + length < message.Content.Length ? offset + length : (int?)null;
+                return JsonSerializer.Serialize(new { found = true, message.Id, message.Sequence, message.CreatedAt, message.Role, message.Status, content, offset, nextOffset, totalCharacters = message.Content.Length, truncated = nextOffset is not null });
+            }
+
+            var query = root.TryGetProperty("query", out var queryValue) && queryValue.ValueKind == JsonValueKind.String ? queryValue.GetString() : null;
+            if (string.IsNullOrWhiteSpace(query)) return JsonSerializer.Serialize(new { error = "query_or_message_id_required" });
+            var role = root.TryGetProperty("role", out var roleValue) && roleValue.ValueKind == JsonValueKind.String ? roleValue.GetString() : null;
+            var topK = root.TryGetProperty("topK", out var topValue) && topValue.TryGetInt32(out var parsed) ? Math.Clamp(parsed, 1, 20) : 8;
+            var from = ParseOptionalTimestamp(root, "from");
+            var to = ParseOptionalTimestamp(root, "to");
+            var results = await _historySearch.SearchAsync(conversationId, query!, topK, role, from, to, cancellationToken);
+            return JsonSerializer.Serialize(new
+            {
+                query,
+                count = results.Count,
+                indexStatus = results.Any(item => item.MatchSource.Contains("vector", StringComparison.Ordinal)) ? "hybrid_ready" : "keyword_fallback_or_no_vector_hit",
+                results = results.Select(item => new { item.MessageId, item.Sequence, item.CreatedAt, item.Role, item.Status, item.Snippet, item.Score, item.MatchSource })
+            });
+        }
+        catch (JsonException error) { return JsonSerializer.Serialize(new { error = "invalid_arguments", detail = error.Message }); }
+        catch (ArgumentException error) { return JsonSerializer.Serialize(new { error = "invalid_arguments", detail = error.Message }); }
+    }
+
+    private static DateTimeOffset? ParseOptionalTimestamp(JsonElement root, string name)
+    {
+        if (!root.TryGetProperty(name, out var value) || value.ValueKind == JsonValueKind.Null) return null;
+        if (value.ValueKind != JsonValueKind.String || !DateTimeOffset.TryParse(value.GetString(), out var parsed))
+            throw new ArgumentException($"{name} 必须是有效的 ISO-8601 时间。");
+        return parsed;
+    }
+
+    private async Task AppendChatDeltaAsync(ActiveRun run, string delta)
+    {
+        string? checkpoint = null;
+        lock (run.ContentLock)
+        {
+            run.Content.Append(delta);
+            if (run.LastContentPersistedAt is null || DateTimeOffset.UtcNow - run.LastContentPersistedAt >= StreamPersistInterval)
+            {
+                run.LastContentPersistedAt = DateTimeOffset.UtcNow;
+                checkpoint = run.Content.ToString();
+            }
+        }
+        if (checkpoint is not null) await _repository.UpdateMessageAsync(run.AssistantMessageId, checkpoint, "streaming");
+        Publish(new ConversationEvent("message.delta", run.ConversationId, run.AssistantMessageId, run.Id, delta));
     }
 
     private async Task FailRunAsync(ActiveRun run, Exception error)
@@ -473,9 +591,10 @@ public sealed class ConversationService : IAsyncDisposable
         }
     }
 
-    private async Task ProposeWorkRequestAsync(ActiveRun run, ChatToolCall toolCall)
+    private async Task<bool> ProposeWorkRequestAsync(ActiveRun run, ChatToolCall toolCall)
     {
-        if (toolCall.Name != "request_work" || !IsCurrent(run) || !run.WorkRequestToolCalls.Add(toolCall.ToolCallId)) return;
+        if (toolCall.Name != "request_work" || !IsCurrent(run)) return false;
+        if (!run.WorkRequestToolCalls.Add(toolCall.ToolCallId)) return true;
         try
         {
             var arguments = ParseWorkRequestArguments(toolCall.ArgumentsJson);
@@ -489,11 +608,13 @@ public sealed class ConversationService : IAsyncDisposable
                 arguments.ContextSummary);
             if (request.State == "proposed")
                 Publish(new ConversationEvent("work.request.proposed", run.ConversationId, run.TriggerMessageId, run.Id, WorkRequest: request));
+            return request.State == "proposed";
         }
         catch (Exception error) when (error is JsonException or ArgumentException)
         {
             // A malformed proposal must not fail the whole chat answer: the model still owes the user text.
             await ProposeFailedWorkRequestAsync(run, toolCall.ToolCallId, error.Message);
+            return false;
         }
     }
 
@@ -528,25 +649,6 @@ public sealed class ConversationService : IAsyncDisposable
         // A stopped first answer is still answer enough to name the conversation; without this the title
         // would wait for a later turn that may never come.
         ScheduleTitleGeneration(conversationId);
-    }
-
-    private static IReadOnlyList<ConversationMessage> BuildContext(IReadOnlyList<ConversationMessage> messages)
-    {
-        const int characterBudget = 48_000;
-        var selected = new List<ConversationMessage>();
-        var used = 0;
-        for (var index = messages.Count - 1; index >= 0; index--)
-        {
-            var message = messages[index];
-            if (message.Role is not ("user" or "assistant")) continue;
-            if (message.Role == "assistant" && message.Status is not ("complete" or "interrupted")) continue;
-            if (message.Role == "user" && message.Status != "complete") continue;
-            if (selected.Count > 0 && used + message.Content.Length > characterBudget) break;
-            selected.Add(message.Role == "assistant" ? message with { Content = CitationMarkers.Strip(message.Content) } : message);
-            used += message.Content.Length;
-        }
-        selected.Reverse();
-        return selected;
     }
 
     private static bool IsUntitled(ConversationSummary conversation) =>

@@ -4,13 +4,14 @@ using System.Text.Json;
 
 namespace CatAssistant.Backend.Services;
 
-public sealed class SqliteRepository
+public sealed partial class SqliteRepository
 {
     private const string WorkRequestSelect = "SELECT id,source_conversation_id,source_message_id,source_run_id,tool_call_id,title,prompt,context_summary,state,target_conversation_id,error_message,created_utc,updated_utc FROM work_requests";
     // A conversation keeps this title and title_source='fallback' until a model-generated title lands, so
     // 'fallback' is the only durable marker for "still needs a title".
     internal const string UntitledTitle = "新对话";
     private readonly string _connectionString;
+    private bool _ftsAvailable;
 
     public SqliteRepository(string? databasePath = null)
     {
@@ -169,21 +170,113 @@ public sealed class SqliteRepository
                 FOREIGN KEY(conversation_id) REFERENCES conversations_v2(id) ON DELETE CASCADE,
                 FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE SET NULL
             );
+            CREATE TABLE IF NOT EXISTS context_summaries (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                mode TEXT NOT NULL CHECK(mode IN ('chat','work')),
+                version INTEGER NOT NULL,
+                source_summary_id TEXT NULL,
+                start_sequence INTEGER NOT NULL,
+                end_sequence INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                estimated_tokens INTEGER NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('validated','active','superseded','invalid')),
+                created_utc TEXT NOT NULL,
+                UNIQUE(conversation_id, version),
+                FOREIGN KEY(conversation_id) REFERENCES conversations_v2(id) ON DELETE CASCADE,
+                FOREIGN KEY(source_summary_id) REFERENCES context_summaries(id) ON DELETE SET NULL
+            );
+            CREATE TABLE IF NOT EXISTS conversation_context_state (
+                conversation_id TEXT PRIMARY KEY,
+                active_summary_id TEXT NULL,
+                compressed_through_sequence INTEGER NOT NULL DEFAULT 0,
+                search_watermark_sequence INTEGER NOT NULL DEFAULT 0,
+                export_watermark_sequence INTEGER NOT NULL DEFAULT 0,
+                version INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(conversation_id) REFERENCES conversations_v2(id) ON DELETE CASCADE,
+                FOREIGN KEY(active_summary_id) REFERENCES context_summaries(id) ON DELETE SET NULL
+            );
+            CREATE TABLE IF NOT EXISTS request_diagnostics (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                run_id TEXT NULL,
+                mode TEXT NOT NULL CHECK(mode IN ('chat','work','compaction')),
+                model TEXT NOT NULL,
+                event TEXT NOT NULL,
+                estimated_input_tokens INTEGER NOT NULL,
+                input_budget_tokens INTEGER NOT NULL,
+                actual_input_tokens INTEGER NULL,
+                actual_output_tokens INTEGER NULL,
+                count_source TEXT NOT NULL,
+                is_estimate INTEGER NOT NULL,
+                detail TEXT NULL,
+                created_utc TEXT NOT NULL,
+                FOREIGN KEY(conversation_id) REFERENCES conversations_v2(id) ON DELETE CASCADE,
+                FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE SET NULL
+            );
+            CREATE TABLE IF NOT EXISTS message_embeddings (
+                message_id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                model TEXT NOT NULL,
+                dimensions INTEGER NOT NULL,
+                vector BLOB NOT NULL,
+                updated_utc TEXT NOT NULL,
+                FOREIGN KEY(message_id) REFERENCES messages_v2(id) ON DELETE CASCADE,
+                FOREIGN KEY(conversation_id) REFERENCES conversations_v2(id) ON DELETE CASCADE
+            );
             CREATE INDEX IF NOT EXISTS idx_conversations_v2_updated ON conversations_v2(updated_utc DESC);
             CREATE INDEX IF NOT EXISTS idx_messages_v2_conversation ON messages_v2(conversation_id, sequence);
             CREATE INDEX IF NOT EXISTS idx_work_context_items_conversation ON work_context_items(conversation_id, ordinal);
             CREATE INDEX IF NOT EXISTS idx_work_tool_calls_run ON work_tool_calls(run_id, ordinal);
             CREATE INDEX IF NOT EXISTS idx_work_approvals_conversation ON work_approvals(conversation_id, state, requested_utc);
             CREATE INDEX IF NOT EXISTS idx_work_artifacts_conversation ON work_artifacts(conversation_id, created_utc);
+            CREATE INDEX IF NOT EXISTS idx_context_summaries_conversation ON context_summaries(conversation_id, version DESC);
+            CREATE INDEX IF NOT EXISTS idx_request_diagnostics_conversation ON request_diagnostics(conversation_id, created_utc DESC);
+            CREATE INDEX IF NOT EXISTS idx_message_embeddings_conversation ON message_embeddings(conversation_id);
             INSERT OR IGNORE INTO schema_migrations(version, applied_utc) VALUES(2, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
             INSERT OR IGNORE INTO schema_migrations(version, applied_utc) VALUES(3, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
             INSERT OR IGNORE INTO schema_migrations(version, applied_utc) VALUES(4, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+            INSERT OR IGNORE INTO schema_migrations(version, applied_utc) VALUES(5, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
             """;
         await command.ExecuteNonQueryAsync();
         await transaction.CommitAsync();
         await EnsureConversationPinColumnAsync(db);
         await EnsureWorkRequestColumnsAsync(db);
+        await InitializeSearchIndexAsync(db);
         await RecoverInterruptedRunsAsync(db);
+    }
+
+    private async Task InitializeSearchIndexAsync(SqliteConnection db)
+    {
+        try
+        {
+            var command = db.CreateCommand();
+            command.CommandText = """
+                CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                    message_id UNINDEXED,
+                    conversation_id UNINDEXED,
+                    role UNINDEXED,
+                    content,
+                    tokenize='unicode61'
+                );
+                DELETE FROM messages_fts WHERE message_id NOT IN (
+                    SELECT id FROM messages_v2 WHERE status IN ('complete','interrupted')
+                );
+                INSERT INTO messages_fts(message_id,conversation_id,role,content)
+                SELECT m.id,m.conversation_id,m.role,m.content FROM messages_v2 m
+                WHERE m.status IN ('complete','interrupted')
+                  AND NOT EXISTS (SELECT 1 FROM messages_fts f WHERE f.message_id=m.id);
+                """;
+            await command.ExecuteNonQueryAsync();
+            _ftsAvailable = true;
+        }
+        catch (SqliteException)
+        {
+            // Search is derived data. The application remains usable and SearchMessagesAsync
+            // transparently falls back to a bounded LIKE query.
+            _ftsAvailable = false;
+        }
     }
 
     private static async Task PreserveLegacyWorkTablesAsync(SqliteConnection db, SqliteTransaction transaction)
@@ -627,6 +720,7 @@ public sealed class SqliteRepository
         touch.Parameters.AddWithValue("$id", conversationId);
         if (await touch.ExecuteNonQueryAsync() == 0) throw new KeyNotFoundException("对话不存在。");
         await transaction.CommitAsync();
+        await IndexMessageAsync(message.Id);
         return message;
     }
 
@@ -640,6 +734,7 @@ public sealed class SqliteRepository
         command.Parameters.AddWithValue("$now", Format(DateTimeOffset.UtcNow));
         command.Parameters.AddWithValue("$id", messageId);
         await command.ExecuteNonQueryAsync();
+        await IndexMessageAsync(messageId);
     }
 
     public async Task ReplaceCitationsAsync(string messageId, IReadOnlyList<CitationRecord> citations)
@@ -675,6 +770,7 @@ public sealed class SqliteRepository
         command.CommandText = "DELETE FROM messages_v2 WHERE id=$id AND length(content)=0";
         command.Parameters.AddWithValue("$id", messageId);
         await command.ExecuteNonQueryAsync();
+        await RemoveMessageFromIndexAsync(messageId);
     }
 
     public async Task<IReadOnlyList<ConversationMessage>> LoadMessagesAsync(string conversationId)
@@ -1057,6 +1153,36 @@ public sealed class SqliteRepository
             DELETE FROM messages_v2 WHERE status='streaming' AND length(content)=0;
             """;
         await messages.ExecuteNonQueryAsync();
+        var unfinishedTools = db.CreateCommand();
+        unfinishedTools.Transaction = (SqliteTransaction)transaction;
+        unfinishedTools.CommandText = """
+            UPDATE work_tool_calls
+            SET state='cancelled',
+                result_json=COALESCE(result_json,'{"error":"应用重启前工具未形成可靠终态，已按取消恢复。"}'),
+                error_code=COALESCE(error_code,'interrupted'),
+                error_message=COALESCE(error_message,'应用退出时工具仍未完成。'),
+                completed_utc=COALESCE(completed_utc,strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            WHERE state IN ('pending','waiting_approval','running');
+
+            WITH missing AS (
+                SELECT c.id,c.conversation_id,c.run_id,c.tool_call_id,c.tool_name,c.result_json,c.created_utc,
+                       ROW_NUMBER() OVER (PARTITION BY c.conversation_id ORDER BY c.created_utc,c.ordinal,c.id) AS position
+                FROM work_tool_calls c
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM work_context_items i
+                    WHERE i.conversation_id=c.conversation_id AND i.run_id=c.run_id AND i.kind='tool_result' AND i.tool_call_id=c.tool_call_id
+                )
+            ), base AS (
+                SELECT conversation_id,COALESCE(MAX(ordinal),0) AS maximum
+                FROM work_context_items GROUP BY conversation_id
+            )
+            INSERT INTO work_context_items(id,conversation_id,run_id,ordinal,kind,role,message_id,tool_call_id,name,payload_json,created_utc)
+            SELECT lower(hex(randomblob(16))),m.conversation_id,m.run_id,COALESCE(b.maximum,0)+m.position,
+                   'tool_result','tool',NULL,m.tool_call_id,m.tool_name,
+                   COALESCE(m.result_json,'{"error":"工具结果不可用。"}'),strftime('%Y-%m-%dT%H:%M:%fZ','now')
+            FROM missing m LEFT JOIN base b ON b.conversation_id=m.conversation_id;
+            """;
+        await unfinishedTools.ExecuteNonQueryAsync();
         var runs = db.CreateCommand();
         runs.Transaction = (SqliteTransaction)transaction;
         runs.CommandText = """

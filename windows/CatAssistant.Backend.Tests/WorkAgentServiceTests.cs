@@ -76,15 +76,16 @@ public sealed class WorkAgentServiceTests
     }
 
     [Fact]
-    public async Task ContextLimitFailsExplicitlyWithoutDroppingHistoryOrCallingModel()
+    public async Task LongMessageWithinTokenBudgetDoesNotForceANewConversation()
     {
-        await using var fixture = await WorkAgentFixture.CreateAsync(contextCharacterLimit: 80);
+        await using var fixture = await WorkAgentFixture.CreateAsync();
+        fixture.Provider.Enqueue(new WorkModelResponse("已继续", []));
 
         await fixture.Agent.SendAsync(fixture.ConversationId, new string('长', 120), "desktop");
-        var error = await fixture.Failed.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        await fixture.Completed.Task.WaitAsync(TimeSpan.FromSeconds(3));
 
-        Assert.Contains("没有静默删除", error);
-        Assert.Empty(fixture.Provider.Contexts);
+        Assert.Single(fixture.Provider.Contexts);
+        Assert.Contains(await fixture.Repository.LoadMessagesAsync(fixture.ConversationId), message => message.Content == "已继续");
     }
 
     [Fact]
@@ -129,7 +130,7 @@ public sealed class WorkAgentServiceTests
         fixture.Provider.EnqueueStreamThenHang(["大纲已经写好，"]);
 
         await fixture.Agent.SendAsync(fixture.ConversationId, "制作 PPT", "desktop");
-        await WaitUntilAsync(() => fixture.Events.Any(update => update.Type == "message.created"));
+        await WaitUntilAsync(() => fixture.Events.Any(update => update.Type == "message.created" && update.Message?.Role == "assistant"));
         await fixture.Agent.StopAsync(fixture.ConversationId);
 
         var partial = Assert.Single(await fixture.Repository.LoadMessagesAsync(fixture.ConversationId), message => message.Role == "assistant");
@@ -302,7 +303,7 @@ public sealed class WorkAgentServiceTests
         public TaskCompletionSource<string> Failed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public ConcurrentBag<ConversationEvent> Events { get; } = [];
 
-        public static async Task<WorkAgentFixture> CreateAsync(int contextCharacterLimit = 96_000)
+        public static async Task<WorkAgentFixture> CreateAsync()
         {
             var databasePath = Path.Combine(Path.GetTempPath(), $"cat-assistant-agent-{Guid.NewGuid():N}.db");
             var workspaceRoot = Path.Combine(Path.GetTempPath(), $"cat-assistant-agent-{Guid.NewGuid():N}");
@@ -313,7 +314,7 @@ public sealed class WorkAgentServiceTests
             var workspaces = new WorkWorkspaceService(workspaceRoot);
             var provider = new ControlledWorkProvider();
             var tools = new WorkToolRegistry();
-            var agent = new WorkAgentService(repository, workspaces, provider, tools, () => new AppSettings(), () => "key", CancellationToken.None, contextCharacterLimit);
+            var agent = new WorkAgentService(repository, workspaces, provider, tools, () => new AppSettings(), () => "key", CancellationToken.None);
             return new WorkAgentFixture(databasePath, workspaceRoot, repository, workspaces, provider, tools, agent, conversation.Id);
         }
 

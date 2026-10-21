@@ -31,8 +31,9 @@ public sealed class WorkAgentService : IAsyncDisposable
     private readonly Func<AppSettings> _settings;
     private readonly Func<string> _apiKey;
     private readonly CancellationToken _lifetime;
-    private readonly int _contextCharacterLimit;
     private readonly WorkApprovalService? _approvals;
+    private readonly ConversationContextManager _contextManager;
+    private readonly WorkHistoryExporter _historyExporter;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ActiveWorkRun> _runs = new(StringComparer.Ordinal);
 
@@ -44,7 +45,6 @@ public sealed class WorkAgentService : IAsyncDisposable
         Func<AppSettings> settings,
         Func<string> apiKey,
         CancellationToken lifetime,
-        int contextCharacterLimit = 96_000,
         WorkApprovalService? approvals = null)
     {
         _repository = repository;
@@ -54,9 +54,9 @@ public sealed class WorkAgentService : IAsyncDisposable
         _settings = settings;
         _apiKey = apiKey;
         _lifetime = lifetime;
-        if (contextCharacterLimit <= 0) throw new ArgumentOutOfRangeException(nameof(contextCharacterLimit));
-        _contextCharacterLimit = contextCharacterLimit;
         _approvals = approvals;
+        _contextManager = new ConversationContextManager(repository, provider, apiKey);
+        _historyExporter = new WorkHistoryExporter(repository);
     }
 
     public event EventHandler<ConversationEvent>? Changed;
@@ -158,12 +158,17 @@ public sealed class WorkAgentService : IAsyncDisposable
         while (true)
         {
             run.Cancellation.Token.ThrowIfCancellationRequested();
+            await DrainPendingMessagesAsync(run);
             var context = await _repository.LoadWorkContextItemsAsync(run.ConversationId);
+            await _historyExporter.ExportAsync(run.ConversationId, workspace, run.Cancellation.Token);
             var settings = _settings();
             var definitions = _tools.Definitions;
-            var estimatedCharacters = WorkContextBudget.EstimateCharacters(context, definitions);
-            if (estimatedCharacters >= _contextCharacterLimit)
-                throw new WorkContextLimitException(estimatedCharacters, _contextCharacterLimit);
+            var prepared = await _contextManager.PrepareWorkAsync(
+                run.ConversationId, context, definitions, environment, settings.WorkModel, run.Cancellation.Token);
+            // A message that arrived during export/compaction must be persisted and budgeted
+            // before the next model request rather than waiting behind that request.
+            if (await DrainPendingMessagesAsync(run)) continue;
+            context = prepared.Items;
             run.StreamMessageId = null;
             run.StreamContent.Clear();
             run.LastContentPersistedAt = null;
@@ -176,6 +181,8 @@ public sealed class WorkAgentService : IAsyncDisposable
                 delta => AppendStreamedContentAsync(run, delta),
                 run.Cancellation.Token);
             run.Cancellation.Token.ThrowIfCancellationRequested();
+            if (response.Usage is not null) await _repository.SetRunUsageAsync(run.Id, response.Usage);
+            await _repository.RecordRequestDiagnosticAsync(run.ConversationId, run.Id, "work", settings.WorkModel, "round_completed", prepared.Budget, response.Usage);
 
             var roundId = $"{run.Id}:{++round}";
             if (response.ToolCalls.Count == 0)
@@ -211,7 +218,7 @@ public sealed class WorkAgentService : IAsyncDisposable
             for (var index = 0; index < results.Length; index++)
             {
                 var call = response.ToolCalls[index];
-                var result = results[index];
+                var result = await _historyExporter.ExternalizeToolResultAsync(workspace, run.Id, call, results[index], run.Cancellation.Token);
                 await _repository.AddWorkContextItemAsync(
                     run.ConversationId,
                     run.Id,
@@ -286,6 +293,8 @@ public sealed class WorkAgentService : IAsyncDisposable
         {
             if (!_runs.TryGetValue(run.ConversationId, out var current) || !ReferenceEquals(current, run) || run.Stopping) return false;
             if (await DrainPendingMessagesAsync(run)) return true;
+            var workspace = await _workspaces.EnsureAsync(run.ConversationId, CancellationToken.None);
+            await _historyExporter.ExportAsync(run.ConversationId, workspace, CancellationToken.None);
             await _repository.FinishRunAsync(run.Id, "completed", "stop");
             _approvals?.EndRun(run.Id);
             _runs.TryRemove(run.ConversationId, out _);
