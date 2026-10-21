@@ -256,10 +256,6 @@ button:disabled, input:disabled { cursor: not-allowed; }
 .approval-composer-actions .primary-button, .approval-composer-actions .secondary-button { min-height: 34px; padding-inline: 12px; }
 .approval-composer-actions .stop-button { height: 34px; margin-right: 2px; }
 
-.loading-screen { height: 100%; display: grid; place-content: center; justify-items: center; text-align: center; background: #fff; }
-.loading-screen h1 { margin: 16px 0 13px; font-size: 21px; font-weight: 530; }
-.loading-screen p { margin: 0; color: var(--ui-muted); font-size: 13px; }
-
 /* Draft (new conversation) */
 .draft-conversation { grid-row: 1 / -1; display: grid; grid-template-rows: minmax(0, 1fr) auto; }
 .draft-hero { display: grid; align-content: center; justify-items: center; gap: 14px; padding: 0 26px 6vh; text-align: center; }

@@ -1,4 +1,5 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell, Tray } from 'electron';
+import http from 'node:http';
 import path from 'node:path';
 import { BackendClient } from './backend-client';
 
@@ -18,6 +19,7 @@ const backend = new BackendClient();
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let quitting = false;
+let windowRevealed = false;
 const brandingDir = app.isPackaged
   ? process.resourcesPath
   : path.resolve(__dirname, '..', '..', '..', '..', 'assets', 'branding');
@@ -26,12 +28,35 @@ const trayIconPath = path.join(brandingDir, 'cat-assistant-icon-32.png');
 
 if (!app.requestSingleInstanceLock()) app.quit();
 
+// TEMP: startup milestones for diagnosing the white-window report; remove once settled.
+const startupEpoch = Date.now();
+const mark = (label: string) => console.log(`[startup] +${Date.now() - startupEpoch}ms ${label}`);
+mark('main module loaded');
+
 function showWindow(): void {
   if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+  // Showing before the startup screen has painted is what produced the blank white window.
+  if (!windowRevealed) return;
   mainWindow!.show(); mainWindow!.restore(); mainWindow!.focus();
 }
 
+function waitForHttpOk(url: string): Promise<void> {
+  return new Promise(resolve => {
+    const attempt = () => {
+      const request = http.get(url, response => {
+        response.resume();
+        if (response.statusCode === 200) resolve();
+        else setTimeout(attempt, 300);
+      });
+      request.on('error', () => setTimeout(attempt, 300));
+    };
+    attempt();
+  });
+}
+
 function createWindow(): void {
+  mark('createWindow');
+  windowRevealed = false;
   mainWindow = new BrowserWindow({
     width: 1080, height: 720, minWidth: 720, minHeight: 600, show: false,
     backgroundColor: '#ffffff', title: '小猫助手', icon: windowIconPath, autoHideMenuBar: true,
@@ -44,15 +69,43 @@ function createWindow(): void {
     if (url.startsWith('https://') || url.startsWith('http://')) void shell.openExternal(url);
     return { action: 'deny' };
   });
-  if (MAIN_WINDOW_VITE_DEV_SERVER_URL) void mainWindow.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
-  else void mainWindow.loadFile(path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`));
-  mainWindow.once('ready-to-show', () => mainWindow?.show());
+  // ready-to-show can fire for the still-blank document and flash an empty white window
+  // while the dev server is warming up, so wait for the preload to report that the inline
+  // startup screen is on screen.
+  let revealed = false;
+  const reveal = () => {
+    if (revealed || !mainWindow || mainWindow.isDestroyed()) return;
+    revealed = true;
+    windowRevealed = true;
+    mark('window shown');
+    mainWindow.show();
+  };
+  const onBootReady = () => { mark('boot:ready received'); reveal(); };
+  ipcMain.on('boot:ready', onBootReady);
+  mainWindow.once('closed', () => ipcMain.removeListener('boot:ready', onBootReady));
+  mainWindow.webContents.on('dom-ready', () => mark('dom ready'));
+  mainWindow.webContents.on('did-finish-load', () => mark('page finished load'));
+  mainWindow.webContents.on('did-fail-load', (_event, code, description) => { mark(`page failed load ${code} ${description}`); reveal(); });
+  if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
+    // The dev server can hold the first index.html response for many seconds while it
+    // pre-bundles dependencies, so paint the on-disk splash first and swap documents once
+    // the server answers; the swap commits atomically, so no blank frame in between.
+    const devServerUrl = MAIN_WINDOW_VITE_DEV_SERVER_URL;
+    mark('splash load requested');
+    void mainWindow.loadFile(path.join(__dirname, '..', '..', 'splash.html'));
+    void waitForHttpOk(devServerUrl).then(() => {
+      mark('dev server answered');
+      if (mainWindow && !mainWindow.isDestroyed()) void mainWindow.loadURL(devServerUrl);
+    });
+  } else {
+    mark('load requested');
+    void mainWindow.loadFile(path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`));
+  }
   mainWindow.on('close', event => { if (!quitting) { event.preventDefault(); mainWindow?.hide(); } });
 }
 
 function createTray(): void {
-  const icon = nativeImage.createFromPath(trayIconPath);
-  tray = new Tray(icon); tray.setToolTip('小猫助手');
+  tray = new Tray(trayIconPath); tray.setToolTip('小猫助手');
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '打开小猫助手', click: showWindow },
     { type: 'separator' },
@@ -77,7 +130,11 @@ app.on('before-quit', event => {
 });
 
 app.whenReady().then(() => {
+  mark('app ready');
   Menu.setApplicationMenu(null);
+  // Paint the startup screen before the backend spawns: `dotnet run` can take
+  // several seconds while rebuilding CatAssistant.Backend.
+  createWindow();
   backend.start();
   backend.on('event', event => BrowserWindow.getAllWindows().forEach(window => window.webContents.send('backend:event', event)));
   backend.on('error', error => BrowserWindow.getAllWindows().forEach(window => window.webContents.send('backend:event', { event: 'backend.exited', data: { code: null, message: error.message } })));
@@ -94,5 +151,5 @@ app.whenReady().then(() => {
     const result = await backend.invoke<{ path: string }>('work.artifacts.revealPath', { id: conversationId, artifactId });
     shell.showItemInFolder(result.path);
   });
-  createWindow(); createTray();
+  createTray();
 });

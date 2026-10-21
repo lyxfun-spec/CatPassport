@@ -14,3 +14,13 @@ const api: BackendApi = {
 };
 
 contextBridge.exposeInMainWorld('catAssistant', api);
+
+// The startup screen is inline markup, so it is on screen long before the bundled
+// renderer runs; report it as soon as it exists instead of waiting for DOMContentLoaded.
+const reportBootPainted = () => requestAnimationFrame(() => requestAnimationFrame(() => ipcRenderer.send('boot:ready')));
+if (document.getElementById('boot')) reportBootPainted();
+else new MutationObserver((_, observer) => {
+  if (!document.getElementById('boot')) return;
+  observer.disconnect();
+  reportBootPainted();
+}).observe(document, { childList: true, subtree: true });

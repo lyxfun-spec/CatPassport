@@ -5,6 +5,7 @@ import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { BackendEvent, BootstrapState, CatDevice, Citation, ConversationDetail, ConversationMessage, ConversationSummary, PublicSettings, WorkApproval, WorkArtifact, WorkRequest, WorkToolCall } from './shared';
 import { citationOrdinal, hidePartialCitationMarker, remarkCitations, stripCitationMarkers } from './citations';
+import { hideSplash, showSplashError } from './boot-splash';
 import { deviceDiscoveryMessage, initialState, reduceBackendEvent } from './state';
 import { assistantCopyTargets, buildWorkTimeline, clampTextareaHeight, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldShowWorkWaitingIndicator, shouldSubmitComposer, summarizeWorkToolGroup, workTimelineCopyActions } from './ui-behavior';
 import { textMenuEntries, type TextMenuAction, type TextMenuScene } from './text-context-menu';
@@ -129,6 +130,11 @@ function App() {
     }
   }, [state.bootstrap]);
   useEffect(() => {
+    if (state.bootstrap) { hideSplash(); return; }
+    const error = localError ?? state.backendError;
+    if (error) showSplashError(error);
+  }, [state.bootstrap, localError, state.backendError]);
+  useEffect(() => {
     if (!notice) return;
     const timer = setTimeout(() => setNotice(current => current?.id === notice.id ? undefined : current), 2600);
     return () => clearTimeout(timer);
@@ -185,7 +191,7 @@ function App() {
     document.execCommand(action);
   };
 
-  if (!state.bootstrap) return <Loading error={localError ?? state.backendError}/>;
+  if (!state.bootstrap) return null;
   const bootstrap = state.bootstrap;
   const active = bootstrap.activeConversation;
   const selectConversation = async (id: string) => {
@@ -947,7 +953,6 @@ function Diagnostics({ device }: { device: BootstrapState['device'] }) {
 
 function GlobalAlert({ text, onClose }: { text: string; onClose(): void }) { return <div className="global-alert" role="alert"><span>{text}</span><button className="icon-button" onClick={onClose} aria-label="关闭错误提示"><Icon name="close"/></button></div>; }
 function Notice({ notice }: { notice?: NoticeState }) { return <div className={`notice ${notice ? 'visible' : ''} ${notice?.tone === 'danger' ? 'danger' : ''}`} role="status" aria-live="polite"><Icon name={notice?.tone === 'danger' ? 'info' : 'check'}/><span>{notice?.text ?? ''}</span></div>; }
-function Loading({ error }: { error?: string }) { return <div className="loading-screen"><BrandMark large/><h1>小猫助手</h1><p>{error ?? '正在准备…'}</p></div>; }
 function groupConversations(items: ConversationSummary[]) { const result = new Map<string, ConversationSummary[]>(), now = new Date(), startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime(); for (const item of items) { const updated = new Date(item.updatedAt).getTime(), age = startToday - updated, label = item.isPinned ? '已置顶' : updated >= startToday ? '今天' : age < 2 * 86400000 ? '昨天' : age < 7 * 86400000 ? '最近 7 天' : '更早'; result.set(label, [...(result.get(label) ?? []), item]); } return [...result].map(([label, groupItems]) => ({ label, items: groupItems })); }
 function safeHttpUrl(value?: string): value is string { if (!value) return false; try { return ['http:', 'https:'].includes(new URL(value).protocol); } catch { return false; } }
 function errorText(reason: unknown) { return reason instanceof Error ? reason.message : String(reason); }
