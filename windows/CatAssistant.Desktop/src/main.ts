@@ -60,6 +60,13 @@ function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1080, height: 720, minWidth: 720, minHeight: 600, show: false,
     backgroundColor: '#ffffff', title: '小猫助手', icon: windowIconPath, autoHideMenuBar: true,
+    // Blend the app into the window: hide the native title bar but keep the real
+    // caption buttons (snap layouts, Aero Shake, accessibility all stay native).
+    // The renderer draws its own title-bar strip beneath them; the overlay colour
+    // starts white to match the startup screen and switches to the app grey once
+    // the first real frame is on screen.
+    titleBarStyle: 'hidden',
+    titleBarOverlay: { color: '#ffffff', symbolColor: '#5b6672', height: 40 },
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true, nodeIntegration: false, sandbox: true
@@ -82,7 +89,18 @@ function createWindow(): void {
   };
   const onBootReady = () => { mark('boot:ready received'); reveal(); };
   ipcMain.on('boot:ready', onBootReady);
-  mainWindow.once('closed', () => ipcMain.removeListener('boot:ready', onBootReady));
+  // Once the renderer drops its white startup screen, recolour the caption buttons to
+  // match the app's grey title-bar strip (Windows only).
+  const onChromeReady = () => {
+    if (process.platform === 'win32' && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setTitleBarOverlay({ color: '#f7f8f9', symbolColor: '#5b6672', height: 40 });
+    }
+  };
+  ipcMain.on('chrome:ready', onChromeReady);
+  mainWindow.once('closed', () => {
+    ipcMain.removeListener('boot:ready', onBootReady);
+    ipcMain.removeListener('chrome:ready', onChromeReady);
+  });
   mainWindow.webContents.on('dom-ready', () => mark('dom ready'));
   mainWindow.webContents.on('did-finish-load', () => mark('page finished load'));
   mainWindow.webContents.on('did-fail-load', (_event, code, description) => { mark(`page failed load ${code} ${description}`); reveal(); });

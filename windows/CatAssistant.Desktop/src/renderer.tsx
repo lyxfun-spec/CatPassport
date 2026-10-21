@@ -300,6 +300,7 @@ function App() {
         onContext={(conversation, left, top) => setConversationContext({ conversation, left, top })}
         composeActive={requestedView === 'compose'}
         settingsActive={requestedView === 'settings'} onSettings={() => setRequestedView('settings')}/>
+      <div className="titlebar" aria-hidden="true"/>
       <main className={`content-pane view-${displayedView} view-phase-${viewPhase}`}>
         {(localError || state.backendError) && <GlobalAlert
           text={localError ?? state.backendError!}
