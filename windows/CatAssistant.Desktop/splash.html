@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data: file:" />
+    <title>小猫助手</title>
+    <style>
+      /* First document the window ever paints: it is loaded straight from disk so the
+         startup screen is visible while the renderer (or the dev server) is still cold.
+         Keep in sync with index.html. */
+      :root { --boot-muted: #657080; --boot-accent: #466987; --boot-track: #e7ebef; }
+      html, body { width: 100%; height: 100%; }
+      body { margin: 0; background: #fff; color: #252c36; font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif; }
+      .boot { position: fixed; inset: 0; display: grid; place-content: center; justify-items: center;
+        background: radial-gradient(460px 300px at 50% 40%, #eef4f8 0%, rgba(238, 244, 248, 0) 72%), #fff;
+        text-align: center; }
+      .boot-mark { width: 64px; height: 64px; object-fit: contain; filter: drop-shadow(0 10px 22px rgba(35, 51, 71, .16));
+        animation: boot-float 3.2s ease-in-out infinite; }
+      .boot-title { margin: 18px 0 8px; font-size: 20px; font-weight: 600; letter-spacing: .04em; }
+      .boot-status { margin: 0 0 20px; color: var(--boot-muted); font-size: 12.5px; letter-spacing: .02em; }
+      .boot-progress { position: relative; width: 132px; height: 3px; border-radius: 999px; background: var(--boot-track); overflow: hidden; }
+      .boot-progress i { position: absolute; top: 0; bottom: 0; left: 0; width: 42%; border-radius: 999px;
+        background: linear-gradient(90deg, rgba(70, 105, 135, 0) 0%, var(--boot-accent) 50%, rgba(70, 105, 135, 0) 100%);
+        animation: boot-slide 1.5s cubic-bezier(.45, .05, .55, .95) infinite; }
+      @keyframes boot-float { 0%, 100% { transform: translateY(0) scale(1); } 50% { transform: translateY(-5px) scale(1.02); } }
+      @keyframes boot-slide { 0% { transform: translateX(-110%); } 100% { transform: translateX(250%); } }
+      @media (prefers-reduced-motion: reduce) {
+        .boot-mark, .boot-progress i { animation: none; }
+        .boot-progress i { width: 100%; transform: none; background: var(--boot-accent); opacity: .35; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="boot" id="boot" role="status" aria-live="polite">
+      <img class="boot-mark" src="./src/assets/brand.png" alt=""/>
+      <strong class="boot-title">小猫助手</strong>
+      <p class="boot-status">正在启动</p>
+      <span class="boot-progress" aria-hidden="true"><i></i></span>
+    </div>
+  </body>
+</html>
