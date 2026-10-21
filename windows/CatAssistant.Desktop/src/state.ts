@@ -4,6 +4,7 @@ export interface UiState {
   bootstrap?: BootstrapState;
   backendError?: string;
   runError?: string;
+  endedRunIds: ReadonlySet<string>;
 }
 
 export type UiAction =
@@ -13,7 +14,7 @@ export type UiAction =
   | { event: 'ui.device'; data: DeviceState }
   | { event: 'ui.clearError'; data?: undefined };
 
-export const initialState: UiState = {};
+export const initialState: UiState = { endedRunIds: new Set() };
 
 export function deviceDiscoveryMessage(device: DeviceState): string {
   const scanFailed = device.status.startsWith('蓝牙错误')
@@ -27,8 +28,8 @@ export function deviceDiscoveryMessage(device: DeviceState): string {
 export function reduceBackendEvent(state: UiState, action: UiAction): UiState {
   if (action.event === 'backend.ready' || action.event === 'ui.bootstrap') {
     const incoming = action.event === 'backend.ready' ? action.data.state : action.data;
-    const bootstrap: BootstrapState = { ...incoming, activeConversation: keepAheadOfSnapshot(state.bootstrap?.activeConversation, incoming.activeConversation) };
-    return { bootstrap, backendError: undefined, runError: state.runError };
+    const bootstrap: BootstrapState = { ...incoming, activeConversation: keepAheadOfSnapshot(state.bootstrap?.activeConversation, withoutEndedRun(incoming.activeConversation, state.endedRunIds)) };
+    return { bootstrap, backendError: undefined, runError: state.runError, endedRunIds: state.endedRunIds };
   }
   if (action.event === 'backend.exited') {
     return { ...state, backendError: action.data.message ?? `后台服务已退出${action.data.code === null ? '' : `（代码 ${action.data.code}）`}` };
@@ -54,6 +55,12 @@ export function reduceBackendEvent(state: UiState, action: UiAction): UiState {
   return reduceConversationEvent(state, action.data);
 }
 
+// A bootstrap snapshot can be read before the run's terminal event and arrive after it,
+// so a run the desktop has already seen finish must not come back as active.
+function withoutEndedRun(detail: ConversationDetail | undefined, ended: ReadonlySet<string>): ConversationDetail | undefined {
+  return detail?.activeRunId && ended.has(detail.activeRunId) ? { ...detail, activeRunId: undefined } : detail;
+}
+
 // A bootstrap snapshot is read while deltas keep arriving, so it can lag the assembled text.
 // Backend persists content before publishing, therefore local content is always an extension of the snapshot.
 function keepAheadOfSnapshot(local: ConversationDetail | undefined, incoming: ConversationDetail | undefined): ConversationDetail | undefined {
@@ -74,8 +81,11 @@ function reduceConversationEvent(state: UiState, event: ConversationEvent): UiSt
   const bootstrap = state.bootstrap!;
   const detail = bootstrap.activeConversation;
   if (!detail || detail.conversation.id !== event.conversationId) return state;
-  if (event.type === 'run.failed') {
-    return { ...state, runError: event.error ?? 'AI 服务暂时不可用。', bootstrap: { ...bootstrap, activeConversation: { ...detail, activeRunId: undefined } } };
+  if (event.type === 'run.completed' || event.type === 'run.stopped' || event.type === 'run.failed') {
+    const endedRunIds = event.runId ? new Set(state.endedRunIds).add(event.runId) : state.endedRunIds;
+    const activeRunId = event.runId && event.runId !== detail.activeRunId ? detail.activeRunId : undefined;
+    const next: UiState = { ...state, endedRunIds, bootstrap: { ...bootstrap, activeConversation: { ...detail, activeRunId } } };
+    return event.type === 'run.failed' ? { ...next, runError: event.error ?? 'AI 服务暂时不可用。' } : next;
   }
   if (event.type === 'message.created' && event.message) {
     const created = event.message;
@@ -112,7 +122,8 @@ function reduceConversationEvent(state: UiState, event: ConversationEvent): UiSt
     const messages = detail.messages.map(message => message.id === event.messageId
       ? { ...message, status: 'interrupted' as const }
       : message);
-    return { ...state, bootstrap: { ...bootstrap, activeConversation: { ...detail, messages, activeRunId: undefined } } };
+    const endedRunIds = event.runId ? new Set(state.endedRunIds).add(event.runId) : state.endedRunIds;
+    return { ...state, endedRunIds, bootstrap: { ...bootstrap, activeConversation: { ...detail, messages, activeRunId: undefined } } };
   }
   if ((event.type === 'work.request.proposed' || event.type === 'work.request.resolved') && event.workRequest) {
     const workRequests = upsertWorkRequest(detail.workRequests ?? [], event.workRequest);

@@ -88,22 +88,6 @@ export function buildWorkTimeline(
   return timeline;
 }
 
-export function shouldShowWorkWaitingIndicator(
-  activeRunId: string | undefined,
-  messages: ConversationMessage[],
-  tools: WorkToolCall[],
-  hasPendingApproval: boolean
-): boolean {
-  if (!activeRunId || hasPendingApproval) return false;
-  const assistantIsStreaming = messages.some(message =>
-    message.runId === activeRunId && message.role === 'assistant' && message.status === 'streaming'
-  );
-  if (assistantIsStreaming) return false;
-  return !tools.some(tool =>
-    tool.runId === activeRunId && ['pending', 'waiting_approval', 'running'].includes(tool.state)
-  );
-}
-
 export function assistantCopyTargets(
   messages: ConversationMessage[],
   activeRunId?: string

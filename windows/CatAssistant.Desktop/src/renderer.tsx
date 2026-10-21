@@ -7,7 +7,7 @@ import type { BackendEvent, BootstrapState, CatDevice, Citation, ConversationDet
 import { citationOrdinal, hidePartialCitationMarker, remarkCitations, stripCitationMarkers } from './citations';
 import { hideSplash, showSplashError } from './boot-splash';
 import { deviceDiscoveryMessage, initialState, reduceBackendEvent } from './state';
-import { assistantCopyTargets, buildWorkTimeline, clampTextareaHeight, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldShowWorkWaitingIndicator, shouldSubmitComposer, summarizeWorkToolGroup, workTimelineCopyActions } from './ui-behavior';
+import { assistantCopyTargets, buildWorkTimeline, clampTextareaHeight, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldSubmitComposer, summarizeWorkToolGroup, workTimelineCopyActions } from './ui-behavior';
 import { textMenuEntries, type TextMenuAction, type TextMenuScene } from './text-context-menu';
 import { AnchorRect, AnchoredSurface, rectOf, ScrollArea } from './ui-primitives';
 import brandUrl from './assets/brand.png';
@@ -311,7 +311,7 @@ function App() {
             ? <DraftConversation mode={draftMode} onMode={setDraftMode} value={draft} onChange={setDraft} onSend={() => void send()} onAttach={() => void attachFiles()} hasApiKey={bootstrap.settings.hasApiKey} sending={isBusy('send')} focusSignal={composerFocusSignal} onOpenSettings={() => setRequestedView('settings')}/>
             : <>
               <ConversationHeader conversation={active.conversation} origin={active.conversation.originConversationId ? bootstrap.conversations.find(item => item.id === active.conversation.originConversationId) : undefined} onOpenConversation={id => void selectConversation(id)} onAction={(kind, anchor) => setActionSurface({ kind, anchor, conversation: active.conversation })}/>
-              <MessageList detail={active} runError={state.runError} busy={busy} tools={active.conversation.mode === 'work' ? bootstrap.workToolCalls ?? noWorkToolCalls : noWorkToolCalls} artifacts={active.conversation.mode === 'work' ? bootstrap.workArtifacts ?? noWorkArtifacts : noWorkArtifacts} hasPendingApproval={active.conversation.mode === 'work' && (bootstrap.pendingApprovals?.length ?? 0) > 0} onReveal={artifactId => void window.catAssistant.revealArtifact(active.conversation.id, artifactId)} onResolveWorkRequest={(request, approved) => void resolveWorkRequest(request, approved)} onOpenConversation={id => void selectConversation(id)}/>
+              <MessageList detail={active} runError={state.runError} busy={busy} tools={active.conversation.mode === 'work' ? bootstrap.workToolCalls ?? noWorkToolCalls : noWorkToolCalls} artifacts={active.conversation.mode === 'work' ? bootstrap.workArtifacts ?? noWorkArtifacts : noWorkArtifacts} onReveal={artifactId => void window.catAssistant.revealArtifact(active.conversation.id, artifactId)} onResolveWorkRequest={(request, approved) => void resolveWorkRequest(request, approved)} onOpenConversation={id => void selectConversation(id)}/>
               {active.conversation.mode === 'work' && (bootstrap.pendingApprovals?.length ?? 0) > 0
                 ? <ApprovalComposer approvals={bootstrap.pendingApprovals!} busy={busy} onResolve={(approval, approved) => void resolveApproval(approval, approved)} onStop={active.activeRunId ? () => void stopWork() : undefined}/>
                 : <Composer value={draft} onChange={setDraft} onSend={() => void send()} onAttach={active.conversation.mode === 'work' ? () => void attachFiles() : undefined} onStop={active.conversation.mode === 'work' && active.activeRunId ? () => void stopWork() : undefined} hasApiKey={bootstrap.settings.hasApiKey} sending={isBusy('send')} focusSignal={composerFocusSignal} onOpenSettings={() => setRequestedView('settings')}/>}
@@ -526,9 +526,9 @@ const noCitations: Citation[] = [];
 const noWorkToolCalls: WorkToolCall[] = [];
 const noWorkArtifacts: WorkArtifact[] = [];
 
-function MessageList({ detail, runError, busy, tools, artifacts, hasPendingApproval, onReveal, onResolveWorkRequest, onOpenConversation }: {
+function MessageList({ detail, runError, busy, tools, artifacts, onReveal, onResolveWorkRequest, onOpenConversation }: {
   detail: ConversationDetail; runError?: string; busy: Set<string>;
-  tools: WorkToolCall[]; artifacts: WorkArtifact[]; hasPendingApproval: boolean; onReveal(id: string): void;
+  tools: WorkToolCall[]; artifacts: WorkArtifact[]; onReveal(id: string): void;
   onResolveWorkRequest(request: WorkRequest, approved: boolean): void; onOpenConversation(id: string): void;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
@@ -547,16 +547,13 @@ function MessageList({ detail, runError, busy, tools, artifacts, hasPendingAppro
     }
     return grouped;
   }, [detail.conversation.id, detail.workRequests]);
-  const tail = detail.messages.at(-1);
   const timeline = useMemo(() => detail.conversation.mode === 'work' ? buildWorkTimeline(detail.messages, tools, artifacts) : undefined, [detail.conversation.mode, detail.messages, tools, artifacts]);
   const copyTargets = useMemo(() => assistantCopyTargets(detail.messages, detail.activeRunId), [detail.messages, detail.activeRunId]);
   const timelineCopyActions = useMemo(() => timeline ? workTimelineCopyActions(timeline, detail.messages, detail.activeRunId) : new Map<string, string>(), [timeline, detail.messages, detail.activeRunId]);
   const lastTimelineKey = timeline?.at(-1)?.key;
-  const showWaiting = detail.conversation.mode === 'work'
-    ? shouldShowWorkWaitingIndicator(detail.activeRunId, detail.messages, tools, hasPendingApproval)
-    : Boolean(detail.activeRunId) && tail?.role === 'user';
+  const showRunning = Boolean(detail.activeRunId);
   useEffect(() => { pinned.current = true; requestAnimationFrame(() => scroller.current?.scrollTo({ top: scroller.current.scrollHeight })); }, [detail.conversation.id]);
-  useEffect(() => { if (pinned.current) requestAnimationFrame(() => scroller.current?.scrollTo({ top: scroller.current.scrollHeight })); }, [detail.messages.length, tools.length, artifacts.length, lastContent, showWaiting, runError]);
+  useEffect(() => { if (pinned.current) requestAnimationFrame(() => scroller.current?.scrollTo({ top: scroller.current.scrollHeight })); }, [detail.messages.length, tools.length, artifacts.length, lastContent, showRunning, runError]);
   const onScroll = () => { const element = scroller.current; if (element) pinned.current = isNearScrollEnd(element.scrollHeight, element.scrollTop, element.clientHeight); };
   const renderMessage = (message: ConversationMessage, showCopy = true) => <React.Fragment key={message.id}><MessageItem message={message} citations={citationsByMessage.get(message.id) ?? noCitations} copyContent={showCopy ? copyTargets.get(message.id) : undefined}/>{(requestsByMessage.get(message.id) ?? []).map(request => <WorkRequestCard key={request.id} request={request} busy={busy.has(`work-request-${request.id}`)} onResolve={onResolveWorkRequest} onOpenConversation={onOpenConversation}/>)}</React.Fragment>;
   return <ScrollArea ref={scroller} className="message-scroll" viewportClassName={`messages ${detail.messages.length ? '' : 'empty-chat'}`} onScroll={onScroll}>
@@ -568,7 +565,7 @@ function MessageList({ detail, runError, busy, tools, artifacts, hasPendingAppro
           {item.key === lastTimelineKey && runError && <div className="run-error" role="alert"><Icon name="info"/><span>{runError}</span></div>}
           {timelineCopyActions.has(item.key) && <TimelineCopyAction content={timelineCopyActions.get(item.key)!}/>}
         </React.Fragment>) : detail.messages.map(message => renderMessage(message))}
-        {showWaiting && <ThinkingBubble/>}
+        {showRunning && <ThinkingBubble/>}
         {!timeline && runError && <div className="run-error" role="alert"><Icon name="info"/><span>{runError}</span></div>}
       </div>}
   </ScrollArea>;
@@ -594,7 +591,7 @@ function WorkRequestCard({ request, busy, onResolve, onOpenConversation }: {
 }
 
 function ThinkingBubble() {
-  return <article className="message assistant"><div className="thinking" role="status"><i/><i/><i/><span className="sr-only">正在生成回复</span></div></article>;
+  return <article className="message assistant"><div className="thinking" role="status"><i/><i/><i/><span className="sr-only">任务进行中</span></div></article>;
 }
 
 function TimelineCopyAction({ content }: { content: string }) {
@@ -623,7 +620,7 @@ const MessageItem = memo(function MessageItem({ message, citations, copyContent 
     setSourcesOpen(true);
   }, []);
   const copy = async () => { clearTimeout(copyTimer.current); try { await navigator.clipboard.writeText(stripCitationMarkers(copyContent ?? message.content)); setCopyState('copied'); } catch { setCopyState('failed'); } copyTimer.current = setTimeout(() => setCopyState('idle'), 1650); };
-  if (message.role === 'assistant' && message.status === 'streaming' && !message.content) return <ThinkingBubble/>;
+  if (message.role === 'assistant' && message.status === 'streaming' && !message.content) return null;
   const safeCitations = citations.filter(citation => safeHttpUrl(citation.url));
   const showStatus = message.status === 'interrupted' || message.status === 'failed';
   return <article className={`message ${message.role} ${message.status}`}><div className="message-body">{message.role === 'assistant' ? <AssistantMarkdown content={message.content} streaming={message.status === 'streaming'} citations={safeCitations} onCite={revealSource}/> : <p>{message.content}</p>}</div>{safeCitations.length > 0 && <SourceList messageId={message.id} citations={safeCitations} open={sourcesOpen} onToggle={() => setSourcesOpen(value => !value)} target={sourceTarget}/>}{message.role === 'assistant' && message.content && (copyContent || showStatus) && <div className="message-actions">{message.status === 'interrupted' && <span>已中断</span>}{message.status === 'failed' && <span className="failed-label">生成失败</span>}{copyContent && <button onClick={() => void copy()} aria-label="复制本轮回复"><Icon name={copyState === 'copied' ? 'check' : 'copy'} size={15}/>{copyState === 'copied' ? '已复制' : copyState === 'failed' ? '复制失败' : '复制'}</button>}</div>}</article>;

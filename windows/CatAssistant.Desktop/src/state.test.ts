@@ -97,6 +97,15 @@ describe('conversation stream state', () => {
     expect(refreshed.runError).toBe(state.runError);
   });
 
+  it('keeps the running indicator off once a run reports its terminal event', () => {
+    let state = reduceBackendEvent(initialState, { event: 'ui.bootstrap', data: bootstrap });
+    state = reduceBackendEvent(state, { event: 'run.stopped', data: { type: 'run.stopped', conversationId: 'chat-1', runId: 'run-1' } });
+    expect(state.bootstrap?.activeConversation?.activeRunId).toBeUndefined();
+
+    state = reduceBackendEvent(state, { event: 'ui.bootstrap', data: bootstrap });
+    expect(state.bootstrap?.activeConversation?.activeRunId).toBeUndefined();
+  });
+
   it('clears the failure when another conversation is opened', () => {
     let state = reduceBackendEvent(initialState, { event: 'ui.bootstrap', data: bootstrap });
     state = reduceBackendEvent(state, { event: 'run.failed', data: { type: 'run.failed', conversationId: 'chat-1', runId: 'run-1' } });

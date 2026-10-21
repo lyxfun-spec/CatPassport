@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ConversationMessage, WorkArtifact, WorkToolCall } from './shared';
-import { assistantCopyTargets, buildWorkTimeline, clampTextareaHeight, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldShowWorkWaitingIndicator, shouldSubmitComposer, summarizeWorkToolGroup, workTimelineCopyActions } from './ui-behavior';
+import { assistantCopyTargets, buildWorkTimeline, clampTextareaHeight, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldSubmitComposer, summarizeWorkToolGroup, workTimelineCopyActions } from './ui-behavior';
 
 describe('composer keyboard behavior', () => {
   it('submits on plain Enter', () => {
@@ -91,17 +91,6 @@ describe('Work transient activity', () => {
   const tool = (state: string): WorkToolCall => ({
     id: `tool-${state}`, runId: 'run-1', roundId: 'round-1', batchId: 'batch-1', toolCallId: `call-${state}`,
     ordinal: 0, toolName: 'read_file', argumentsJson: '{}', state, createdAt: '2026-01-01T00:00:01Z'
-  });
-
-  it('shows waiting while a run has no visible streaming output or active tool', () => {
-    expect(shouldShowWorkWaitingIndicator('run-1', [message('user-1', 'user', 'complete', '开始')], [], false)).toBe(true);
-    expect(shouldShowWorkWaitingIndicator('run-1', [message('assistant-1', 'assistant', 'complete', '正在处理')], [tool('completed')], false)).toBe(true);
-  });
-
-  it('hides waiting during streaming, tool execution, and approval', () => {
-    expect(shouldShowWorkWaitingIndicator('run-1', [message('assistant-1', 'assistant', 'streaming', '正在')], [], false)).toBe(false);
-    expect(shouldShowWorkWaitingIndicator('run-1', [], [tool('running')], false)).toBe(false);
-    expect(shouldShowWorkWaitingIndicator('run-1', [], [], true)).toBe(false);
   });
 
   it('places one copy target at the end of each completed run', () => {
