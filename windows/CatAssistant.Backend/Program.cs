@@ -103,6 +103,7 @@ internal static class Program
             case "settings.save":
                 await coordinator.SaveSettingsAsync(
                     Optional<string>(request.Params, "apiKey"),
+                    Optional<string>(request.Params, "searchApiKey"),
                     Required<string>(request.Params, "asrModel"),
                     Required<string>(request.Params, "chatModel"),
                     Required<string>(request.Params, "workModel"),

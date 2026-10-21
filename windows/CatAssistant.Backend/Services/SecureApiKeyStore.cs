@@ -5,9 +5,11 @@ namespace CatAssistant.Backend.Services;
 
 public sealed class SecureApiKeyStore
 {
-    private readonly string _path = Path.Combine(
+    private readonly string _path;
+
+    public SecureApiKeyStore(string fileName = "dashscope.key") => _path = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "FoloToy", "CatAssistant", "dashscope.key");
+        "FoloToy", "CatAssistant", fileName);
 
     public string? Load()
     {

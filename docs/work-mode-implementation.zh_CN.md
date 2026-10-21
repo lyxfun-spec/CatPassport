@@ -8,7 +8,7 @@
 - `DashScopeClient` 继续作为模型 API 客户端。Chat 仍走原有流式接口；Work 新增兼容 Chat Completions 的原生 function tool calling，保存 `tool_call_id` 并回传对应 tool result。
 - Electron 主进程、受限 preload RPC、React 会话界面和托盘生命周期全部复用。Work 只新增模式入口、附件、停止、进度、审批和成果胶囊。
 - SQLite 继续作为唯一状态存储；新增 Work context、tool call、approval 和 artifact 表，没有替换或迁移 Chat 表。
-- 现有联网搜索供应方由 `web_search` 工具复用，不另建浏览器自动化或抓取平台。
+- 联网搜索拆成独立能力：Chat 继续使用模型自带的 `enable_search`；Work 的 `web_search` 工具改为调用阿里云 IQS 独立搜索 API（`POST /search/unified`），模型只负责决策与综合，不另建浏览器自动化或抓取平台。
 
 ## 2. 已确定需求与工程决策
 

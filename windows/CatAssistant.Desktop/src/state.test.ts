@@ -12,7 +12,7 @@ const bootstrap: BootstrapState = {
     activeRunId: 'run-1'
   },
   device: { status: '未连接', detail: '', isConnected: false, hasPairedDevice: false, maxPduSize: 0, devices: [], followDesktop: true },
-  settings: { asrModel: 'asr', chatModel: 'chat', workModel: 'work', screenTimeoutSeconds: 60, autoReconnect: true, webSearchEnabled: true, hasApiKey: true }
+  settings: { asrModel: 'asr', chatModel: 'chat', workModel: 'work', screenTimeoutSeconds: 60, autoReconnect: true, webSearchEnabled: true, hasApiKey: true, hasSearchApiKey: true }
 };
 
 describe('conversation stream state', () => {

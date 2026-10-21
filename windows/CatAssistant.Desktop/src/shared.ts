@@ -13,6 +13,7 @@ export interface PublicSettings {
   autoReconnect: boolean;
   webSearchEnabled: boolean;
   hasApiKey: boolean;
+  hasSearchApiKey: boolean;
 }
 
 export interface ConversationSummary {

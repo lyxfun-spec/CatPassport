@@ -21,7 +21,8 @@ public sealed record PublicSettings(
     uint ScreenTimeoutSeconds,
     bool AutoReconnect,
     bool WebSearchEnabled,
-    bool HasApiKey);
+    bool HasApiKey,
+    bool HasSearchApiKey);
 
 public sealed record ConversationSummary(
     string Id,

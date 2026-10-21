@@ -1,6 +1,5 @@
-using System.Runtime.CompilerServices;
+using System.Net;
 using System.Text.Json;
-using CatAssistant.Backend.Models;
 using CatAssistant.Backend.Services;
 using CatAssistant.Backend.Services.Work;
 using CatAssistant.Backend.Services.WorkTools;
@@ -10,46 +9,119 @@ namespace CatAssistant.Backend.Tests;
 
 public sealed class WebSearchToolTests
 {
-    [Fact]
-    public async Task UsesExistingSearchProviderAndReturnsGroundedSources()
-    {
-        var provider = new SearchProvider();
-        var tool = new WebSearchTool(provider, () => new AppSettings { ChatModel = "chat-model", WorkModel = "work-model" }, () => "test-key");
-        var context = new WorkToolExecutionContext(Guid.NewGuid().ToString("N"), "run", Path.GetTempPath(), "call");
+    private static WorkToolExecutionContext Context() => new(Guid.NewGuid().ToString("N"), "run", Path.GetTempPath(), "call");
 
-        var result = await tool.ExecuteAsync(context, "{\"query\":\"今日公开信息\"}", CancellationToken.None);
+    [Fact]
+    public async Task ReturnsRankedResultsFromIndependentSearchService()
+    {
+        var handler = new StubHandler(_ => JsonResponse("""
+            {"requestId":"r1","pageItems":[
+              {"title":"今日天气","link":"https://weather.example.com/a","snippet":"晴 26 度","publishedTime":"2026-10-22T08:00:00+08:00","hostname":"天气网"},
+              {"title":"重复","link":"https://weather.example.com/a","snippet":"重复条目"},
+              {"title":"脚本链接","link":"javascript:alert(1)","snippet":"非法协议"}
+            ],"searchInformation":{"searchTime":412}}
+            """));
+        using var client = new IqsWebSearchClient(new HttpClient(handler));
+        var tool = new WebSearchTool(client, () => "iqs-key", () => true);
+
+        var result = await tool.ExecuteAsync(Context(), "{\"query\":\"北京天气\",\"count\":4,\"time_range\":\"OneDay\"}", CancellationToken.None);
 
         Assert.True(result.Success, result.ErrorMessage);
-        Assert.True(provider.SearchEnabled);
-        Assert.Equal("work-model", provider.Model);
+        Assert.Equal("Bearer iqs-key", handler.Request!.Headers.Authorization?.ToString());
+        Assert.Equal("https://cloud-iqs.aliyuncs.com/search/unified", handler.Request.RequestUri!.ToString());
+        using var sent = JsonDocument.Parse(handler.Body!);
+        Assert.Equal("北京天气", sent.RootElement.GetProperty("query").GetString());
+        Assert.Equal("CNAuto", sent.RootElement.GetProperty("engineType").GetString());
+        Assert.Equal("OneDay", sent.RootElement.GetProperty("timeRange").GetString());
+        Assert.Equal(4, sent.RootElement.GetProperty("advancedParams").GetProperty("numResults").GetInt32());
+        Assert.False(sent.RootElement.GetProperty("contents").GetProperty("mainText").GetBoolean());
+
         using var json = JsonDocument.Parse(result.OutputJson);
-        Assert.Equal("检索结果", json.RootElement.GetProperty("answer").GetString());
-        var source = Assert.Single(json.RootElement.GetProperty("sources").EnumerateArray());
-        Assert.Equal("https://example.com/source", source.GetProperty("url").GetString());
+        Assert.Equal(1, json.RootElement.GetProperty("count").GetInt32());
+        Assert.Equal("CNAuto", json.RootElement.GetProperty("engine").GetString());
+        var item = Assert.Single(json.RootElement.GetProperty("results").EnumerateArray());
+        Assert.Equal("https://weather.example.com/a", item.GetProperty("url").GetString());
+        Assert.Equal("天气网", item.GetProperty("site").GetString());
     }
 
-    private sealed class SearchProvider : IChatProvider
+    [Fact]
+    public async Task ReportsMissingKeyWithoutCallingTheService()
     {
-        public bool SearchEnabled { get; private set; }
-        public string? Model { get; private set; }
+        var handler = new StubHandler(_ => throw new InvalidOperationException("should not be called"));
+        using var client = new IqsWebSearchClient(new HttpClient(handler));
+        var tool = new WebSearchTool(client, () => "", () => true);
 
-        public async IAsyncEnumerable<ChatStreamChunk> StreamAsync(
-            IReadOnlyList<ConversationMessage> history,
-            string model,
-            string apiKey,
-            bool enableWebSearch,
-            [EnumeratorCancellation] CancellationToken cancellationToken)
+        var result = await tool.ExecuteAsync(Context(), "{\"query\":\"任意\"}", CancellationToken.None);
+
+        Assert.False(result.Success);
+        Assert.Equal("search_not_configured", result.ErrorCode);
+        Assert.Null(handler.Request);
+    }
+
+    [Fact]
+    public async Task ReportsDisabledSearchWithoutCallingTheService()
+    {
+        var handler = new StubHandler(_ => throw new InvalidOperationException("should not be called"));
+        using var client = new IqsWebSearchClient(new HttpClient(handler));
+        var tool = new WebSearchTool(client, () => "iqs-key", () => false);
+
+        var result = await tool.ExecuteAsync(Context(), "{\"query\":\"任意\"}", CancellationToken.None);
+
+        Assert.False(result.Success);
+        Assert.Equal("search_disabled", result.ErrorCode);
+        Assert.Null(handler.Request);
+    }
+
+    [Fact]
+    public async Task SurfacesUpstreamErrorCodeAndMessage()
+    {
+        var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)
         {
-            SearchEnabled = enableWebSearch;
-            Model = model;
-            Assert.Contains("今日公开信息", Assert.Single(history).Content);
-            yield return new ChatStreamChunk(Citations:
-            [new CitationRecord("source", "", 1, "来源", "https://example.com/source", "摘要", "示例")]);
-            await Task.Yield();
-            yield return new ChatStreamChunk(Delta: "检索结果");
-        }
+            Content = new StringContent("""
+                {"code":"InvalidParameter","message":"engineType is not supported","requestId":"r2"}
+                """, System.Text.Encoding.UTF8, "application/json")
+        });
+        using var client = new IqsWebSearchClient(new HttpClient(handler));
+        var tool = new WebSearchTool(client, () => "iqs-key", () => true);
 
-        public Task<string> GenerateTitleAsync(string userMessage, string assistantMessage, string model, string apiKey, CancellationToken cancellationToken) =>
-            throw new NotSupportedException();
+        var result = await tool.ExecuteAsync(Context(), "{\"query\":\"任意\"}", CancellationToken.None);
+
+        Assert.False(result.Success);
+        Assert.Equal("search_failed", result.ErrorCode);
+        Assert.Contains("InvalidParameter", result.ErrorMessage);
+        Assert.Contains("engineType is not supported", result.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task ReturnsEmptyResultSetAsSuccess()
+    {
+        var handler = new StubHandler(_ => JsonResponse("""{"pageItems":[]}"""));
+        using var client = new IqsWebSearchClient(new HttpClient(handler));
+        var tool = new WebSearchTool(client, () => "iqs-key", () => true);
+
+        var result = await tool.ExecuteAsync(Context(), "{\"query\":\"不存在的内容\"}", CancellationToken.None);
+
+        Assert.True(result.Success, result.ErrorMessage);
+        using var json = JsonDocument.Parse(result.OutputJson);
+        Assert.Equal(0, json.RootElement.GetProperty("count").GetInt32());
+        Assert.NotEmpty(json.RootElement.GetProperty("note").GetString()!);
+    }
+
+    private static HttpResponseMessage JsonResponse(string body) => new(HttpStatusCode.OK)
+    {
+        Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json")
+    };
+
+    private sealed class StubHandler(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler
+    {
+        public HttpRequestMessage? Request { get; private set; }
+        public string? Body { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Request = request;
+            Body = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
+            return respond(request);
+        }
     }
 }

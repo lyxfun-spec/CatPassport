@@ -21,6 +21,8 @@ public sealed class AssistantCoordinator : IAsyncDisposable
     private readonly DashScopeClient _cloud;
     private readonly SqliteRepository _repository;
     private readonly SecureApiKeyStore _secureStore;
+    private readonly SecureApiKeyStore _searchStore = new("iqs.key");
+    private readonly IqsWebSearchClient _webSearch = new();
     private readonly ConversationService _conversations;
     private readonly WindowsSandboxController _workSandbox;
     private readonly PeriodicTimer _reconnectTimer = new(TimeSpan.FromSeconds(1));
@@ -73,7 +75,7 @@ public sealed class AssistantCoordinator : IAsyncDisposable
         workTools.Register(new WriteFileTool(_workSandbox, workApprovals));
         workTools.Register(new ListDirectoryTool(_workSandbox, workApprovals));
         workTools.Register(new DeliverFilesTool(repository));
-        workTools.Register(new WebSearchTool(cloud, () => Settings, () => _secureStore.Load() ?? ""));
+        workTools.Register(new WebSearchTool(_webSearch, () => _searchStore.Load() ?? "", () => Settings.WebSearchEnabled));
         var skills = new BuiltInSkillCatalog();
         workTools.Register(new ListSkillsTool(skills));
         workTools.Register(new LoadSkillTool(skills));
@@ -126,7 +128,8 @@ public sealed class AssistantCoordinator : IAsyncDisposable
         Settings.ScreenTimeoutSeconds,
         Settings.AutoReconnect,
         Settings.WebSearchEnabled,
-        !string.IsNullOrWhiteSpace(_secureStore.Load()));
+        !string.IsNullOrWhiteSpace(_secureStore.Load()),
+        !string.IsNullOrWhiteSpace(_searchStore.Load()));
 
     public async Task ScanAsync()
     {
@@ -243,11 +246,12 @@ public sealed class AssistantCoordinator : IAsyncDisposable
         catch (Exception error) { ShowError(error); }
     }
 
-    public async Task SaveSettingsAsync(string? apiKey, string asrModel, string chatModel, string workModel, uint screenTimeout, bool autoReconnect, bool webSearchEnabled)
+    public async Task SaveSettingsAsync(string? apiKey, string? searchApiKey, string asrModel, string chatModel, string workModel, uint screenTimeout, bool autoReconnect, bool webSearchEnabled)
     {
         try
         {
             if (!string.IsNullOrWhiteSpace(apiKey)) _secureStore.Save(apiKey);
+            if (!string.IsNullOrWhiteSpace(searchApiKey)) _searchStore.Save(searchApiKey);
             Settings.AsrModel = asrModel.Trim(); Settings.ChatModel = chatModel.Trim(); Settings.WorkModel = workModel.Trim(); Settings.ScreenTimeoutSeconds = screenTimeout; Settings.AutoReconnect = autoReconnect; Settings.WebSearchEnabled = webSearchEnabled;
             await _repository.SaveSettingsAsync(Settings);
             if (IsLinkReady()) { await SendUInt32Async(MessageType.ScreenTimeout, screenTimeout); await SendAppStatusAsync(); }
@@ -776,6 +780,6 @@ public sealed class AssistantCoordinator : IAsyncDisposable
         _lifetime.Cancel(); _controlMessages.Writer.TryComplete(); _turns.CancelAll(); _reconnectTimer.Dispose();
         try { await Task.WhenAll(_controlPump, _linkHealthPump); } catch (OperationCanceledException) { }
         await _conversations.DisposeAsync();
-        await _ble.DisposeAsync(); _cloud.Dispose(); _workSandbox.Dispose(); _turns.Dispose(); _lifetime.Dispose(); _audioArrived.Dispose(); _connectionGate.Dispose();
+        await _ble.DisposeAsync(); _cloud.Dispose(); _workSandbox.Dispose(); _webSearch.Dispose(); _turns.Dispose(); _lifetime.Dispose(); _audioArrived.Dispose(); _connectionGate.Dispose();
     }
 }
