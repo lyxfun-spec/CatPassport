@@ -9,12 +9,13 @@ import { deviceDiscoveryMessage, initialState, reduceBackendEvent } from './stat
 import { assistantCopyTargets, buildWorkTimeline, clampTextareaHeight, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldShowWorkWaitingIndicator, shouldSubmitComposer, summarizeWorkToolGroup, workTimelineCopyActions } from './ui-behavior';
 import { textMenuEntries, type TextMenuAction, type TextMenuScene } from './text-context-menu';
 import { AnchorRect, AnchoredSurface, rectOf, ScrollArea } from './ui-primitives';
+import brandUrl from './assets/brand.png';
 import './ui-tokens.css';
 import './styles.css';
 
 type IconName = 'new' | 'search' | 'chat' | 'work' | 'device' | 'settings' | 'menu' | 'send'
   | 'copy' | 'cut' | 'paste' | 'selectAll' | 'close' | 'sidebar' | 'check' | 'back' | 'rename' | 'delete' | 'refresh'
-  | 'key' | 'shield' | 'info' | 'chevron' | 'pin' | 'cat' | 'external' | 'attach' | 'stop' | 'file';
+  | 'key' | 'shield' | 'info' | 'chevron' | 'pin' | 'external' | 'attach' | 'stop' | 'file';
 
 const iconPaths: Record<IconName, React.ReactNode> = {
   new: <path d="M12 5v14M5 12h14"/>,
@@ -41,7 +42,6 @@ const iconPaths: Record<IconName, React.ReactNode> = {
   info: <><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></>,
   chevron: <path d="m9 18 6-6-6-6"/>,
   pin: <><path d="M12 17v5"/><path d="M5 17h14"/><path d="M6 3h12l-2 6v4l2 4H6l2-4V9Z"/></>,
-  cat: <><path d="M6.5 8 4 4v9a8 8 0 0 0 16 0V4l-2.5 4"/><path d="M9 13h.01M15 13h.01M10 17c1.3 1 2.7 1 4 0"/></>,
   external: <><path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></>,
   attach: <path d="M21.4 11.6 12 21a6 6 0 0 1-8.5-8.5l10-10a4 4 0 1 1 5.7 5.7l-10 10a2 2 0 0 1-2.9-2.8l9.3-9.3"/>,
   stop: <rect x="7" y="7" width="10" height="10" rx="1"/>,
@@ -322,7 +322,7 @@ function App() {
 }
 
 function BrandMark({ large = false }: { large?: boolean }) {
-  return <span className={`brand-mark ${large ? 'large' : ''}`} aria-hidden="true"><Icon name="cat" size={large ? 28 : 21}/></span>;
+  return <img className={`brand-mark ${large ? 'large' : ''}`} src={brandUrl} alt="" aria-hidden="true"/>;
 }
 
 function Sidebar({ bootstrap, query, onQuery, collapsed, onToggle, onNew, onSelect, onDevice, onContext, composeActive, settingsActive, onSettings }: {

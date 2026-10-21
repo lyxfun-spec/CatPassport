@@ -11,13 +11,16 @@ const backendProject = path.resolve(desktopDirectory, '..', 'CatAssistant.Backen
 const backendOutput = path.resolve(desktopDirectory, '.artifacts', 'backend');
 const workRuntimeOutput = path.resolve(desktopDirectory, '.artifacts', 'work-runtime');
 const prepareWorkRuntime = path.resolve(desktopDirectory, 'scripts', 'Prepare-WorkRuntime.ps1');
-const iconPath = path.resolve(desktopDirectory, '..', '..', 'assets', 'branding', 'cat-assistant-icon-transparent.png');
+const brandingDirectory = path.resolve(desktopDirectory, '..', '..', 'assets', 'branding');
+const executableIcon = path.join(brandingDirectory, 'cat-assistant-icon.ico');
+const runtimeIcons = ['cat-assistant-icon-256.png', 'cat-assistant-icon-32.png'].map(name => path.join(brandingDirectory, name));
 
 const config: ForgeConfig = {
   packagerConfig: {
     asar: true,
     executableName: 'CatAssistant',
-    extraResource: [backendOutput, workRuntimeOutput, iconPath],
+    icon: executableIcon,
+    extraResource: [backendOutput, workRuntimeOutput, ...runtimeIcons],
     download: {
       // Pin the official Electron release checksums so packaging remains verifiable
       // when GitHub's checksum endpoint is unavailable from the build environment.
@@ -38,7 +41,7 @@ const config: ForgeConfig = {
     }
   },
   makers: [
-    new MakerSquirrel({ name: 'CatAssistant', setupExe: 'CatAssistant-Setup.exe' }),
+    new MakerSquirrel({ name: 'CatAssistant', setupExe: 'CatAssistant-Setup.exe', setupIcon: executableIcon }),
     new MakerZIP({}, ['win32'])
   ],
   plugins: [

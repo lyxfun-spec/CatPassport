@@ -18,10 +18,11 @@ const backend = new BackendClient();
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let quitting = false;
-const iconFileName = 'cat-assistant-icon-transparent.png';
-const iconPath = app.isPackaged
-  ? path.join(process.resourcesPath, iconFileName)
-  : path.resolve(__dirname, '..', '..', '..', '..', 'assets', 'branding', iconFileName);
+const brandingDir = app.isPackaged
+  ? process.resourcesPath
+  : path.resolve(__dirname, '..', '..', '..', '..', 'assets', 'branding');
+const windowIconPath = path.join(brandingDir, 'cat-assistant-icon-256.png');
+const trayIconPath = path.join(brandingDir, 'cat-assistant-icon-32.png');
 
 if (!app.requestSingleInstanceLock()) app.quit();
 
@@ -33,7 +34,7 @@ function showWindow(): void {
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1080, height: 720, minWidth: 720, minHeight: 600, show: false,
-    backgroundColor: '#ffffff', title: '小猫助手', icon: iconPath, autoHideMenuBar: true,
+    backgroundColor: '#ffffff', title: '小猫助手', icon: windowIconPath, autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true, nodeIntegration: false, sandbox: true
@@ -50,7 +51,7 @@ function createWindow(): void {
 }
 
 function createTray(): void {
-  const icon = nativeImage.createFromPath(iconPath);
+  const icon = nativeImage.createFromPath(trayIconPath);
   tray = new Tray(icon); tray.setToolTip('小猫助手');
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '打开小猫助手', click: showWindow },
