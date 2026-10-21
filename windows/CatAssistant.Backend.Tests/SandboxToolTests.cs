@@ -38,10 +38,34 @@ public sealed class SandboxToolTests
             Assert.True(list.Success, list.ErrorMessage);
             Assert.Contains("note.txt", list.OutputJson);
 
+            var chineseWrite = await new WriteFileTool(sandbox).ExecuteAsync(context,
+                "{\"path\":\"work/中文报告.txt\",\"content\":\"数据 摘要\"}", CancellationToken.None);
+            Assert.True(chineseWrite.Success, chineseWrite.ErrorMessage);
+            var chineseRead = await new ReadFileTool(sandbox).ExecuteAsync(context,
+                "{\"path\":\"work/中文报告.txt\"}", CancellationToken.None);
+            Assert.True(chineseRead.Success, chineseRead.ErrorMessage);
+            using (var payload = JsonDocument.Parse(chineseRead.OutputJson))
+                Assert.Equal("数据 摘要", payload.RootElement.GetProperty("content").GetString());
+            var chineseList = await new ListDirectoryTool(sandbox).ExecuteAsync(context,
+                "{\"path\":\"work\"}", CancellationToken.None);
+            Assert.True(chineseList.Success, chineseList.ErrorMessage);
+            using (var payload = JsonDocument.Parse(chineseList.OutputJson))
+                Assert.Contains("中文报告.txt", payload.RootElement.GetProperty("entries_json").GetString());
+
+            // "hello 工作" as cp936 bytes: legacy ANSI files must survive the read_file round trip.
+            await File.WriteAllBytesAsync(Path.Combine(workspace, "work", "legacy-gbk.txt"),
+                [0x68, 0x65, 0x6C, 0x6C, 0x6F, 0x20, 0xB9, 0xA4, 0xD7, 0xF7]);
+            var gbkRead = await new ReadFileTool(sandbox).ExecuteAsync(context,
+                "{\"path\":\"work/legacy-gbk.txt\"}", CancellationToken.None);
+            Assert.True(gbkRead.Success, gbkRead.ErrorMessage);
+            using (var payload = JsonDocument.Parse(gbkRead.OutputJson))
+                Assert.Equal("hello 工作", payload.RootElement.GetProperty("content").GetString());
+
             var command = await new ExecuteCommandTool(sandbox).ExecuteAsync(context,
                 "{\"command\":\"cd & type note.txt\",\"shell\":\"cmd\",\"working_directory\":\"work\"}", CancellationToken.None);
             Assert.True(command.Success, $"{command.ErrorMessage}\n{command.OutputJson}");
-            Assert.Contains("hello", command.OutputJson);
+            using (var payload = JsonDocument.Parse(command.OutputJson))
+                Assert.Contains("工作", payload.RootElement.GetProperty("stdout").GetString());
 
             if (workPython is not null)
             {
@@ -118,5 +142,24 @@ public sealed class SandboxToolTests
             Directory.Delete(root, recursive: true);
         }
         finally { Environment.SetEnvironmentVariable("CATASSISTANT_PYTHON", previous); }
+    }
+}
+
+public sealed class SandboxTextTests
+{
+    [Fact]
+    public void DecodesUtf8AndStripsBom()
+    {
+        Assert.Equal("hello 工作", SandboxText.Decode("hello 工作"u8.ToArray()));
+        Assert.Equal("hello 工作", SandboxText.Decode([0xEF, 0xBB, 0xBF, .. "hello 工作"u8.ToArray()]));
+        Assert.Equal(string.Empty, SandboxText.Decode([]));
+    }
+
+    [Fact]
+    public void FallsBackToOemCodePageForLegacyGbkBytes()
+    {
+        if (System.Globalization.CultureInfo.CurrentCulture.TextInfo.OEMCodePage != 936) return;
+        // "hello 工作" encoded as cp936.
+        Assert.Equal("hello 工作", SandboxText.Decode([0x68, 0x65, 0x6C, 0x6C, 0x6F, 0x20, 0xB9, 0xA4, 0xD7, 0xF7]));
     }
 }

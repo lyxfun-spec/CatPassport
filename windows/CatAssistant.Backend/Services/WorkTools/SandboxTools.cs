@@ -89,7 +89,7 @@ public sealed class ReadFileTool(WindowsSandboxController sandbox, WorkApprovalS
 {
     public WorkToolDefinition Definition { get; } = new(
         "read_file",
-        "Read a UTF-8 text file through the current conversation's OS sandbox.",
+        "Read a text file through the current conversation's OS sandbox. Decodes UTF-8 (with or without BOM) and falls back to the system ANSI/OEM code page (e.g. GBK) for legacy Chinese files.",
         "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"approval_scope\":{\"type\":\"string\",\"enum\":[\"single\",\"task_directory\"]}},\"required\":[\"path\"],\"additionalProperties\":false}");
 
     public async Task<WorkToolResult> ExecuteAsync(WorkToolExecutionContext context, string argumentsJson, CancellationToken cancellationToken)
@@ -106,11 +106,14 @@ public sealed class ReadFileTool(WindowsSandboxController sandbox, WorkApprovalS
             try
             {
                 ExternalPathPolicy.RejectReparsePoints(path);
-                return WorkToolResult.Ok(new { path = arguments.Path, content = await File.ReadAllTextAsync(path, cancellationToken) });
+                var bytes = await File.ReadAllBytesAsync(path, cancellationToken);
+                return WorkToolResult.Ok(new { path = arguments.Path, content = SandboxText.Decode(bytes) });
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return WorkToolResult.Error("file_operation_failed", error.Message); }
         }
-        var command = $"[Console]::OutputEncoding=[Text.Encoding]::UTF8; [Console]::Write([IO.File]::ReadAllText('{PowerShellLiteral(path)}'))";
+        // Emit the raw file bytes to stdout; the shared UTF-8→OEM decoder in DrainAsync handles
+        // UTF-8 and GBK/ANSI files alike, so legacy Chinese text no longer comes back as mojibake.
+        var command = $"$b=[IO.File]::ReadAllBytes('{PowerShellLiteral(path)}'); $s=[Console]::OpenStandardOutput(); $s.Write($b,0,$b.Length); $s.Flush()";
         return await RunPowerShellAsync(sandbox, context, command, cancellationToken, result => new { path = arguments.Path, content = result.StandardOutput });
     }
 
@@ -126,8 +129,13 @@ public sealed class ReadFileTool(WindowsSandboxController sandbox, WorkApprovalS
         Func<SandboxCommandResult, object> success)
     {
         var executable = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+        // -EncodedCommand (Base64 UTF-16LE) passes Chinese paths/literals without relying on the
+        // process code page, and the UTF-8 output preamble keeps list_directory/stderr from coming
+        // back as GBK (which the UTF-8-first decoder would otherwise have to guess at).
+        var script = $"[Console]::OutputEncoding=[Text.Encoding]::UTF8; $ErrorActionPreference='Stop'; {command}";
+        var encoded = Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(script));
         var result = await sandbox.ExecuteAsync(context.ConversationId, context.WorkspaceRoot,
-            new SandboxCommand(executable, $"-NoLogo -NoProfile -NonInteractive -Command \"$ErrorActionPreference='Stop'; {command}\"", context.WorkspaceRoot, TimeSpan.FromMinutes(2)), cancellationToken);
+            new SandboxCommand(executable, $"-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {encoded}", context.WorkspaceRoot, TimeSpan.FromMinutes(2)), cancellationToken);
         return result.ExitCode == 0
             ? WorkToolResult.Ok(success(result))
             : new WorkToolResult(false, JsonSerializer.Serialize(new { stderr = result.StandardError, stdout = result.StandardOutput }), "file_operation_failed", result.StandardError.Trim());

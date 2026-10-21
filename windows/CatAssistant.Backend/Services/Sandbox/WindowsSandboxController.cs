@@ -414,19 +414,33 @@ public sealed class WindowsSandboxController : IDisposable
 
     private static async Task<(string Text, bool Truncated)> DrainAsync(Stream stream, int maximumCharacters)
     {
-        using var reader = new StreamReader(stream, Encoding.UTF8, true, 4096, leaveOpen: true);
-        var builder = new StringBuilder(Math.Min(maximumCharacters, 8192));
-        var buffer = new char[4096];
+        // Collect raw bytes rather than decoding inline: sandboxed cmd/PowerShell output can be
+        // UTF-8 (chcp 65001, PYTHONUTF8) or the OEM code page (GBK on zh-CN). Decoding happens once
+        // the full buffer is available so SandboxText can pick the right encoding for the whole stream.
+        var maximumBytes = checked(maximumCharacters * 4);
+        using var buffer = new MemoryStream();
+        var chunk = new byte[8192];
         var truncated = false;
         while (true)
         {
-            var count = await reader.ReadAsync(buffer);
+            var count = await stream.ReadAsync(chunk);
             if (count == 0) break;
-            var remaining = maximumCharacters - builder.Length;
-            if (remaining > 0) builder.Append(buffer, 0, Math.Min(count, remaining));
-            if (count > remaining) truncated = true;
+            if (truncated) continue;
+            if (buffer.Length + count > maximumBytes)
+            {
+                var allowed = (int)(maximumBytes - buffer.Length);
+                if (allowed > 0) buffer.Write(chunk, 0, allowed);
+                truncated = true;
+            }
+            else buffer.Write(chunk, 0, count);
         }
-        return (builder.ToString(), truncated);
+        var text = SandboxText.Decode(buffer.ToArray());
+        if (text.Length > maximumCharacters)
+        {
+            text = text[..maximumCharacters];
+            truncated = true;
+        }
+        return (text, truncated);
     }
 
     private static string ProfileName(string conversationId) => $"FoloToy.CatAssistant.Work.{conversationId}";
@@ -513,5 +527,49 @@ public sealed class WindowsSandboxController : IDisposable
         [DllImport("kernel32.dll", SetLastError = true)] internal static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
         [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
         [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool CloseHandle(IntPtr handle);
+    }
+}
+
+/// <summary>
+/// Decodes sandboxed process output and file bytes with an encoding that tolerates both UTF-8
+/// (PowerShell <c>[Console]::OutputEncoding</c>, chcp 65001, PYTHONUTF8) and the OEM/ANSI code
+/// page (GBK on zh-CN) that cmd.exe and legacy Chinese text files still emit.
+/// </summary>
+internal static class SandboxText
+{
+    private static readonly Encoding StrictUtf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+    private static readonly Encoding LenientUtf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: false);
+    private static readonly Encoding Fallback = ResolveFallback();
+
+    private static Encoding ResolveFallback()
+    {
+        // Code page 936 (GBK) is not built into .NET 8; register the provider before use.
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        try
+        {
+            var oemCodePage = System.Globalization.CultureInfo.CurrentCulture.TextInfo.OEMCodePage;
+            return Encoding.GetEncoding(oemCodePage);
+        }
+        catch (Exception error) when (error is ArgumentException or NotSupportedException)
+        {
+            return LenientUtf8;
+        }
+    }
+
+    internal static string Decode(byte[] bytes)
+    {
+        if (bytes.Length == 0) return string.Empty;
+        if (bytes.Length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE)
+            return Encoding.Unicode.GetString(bytes, 2, bytes.Length - 2);
+        if (bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF)
+            return Encoding.BigEndianUnicode.GetString(bytes, 2, bytes.Length - 2);
+        var offset = bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF ? 3 : 0;
+        var span = bytes.AsSpan(offset);
+        try { return StrictUtf8.GetString(span); }
+        catch (DecoderFallbackException)
+        {
+            try { return Fallback.GetString(span); }
+            catch (Exception error) when (error is ArgumentException or NotSupportedException) { return LenientUtf8.GetString(span); }
+        }
     }
 }
