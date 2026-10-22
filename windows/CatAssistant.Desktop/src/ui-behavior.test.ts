@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ConversationMessage, WorkArtifact, WorkToolCall } from './shared';
-import { assistantCopyTargets, buildWorkTimeline, clampTextareaHeight, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldSubmitComposer, summarizeWorkToolGroup, workTimelineCopyActions } from './ui-behavior';
+import { assistantCopyTargets, buildWorkTimeline, clampTextareaHeight, draftGreetingForHour, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldSubmitComposer, summarizeWorkToolGroup, workTimelineCopyActions } from './ui-behavior';
 
 describe('composer keyboard behavior', () => {
   it('submits on plain Enter', () => {
@@ -36,6 +36,13 @@ describe('empty conversation greeting', () => {
     expect(greetingForHour(8)).toBe('早上好，想聊些什么？');
     expect(greetingForHour(14)).toBe('下午好，想聊些什么？');
     expect(greetingForHour(21)).toBe('晚上好，想聊些什么？');
+  });
+
+  it('frames the Work draft as a task instead of a chat', () => {
+    expect(draftGreetingForHour('chat', 21)).toBe('晚上好，想聊些什么？');
+    expect(draftGreetingForHour('work', 8)).toBe('早上好，今天想完成什么？');
+    expect(draftGreetingForHour('work', 14)).toBe('下午好，今天想完成什么？');
+    expect(draftGreetingForHour('work', 21)).toBe('晚上好，今天想完成什么？');
   });
 });
 

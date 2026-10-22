@@ -40,10 +40,18 @@ export function scrollThumbMetrics(
   return { visible: true, size, offset };
 }
 
+function greetingPrefixForHour(hour: number): string {
+  if (hour < 11) return '早上好';
+  if (hour < 18) return '下午好';
+  return '晚上好';
+}
+
 export function greetingForHour(hour: number): string {
-  if (hour < 11) return '早上好，想聊些什么？';
-  if (hour < 18) return '下午好，想聊些什么？';
-  return '晚上好，想聊些什么？';
+  return `${greetingPrefixForHour(hour)}，想聊些什么？`;
+}
+
+export function draftGreetingForHour(mode: 'chat' | 'work', hour: number): string {
+  return `${greetingPrefixForHour(hour)}，${mode === 'work' ? '今天想完成什么？' : '想聊些什么？'}`;
 }
 
 export type WorkTimelineItem =

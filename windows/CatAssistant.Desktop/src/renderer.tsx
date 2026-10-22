@@ -7,7 +7,7 @@ import type { BackendEvent, BootstrapState, CatDevice, Citation, ConversationDet
 import { citationOrdinal, hidePartialCitationMarker, remarkCitations, stripCitationMarkers } from './citations';
 import { hideSplash, showSplashError } from './boot-splash';
 import { deviceDiscoveryMessage, initialState, reduceBackendEvent } from './state';
-import { assistantCopyTargets, buildWorkTimeline, clampTextareaHeight, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldSubmitComposer, summarizeWorkToolGroup, workTimelineCopyActions } from './ui-behavior';
+import { assistantCopyTargets, buildWorkTimeline, clampTextareaHeight, draftGreetingForHour, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldSubmitComposer, summarizeWorkToolGroup, workTimelineCopyActions } from './ui-behavior';
 import { textMenuEntries, type TextMenuAction, type TextMenuScene } from './text-context-menu';
 import { AnchorRect, AnchoredSurface, rectOf, ScrollArea } from './ui-primitives';
 import brandUrl from './assets/brand.png';
@@ -813,7 +813,7 @@ function SourceMenu({ state, open, onClose, onOpen }: { state: SourceMenuState; 
   </div>, document.body);
 }
 
-function Composer({ value, onChange, onSend, onAttach, onStop, hasApiKey, sending, disabled = false, focusSignal, onOpenSettings }: { value: string; onChange(value: string): void; onSend(): void; onAttach?: () => void; onStop?: () => void; hasApiKey: boolean; sending: boolean; disabled?: boolean; focusSignal: number; onOpenSettings(): void }) {
+function Composer({ value, onChange, onSend, onAttach, onStop, hasApiKey, sending, disabled = false, focusSignal, placeholder = '输入消息', onOpenSettings }: { value: string; onChange(value: string): void; onSend(): void; onAttach?: () => void; onStop?: () => void; hasApiKey: boolean; sending: boolean; disabled?: boolean; focusSignal: number; placeholder?: string; onOpenSettings(): void }) {
   const textarea = useRef<HTMLTextAreaElement>(null);
   const rail = useRef<HTMLDivElement>(null);
   const [scrollActive, setScrollActive] = useState(false);
@@ -825,7 +825,7 @@ function Composer({ value, onChange, onSend, onAttach, onStop, hasApiKey, sendin
   useEffect(() => { const element = textarea.current; if (!element) return; element.style.height = '0px'; element.style.height = `${clampTextareaHeight(element.scrollHeight)}px`; element.style.overflowY = element.scrollHeight > 152 ? 'auto' : 'hidden'; requestAnimationFrame(updateThumb); }, [value]);
   useEffect(() => { if (focusSignal) textarea.current?.focus({ preventScroll: true }); }, [focusSignal]);
   useEffect(() => () => clearTimeout(hideTimer.current), []);
-  return <div className="composer-wrap"><div className="composer">{onAttach && <button className="composer-tool" onClick={onAttach} aria-label="添加本地文件" title="添加本地文件"><Icon name="attach"/></button>}<div className={`composer-editor ${scrollActive ? 'scroll-active' : ''}`}><textarea ref={textarea} value={value} rows={1} placeholder="输入消息" aria-label="输入消息" onScroll={() => { updateThumb(); revealThumb(); }} onChange={event => onChange(event.target.value)} onKeyDown={event => { if (shouldSubmitComposer(event.key, event.shiftKey, event.nativeEvent.isComposing)) { event.preventDefault(); if (canSend) onSend(); } }}/><div ref={rail} className={`textarea-rail ${thumb.visible ? 'has-overflow' : ''}`} aria-hidden="true"><i style={{ height: thumb.size, transform: `translateY(${thumb.offset}px)` }}/></div></div>{onStop && <button className="stop-button" onClick={onStop} aria-label="停止任务" title="停止任务"><Icon name="stop"/></button>}<button className={`send-button ${canSend ? 'ready' : ''}`} disabled={!canSend} onClick={onSend} aria-label={sending ? '正在发送' : '发送消息'}><Icon name="send"/></button></div>{!hasApiKey && value.trim() ? <button className="key-hint" onClick={onOpenSettings}><Icon name="key" size={14}/>配置 API Key 后即可发送</button> : <p>AI 生成的内容可能不准确，请核实重要信息。</p>}</div>;
+  return <div className="composer-wrap"><div className="composer">{onAttach && <button className="composer-tool" onClick={onAttach} aria-label="添加本地文件" title="添加本地文件"><Icon name="attach"/></button>}<div className={`composer-editor ${scrollActive ? 'scroll-active' : ''}`}><textarea ref={textarea} value={value} rows={1} placeholder={placeholder} aria-label="输入消息" onScroll={() => { updateThumb(); revealThumb(); }} onChange={event => onChange(event.target.value)} onKeyDown={event => { if (shouldSubmitComposer(event.key, event.shiftKey, event.nativeEvent.isComposing)) { event.preventDefault(); if (canSend) onSend(); } }}/><div ref={rail} className={`textarea-rail ${thumb.visible ? 'has-overflow' : ''}`} aria-hidden="true"><i style={{ height: thumb.size, transform: `translateY(${thumb.offset}px)` }}/></div></div>{onStop && <button className="stop-button" onClick={onStop} aria-label="停止任务" title="停止任务"><Icon name="stop"/></button>}<button className={`send-button ${canSend ? 'ready' : ''}`} disabled={!canSend} onClick={onSend} aria-label={sending ? '正在发送' : '发送消息'}><Icon name="send"/></button></div>{!hasApiKey && value.trim() ? <button className="key-hint" onClick={onOpenSettings}><Icon name="key" size={14}/>配置 API Key 后即可发送</button> : <p>AI 生成的内容可能不准确，请核实重要信息。</p>}</div>;
 }
 
 function ApprovalComposer({ approvals, busy, onResolve, onStop }: {
@@ -853,15 +853,15 @@ function DraftConversation({ mode, onMode, value, onChange, onSend, onAttach, ha
   return <div className="draft-conversation">
     <div className="draft-hero">
       <BrandMark large/>
-      <h1>{greetingForHour(new Date().getHours())}</h1>
+      <h1>{draftGreetingForHour(mode, new Date().getHours())}</h1>
       <div className={`mode-selector mode-${mode}`} role="group" aria-label="对话模式">
         <span className="mode-slider" aria-hidden="true"/>
         <button type="button" className={mode === 'chat' ? 'selected' : ''} onClick={() => onMode('chat')} aria-pressed={mode === 'chat'}><Icon name="chat"/><span><b>Chat</b><small>日常对话</small></span></button>
         <button type="button" className={mode === 'work' ? 'selected' : ''} onClick={() => onMode('work')} aria-pressed={mode === 'work'}><Icon name="work"/><span><b>Work</b><small>本地任务</small></span></button>
       </div>
-      <p className="mode-note">{workSelected ? '处理本地文件、运行受隔离的工具，并交付成果。' : '适合问答、写作和日常交流。'}</p>
+      <p className="mode-note">{workSelected ? '文件整理、资料汇总和成果交付' : '问答、写作和日常交流'}</p>
     </div>
-    <Composer value={value} onChange={onChange} onSend={onSend} onAttach={workSelected ? onAttach : undefined} hasApiKey={hasApiKey} sending={sending} focusSignal={focusSignal} onOpenSettings={onOpenSettings}/>
+    <Composer value={value} onChange={onChange} onSend={onSend} onAttach={workSelected ? onAttach : undefined} hasApiKey={hasApiKey} sending={sending} focusSignal={focusSignal} placeholder={workSelected ? '要完成什么，交给我' : '想聊什么，告诉我'} onOpenSettings={onOpenSettings}/>
   </div>;
 }
 function RenameDialog({ open, anchor, conversation, busy, onClose, onRename }: { open: boolean; anchor?: AnchorRect; conversation?: ConversationSummary; busy: boolean; onClose(): void; onRename(title: string): void }) {
