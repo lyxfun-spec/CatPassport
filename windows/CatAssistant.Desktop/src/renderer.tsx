@@ -14,9 +14,9 @@ import brandUrl from './assets/brand.png';
 import './ui-tokens.css';
 import './styles.css';
 
-type IconName = 'new' | 'search' | 'chat' | 'work' | 'device' | 'settings' | 'menu' | 'send'
+type IconName = 'new' | 'search' | 'chat' | 'work' | 'device' | 'settings' | 'menu' | 'plus' | 'arrowUp'
   | 'copy' | 'cut' | 'paste' | 'selectAll' | 'close' | 'check' | 'back' | 'rename' | 'delete' | 'refresh'
-  | 'key' | 'shield' | 'info' | 'chevron' | 'pin' | 'external' | 'attach' | 'stop' | 'file';
+  | 'key' | 'shield' | 'info' | 'chevron' | 'pin' | 'external' | 'stop' | 'file' | 'terminal';
 
 const iconPaths: Record<IconName, React.ReactNode> = {
   new: <path d="M12 5v14M5 12h14"/>,
@@ -26,7 +26,8 @@ const iconPaths: Record<IconName, React.ReactNode> = {
   device: <><rect x="6" y="3" width="12" height="18" rx="3"/><path d="M10 7h4M10 17h4"/></>,
   settings: <><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6V21h-4v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14v-4a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6 1.7 1.7 0 0 0 10 3h4a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1v4a1.7 1.7 0 0 0-1.6 1Z"/></>,
   menu: <><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></>,
-  send: <><path d="m4 12 16-8-6.5 16-2-6Z"/><path d="m11.5 14 3-3"/></>,
+  plus: <path d="M12 5v14M5 12h14"/>,
+  arrowUp: <path d="M12 19V5M5 12l7-7 7 7"/>,
   copy: <><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></>,
   cut: <><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M8.12 8.12 12 12M20 4 8.12 15.88M14.8 14.8 20 20"/></>,
   paste: <><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></>,
@@ -43,9 +44,9 @@ const iconPaths: Record<IconName, React.ReactNode> = {
   chevron: <path d="m9 18 6-6-6-6"/>,
   pin: <><path d="M12 17v5"/><path d="M5 17h14"/><path d="M6 3h12l-2 6v4l2 4H6l2-4V9Z"/></>,
   external: <><path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></>,
-  attach: <path d="M21.4 11.6 12 21a6 6 0 0 1-8.5-8.5l10-10a4 4 0 1 1 5.7 5.7l-10 10a2 2 0 0 1-2.9-2.8l9.3-9.3"/>,
   stop: <rect x="7" y="7" width="10" height="10" rx="1"/>,
-  file: <><path d="M6 3h8l4 4v14H6Z"/><path d="M14 3v5h5"/></>
+  file: <><path d="M6 3h8l4 4v14H6Z"/><path d="M14 3v5h5"/></>,
+  terminal: <><rect x="3" y="4" width="18" height="16" rx="3"/><path d="m7 9 3 3-3 3M12.5 15H17"/></>
 };
 
 function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
@@ -852,7 +853,7 @@ function Composer({ value, onChange, onSend, onAttach, onStop, hasApiKey, sendin
   useEffect(() => { const element = textarea.current; if (!element) return; element.style.height = '0px'; element.style.height = `${clampTextareaHeight(element.scrollHeight)}px`; element.style.overflowY = element.scrollHeight > 152 ? 'auto' : 'hidden'; requestAnimationFrame(updateThumb); }, [value]);
   useEffect(() => { if (focusSignal) textarea.current?.focus({ preventScroll: true }); }, [focusSignal]);
   useEffect(() => () => clearTimeout(hideTimer.current), []);
-  return <div className="composer-wrap"><div className="composer">{onAttach && <button className="composer-tool" onClick={onAttach} aria-label="添加本地文件" title="添加本地文件"><Icon name="attach"/></button>}<div className={`composer-editor ${scrollActive ? 'scroll-active' : ''}`}><textarea ref={textarea} value={value} rows={1} placeholder={placeholder} aria-label="输入消息" onScroll={() => { updateThumb(); revealThumb(); }} onChange={event => onChange(event.target.value)} onKeyDown={event => { if (shouldSubmitComposer(event.key, event.shiftKey, event.nativeEvent.isComposing)) { event.preventDefault(); if (canSend) onSend(); } }}/><div ref={rail} className={`textarea-rail ${thumb.visible ? 'has-overflow' : ''}`} aria-hidden="true"><i style={{ height: thumb.size, transform: `translateY(${thumb.offset}px)` }}/></div></div>{onStop && <button className="stop-button" onClick={onStop} aria-label="停止任务" title="停止任务"><Icon name="stop"/></button>}<button className={`send-button ${canSend ? 'ready' : ''}`} disabled={!canSend} onClick={onSend} aria-label={sending ? '正在发送' : '发送消息'}><Icon name="send"/></button></div>{!hasApiKey && value.trim() ? <button className="key-hint" onClick={onOpenSettings}><Icon name="key" size={14}/>配置 API Key 后即可发送</button> : <p>AI 生成的内容可能不准确，请核实重要信息。</p>}</div>;
+  return <div className="composer-wrap"><div className={`composer ${onAttach ? 'has-tool' : ''}`}>{onAttach && <button className="composer-tool" onClick={onAttach} aria-label="添加本地文件" title="添加本地文件"><Icon name="plus"/></button>}<div className={`composer-editor ${scrollActive ? 'scroll-active' : ''}`}><textarea ref={textarea} value={value} rows={1} placeholder={placeholder} aria-label="输入消息" onScroll={() => { updateThumb(); revealThumb(); }} onChange={event => onChange(event.target.value)} onKeyDown={event => { if (shouldSubmitComposer(event.key, event.shiftKey, event.nativeEvent.isComposing)) { event.preventDefault(); if (canSend) onSend(); } }}/><div ref={rail} className={`textarea-rail ${thumb.visible ? 'has-overflow' : ''}`} aria-hidden="true"><i style={{ height: thumb.size, transform: `translateY(${thumb.offset}px)` }}/></div></div><div className="composer-actions">{onStop && <button className="composer-stop" onClick={onStop} aria-label="停止任务" title="停止任务"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="1" y="1" width="10" height="10" rx="2.5" fill="currentColor"/></svg></button>}<button className={`composer-send ${canSend ? 'ready' : ''}`} disabled={!canSend} onClick={onSend} aria-label={sending ? '正在发送' : '发送消息'} title={sending ? '正在发送' : '发送'}><Icon name="arrowUp"/></button></div></div>{!hasApiKey && value.trim() ? <button className="key-hint" onClick={onOpenSettings}><Icon name="key" size={14}/>配置 API Key 后即可发送</button> : <p>AI 生成的内容可能不准确，请核实重要信息。</p>}</div>;
 }
 
 function ApprovalComposer({ approvals, busy, onResolve, onStop }: {
@@ -861,11 +862,14 @@ function ApprovalComposer({ approvals, busy, onResolve, onStop }: {
   const approval = approvals[0];
   const resolving = busy.has(`approval-${approval.id}`);
   const action = approval.capability === 'execute' ? '运行外部命令' : approval.capability === 'write' ? '修改外部文件' : '读取外部文件';
-  const scope = approval.scope === 'task_directory' ? '本次任务期间' : '仅限这一次操作';
   return <div className="composer-wrap approval-composer-wrap">
     <section className="approval-composer" role="dialog" aria-label="操作确认" aria-live="polite">
-      <span className="approval-composer-icon"><Icon name="shield"/></span>
-      <div className="approval-composer-copy"><div><strong>允许小猫助手{action}吗？</strong>{approvals.length > 1 && <em>确认请求 1 / {approvals.length}</em>}</div>{approval.targetPath && <code title={approval.targetPath}>{approval.targetPath}</code>}<small>{approval.capability === 'read' ? '只读' : approval.capability === 'write' ? '读写' : '执行'} · {scope}</small></div>
+      <div className="approval-composer-head">
+        <span className="approval-composer-icon"><Icon name="shield"/></span>
+        <strong>允许小猫助手{action}吗？</strong>
+        {approvals.length > 1 && <em>确认请求 1 / {approvals.length}</em>}
+      </div>
+      {approval.targetPath && <div className="approval-composer-target"><Icon name={approval.capability === 'execute' ? 'terminal' : 'file'} size={13}/><code title={approval.targetPath}>{approval.targetPath}</code></div>}
       <div className="approval-composer-actions">{onStop && <button className="stop-button" onClick={onStop} disabled={resolving} aria-label="停止任务" title="停止任务"><Icon name="stop"/></button>}<button className="secondary-button" disabled={resolving} onClick={() => onResolve(approval, false)}>拒绝</button><button className="primary-button" disabled={resolving} onClick={() => onResolve(approval, true)}>{resolving ? '处理中…' : '允许'}</button></div>
     </section>
     <p>确认后任务会自动继续。</p>
