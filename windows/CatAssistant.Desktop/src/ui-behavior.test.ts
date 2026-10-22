@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ConversationMessage, WorkArtifact, WorkToolCall } from './shared';
-import { assistantCopyTargets, buildWorkTimeline, clampTextareaHeight, draftGreetingForHour, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldSubmitComposer, summarizeWorkToolGroup, workTimelineCopyActions } from './ui-behavior';
+import { assistantCopyTargets, buildWorkTimeline, clampTextareaHeight, draftGreetingForHour, greetingForHour, isAtScrollEnd, scrollThumbMetrics, shouldSubmitComposer, summarizeWorkToolGroup, workTimelineCopyActions } from './ui-behavior';
 
 describe('composer keyboard behavior', () => {
   it('submits on plain Enter', () => {
@@ -14,9 +14,11 @@ describe('composer keyboard behavior', () => {
 });
 
 describe('scroll and textarea behavior', () => {
-  it('only treats the viewport as pinned when it is near the latest message', () => {
-    expect(isNearScrollEnd(1000, 620, 300)).toBe(true);
-    expect(isNearScrollEnd(1000, 300, 300)).toBe(false);
+  it('only re-attaches auto-scroll once the viewport is back at the very bottom', () => {
+    expect(isAtScrollEnd(1000, 700, 300)).toBe(true);
+    expect(isAtScrollEnd(1000, 698, 300)).toBe(true);
+    expect(isAtScrollEnd(1000, 620, 300)).toBe(false);
+    expect(isAtScrollEnd(1000, 300, 300)).toBe(false);
   });
 
   it('keeps the composer within its visual bounds', () => {

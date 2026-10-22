@@ -7,7 +7,7 @@ import type { BackendEvent, BootstrapState, CatDevice, Citation, ConversationDet
 import { citationOrdinal, hidePartialCitationMarker, remarkCitations, stripCitationMarkers } from './citations';
 import { hideSplash, showSplashError } from './boot-splash';
 import { deviceDiscoveryMessage, initialState, reduceBackendEvent } from './state';
-import { assistantCopyTargets, buildWorkTimeline, clampTextareaHeight, draftGreetingForHour, greetingForHour, isNearScrollEnd, scrollThumbMetrics, shouldSubmitComposer, summarizeWorkToolGroup, workTimelineCopyActions } from './ui-behavior';
+import { assistantCopyTargets, buildWorkTimeline, clampTextareaHeight, draftGreetingForHour, greetingForHour, isAtScrollEnd, scrollThumbMetrics, shouldSubmitComposer, summarizeWorkToolGroup, workTimelineCopyActions } from './ui-behavior';
 import { textMenuEntries, type TextMenuAction, type TextMenuScene } from './text-context-menu';
 import { AnchorRect, AnchoredSurface, rectOf, ScrollArea } from './ui-primitives';
 import brandUrl from './assets/brand.png';
@@ -531,6 +531,8 @@ function MessageList({ detail, runError, busy, tools, artifacts, onReveal, onRes
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
+  const lastIntent = useRef<'up' | 'down'>('up');
+  const pendingScroll = useRef(0);
   const lastContent = detail.messages.at(-1)?.content;
   const citationsByMessage = useMemo(() => {
     const grouped = new Map<string, Citation[]>();
@@ -550,11 +552,36 @@ function MessageList({ detail, runError, busy, tools, artifacts, onReveal, onRes
   const timelineCopyActions = useMemo(() => timeline ? workTimelineCopyActions(timeline, detail.messages, detail.activeRunId) : new Map<string, string>(), [timeline, detail.messages, detail.activeRunId]);
   const lastTimelineKey = timeline?.at(-1)?.key;
   const showRunning = Boolean(detail.activeRunId);
-  useEffect(() => { pinned.current = true; requestAnimationFrame(() => scroller.current?.scrollTo({ top: scroller.current.scrollHeight })); }, [detail.conversation.id]);
-  useEffect(() => { if (pinned.current) requestAnimationFrame(() => scroller.current?.scrollTo({ top: scroller.current.scrollHeight })); }, [detail.messages.length, tools.length, artifacts.length, lastContent, showRunning, runError]);
-  const onScroll = () => { const element = scroller.current; if (element) pinned.current = isNearScrollEnd(element.scrollHeight, element.scrollTop, element.clientHeight); };
+  const cancelPendingScroll = () => { cancelAnimationFrame(pendingScroll.current); pendingScroll.current = 0; };
+  const scrollToLatest = () => {
+    if (pendingScroll.current) return;
+    pendingScroll.current = requestAnimationFrame(() => {
+      pendingScroll.current = 0;
+      if (pinned.current) scroller.current?.scrollTo({ top: scroller.current.scrollHeight });
+    });
+  };
+  const followLatest = () => { pinned.current = true; scrollToLatest(); };
+  const releaseScroll = () => {
+    const element = scroller.current;
+    if (!element || element.scrollHeight <= element.clientHeight) return;
+    lastIntent.current = 'up';
+    pinned.current = false;
+    cancelPendingScroll();
+  };
+  const requestFollow = () => {
+    lastIntent.current = 'down';
+    const element = scroller.current;
+    if (element && isAtScrollEnd(element.scrollHeight, element.scrollTop, element.clientHeight)) followLatest();
+  };
+  useEffect(() => { pinned.current = true; lastIntent.current = 'up'; cancelPendingScroll(); scrollToLatest(); }, [detail.conversation.id]);
+  useEffect(() => { if (pinned.current) scrollToLatest(); }, [detail.messages.length, tools.length, artifacts.length, lastContent, showRunning, runError]);
+  const onScroll = () => {
+    const element = scroller.current;
+    if (!element || pinned.current || lastIntent.current !== 'down') return;
+    if (isAtScrollEnd(element.scrollHeight, element.scrollTop, element.clientHeight)) followLatest();
+  };
   const renderMessage = (message: ConversationMessage, showCopy = true) => <React.Fragment key={message.id}><MessageItem message={message} citations={citationsByMessage.get(message.id) ?? noCitations} copyContent={showCopy ? copyTargets.get(message.id) : undefined}/>{(requestsByMessage.get(message.id) ?? []).map(request => <WorkRequestCard key={request.id} request={request} busy={busy.has(`work-request-${request.id}`)} onResolve={onResolveWorkRequest} onOpenConversation={onOpenConversation}/>)}</React.Fragment>;
-  return <ScrollArea ref={scroller} className="message-scroll" viewportClassName={`messages ${detail.messages.length ? '' : 'empty-chat'}`} onScroll={onScroll}>
+  return <ScrollArea ref={scroller} className="message-scroll" viewportClassName={`messages ${detail.messages.length ? '' : 'empty-chat'}`} onScroll={onScroll} onScrollIntent={direction => direction === 'up' ? releaseScroll() : requestFollow()}>
     {detail.messages.length === 0
       ? <div className="empty-greeting"><BrandMark large/><h2>{greetingForHour(new Date().getHours())}</h2></div>
       : <div className="message-column">

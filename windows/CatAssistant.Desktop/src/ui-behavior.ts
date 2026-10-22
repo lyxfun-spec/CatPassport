@@ -4,13 +4,13 @@ export function shouldSubmitComposer(key: string, shiftKey: boolean, isComposing
   return key === 'Enter' && !shiftKey && !isComposing;
 }
 
-export function isNearScrollEnd(
+export function isAtScrollEnd(
   scrollHeight: number,
   scrollTop: number,
   clientHeight: number,
-  threshold = 96
+  tolerance = 2
 ): boolean {
-  return scrollHeight - scrollTop - clientHeight <= threshold;
+  return scrollHeight - scrollTop - clientHeight <= tolerance;
 }
 
 export function clampTextareaHeight(scrollHeight: number, minimum = 38, maximum = 152): number {

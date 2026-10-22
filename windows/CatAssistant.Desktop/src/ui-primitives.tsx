@@ -31,14 +31,17 @@ interface ScrollAreaProps {
   viewportClassName?: string;
   children: React.ReactNode;
   onScroll?: React.UIEventHandler<HTMLDivElement>;
+  onScrollIntent?: (direction: 'up' | 'down') => void;
 }
 
 export const ScrollArea = forwardRef<HTMLDivElement, ScrollAreaProps>(function ScrollArea(
-  { className = '', viewportClassName = '', children, onScroll },
+  { className = '', viewportClassName = '', children, onScroll, onScrollIntent },
   forwardedRef
 ) {
   const viewport = useRef<HTMLDivElement>(null);
   const rail = useRef<HTMLDivElement>(null);
+  const touchY = useRef<number | null>(null);
+  const intentHandler = useRef(onScrollIntent);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [active, setActive] = useState(false);
   const [thumb, setThumb] = useState({ visible: false, size: 0, offset: 0 });
@@ -60,6 +63,18 @@ export const ScrollArea = forwardRef<HTMLDivElement, ScrollAreaProps>(function S
   };
 
   useLayoutEffect(() => update(), []);
+  useEffect(() => { intentHandler.current = onScrollIntent; });
+  useEffect(() => {
+    const view = viewport.current;
+    if (!view) return;
+    // React delegates wheel as a passive listener, so the compositor may scroll before we
+    // hear about it. A non-passive listener forces the browser to consult us first.
+    const onWheel = (event: WheelEvent) => {
+      if (event.deltaY !== 0) intentHandler.current?.(event.deltaY < 0 ? 'up' : 'down');
+    };
+    view.addEventListener('wheel', onWheel, { passive: false });
+    return () => view.removeEventListener('wheel', onWheel);
+  }, []);
   useEffect(() => {
     const view = viewport.current;
     if (!view) return;
@@ -83,9 +98,12 @@ export const ScrollArea = forwardRef<HTMLDivElement, ScrollAreaProps>(function S
     event.currentTarget.setPointerCapture(event.pointerId);
     const startY = event.clientY;
     const startTop = view.scrollTop;
+    let lastY = startY;
     const travel = Math.max(1, track.clientHeight - thumb.size);
     const scrollRange = Math.max(0, view.scrollHeight - view.clientHeight);
     const move = (moveEvent: PointerEvent) => {
+      if (moveEvent.clientY !== lastY) onScrollIntent?.(moveEvent.clientY < lastY ? 'up' : 'down');
+      lastY = moveEvent.clientY;
       view.scrollTop = startTop + (moveEvent.clientY - startY) * scrollRange / travel;
       update();
     };
@@ -102,6 +120,12 @@ export const ScrollArea = forwardRef<HTMLDivElement, ScrollAreaProps>(function S
     onPointerEnter={() => { update(); if (thumb.visible) setActive(true); }}
     onPointerLeave={() => reveal()}>
     <div ref={viewport} className={`scroll-viewport ${viewportClassName}`}
+      onTouchStart={event => { touchY.current = event.touches[0]?.clientY ?? null; }}
+      onTouchMove={event => {
+        const y = event.touches[0]?.clientY;
+        if (y !== undefined && touchY.current !== null && y !== touchY.current) onScrollIntent?.(y < touchY.current ? 'down' : 'up');
+        touchY.current = y ?? null;
+      }}
       onScroll={event => { update(); reveal(); onScroll?.(event); }}>
       {children}
     </div>
