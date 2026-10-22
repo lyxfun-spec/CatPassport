@@ -7,6 +7,7 @@ using Xunit;
 
 namespace CatAssistant.Backend.Tests;
 
+[Collection("Work Python environment")]
 public sealed class SandboxToolTests
 {
     [Fact]
@@ -135,6 +136,8 @@ public sealed class SandboxToolTests
             Assert.Contains("PIP_TARGET", powerShell);
             Assert.Contains("PYTHONPATH", powerShell);
             Assert.Contains("C:\\runtime", powerShell);
+            Assert.Contains("New-PSDrive", powerShell);
+            Assert.Contains("Set-Location CATWORK", powerShell);
             Assert.Contains("PIP_TARGET", cmd);
             Assert.Contains("PYTHONPATH", cmd);
             Assert.Contains("C:\\runtime", cmd);
@@ -142,6 +145,35 @@ public sealed class SandboxToolTests
             Directory.Delete(root, recursive: true);
         }
         finally { Environment.SetEnvironmentVariable("CATASSISTANT_PYTHON", previous); }
+    }
+
+    [Fact]
+    public void ToolDefinitionsDescribeExternalApprovalAndAbsolutePaths()
+    {
+        using var sandbox = new WindowsSandboxController();
+        var command = new ExecuteCommandTool(sandbox).Definition;
+        Assert.Contains("user approval", command.Description);
+        using (var parameters = JsonDocument.Parse(command.ParametersJson))
+        {
+            var properties = parameters.RootElement.GetProperty("properties");
+            Assert.Contains("absolute", properties.GetProperty("working_directory").GetProperty("description").GetString());
+            Assert.Contains("outside", properties.GetProperty("outside_sandbox").GetProperty("description").GetString());
+        }
+
+        var fileTools = new IWorkTool[]
+        {
+            new ReadFileTool(sandbox),
+            new WriteFileTool(sandbox),
+            new ListDirectoryTool(sandbox)
+        };
+        foreach (var tool in fileTools)
+        {
+            Assert.Contains("user approval", tool.Definition.Description);
+            using var parameters = JsonDocument.Parse(tool.Definition.ParametersJson);
+            var properties = parameters.RootElement.GetProperty("properties");
+            Assert.Contains("absolute", properties.GetProperty("path").GetProperty("description").GetString());
+            Assert.Contains("current run", properties.GetProperty("approval_scope").GetProperty("description").GetString());
+        }
     }
 }
 

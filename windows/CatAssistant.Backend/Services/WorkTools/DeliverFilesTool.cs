@@ -8,9 +8,9 @@ public sealed class DeliverFilesTool(SqliteRepository repository) : IWorkTool
 {
     public WorkToolDefinition Definition { get; } = new(
         "deliver_files",
-        "Deliver completed files from the outputs directory to the user as file capsules. Only existing regular files under outputs are accepted.",
+        "Deliver existing regular files from the outputs directory to the user as file capsules.",
         """
-        {"type":"object","properties":{"files":{"type":"array","minItems":1,"items":{"type":"object","properties":{"path":{"type":"string"},"label":{"type":"string"}},"required":["path"],"additionalProperties":false}}},"required":["files"],"additionalProperties":false}
+        {"type":"object","properties":{"files":{"type":"array","minItems":1,"items":{"type":"object","properties":{"path":{"type":"string","description":"Relative or absolute path under outputs"},"label":{"type":"string"}},"required":["path"],"additionalProperties":false}}},"required":["files"],"additionalProperties":false}
         """);
 
     public async Task<WorkToolResult> ExecuteAsync(WorkToolExecutionContext context, string argumentsJson, CancellationToken cancellationToken)

@@ -8,9 +8,9 @@ public sealed class ExecuteCommandTool(WindowsSandboxController sandbox, WorkApp
 {
     public WorkToolDefinition Definition { get; } = new(
         "execute_command",
-        "Run a PowerShell or cmd command inside the current conversation's Windows OS sandbox. The process and all children can access only this workspace and may access the network. Commands start at the workspace root by default. Use PowerShell for PowerShell-native operations and cmd for commands that launch native programs. The environment prepares PATH, PYTHONPATH and PIP_TARGET, so standard python and pip commands in cmd use the bundled read-only runtime and install extras into this conversation's work/python-packages directory.",
+        "Execute a PowerShell or CMD command. Commands run in the current workspace's isolated environment by default and can request user approval to run outside it.",
         """
-        {"type":"object","properties":{"command":{"type":"string"},"shell":{"type":"string","enum":["powershell","cmd"]},"working_directory":{"type":"string","description":"Workspace-relative directory; defaults to the workspace root"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":3600},"outside_sandbox":{"type":"boolean","description":"Request explicit approval to run this exact command outside the sandbox"}},"required":["command"],"additionalProperties":false}
+        {"type":"object","properties":{"command":{"type":"string"},"shell":{"type":"string","enum":["powershell","cmd"]},"working_directory":{"type":"string","description":"Workspace-relative or absolute working directory; defaults to the workspace root"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":3600},"outside_sandbox":{"type":"boolean","description":"Request user approval to run this command outside the isolated environment"}},"required":["command"],"additionalProperties":false}
         """);
 
     public async Task<WorkToolResult> ExecuteAsync(WorkToolExecutionContext context, string argumentsJson, CancellationToken cancellationToken)
@@ -101,7 +101,11 @@ public sealed class ExecuteCommandTool(WindowsSandboxController sandbox, WorkApp
         var pathPrefix = string.IsNullOrWhiteSpace(python)
             ? ""
             : $"$env:CATASSISTANT_PYTHON='{ReadFileTool.PowerShellLiteral(python)}'; $env:PATH='{ReadFileTool.PowerShellLiteral(Path.GetDirectoryName(python)!)};{ReadFileTool.PowerShellLiteral(Path.Combine(Path.GetDirectoryName(python)!, "Scripts"))};' + $env:PATH; ";
-        return $"[Console]::OutputEncoding=[Text.Encoding]::UTF8; $ErrorActionPreference='Stop'; $env:CATASSISTANT_WORKSPACE='{ReadFileTool.PowerShellLiteral(workspaceRoot)}'; $env:CATASSISTANT_WORKING_DIRECTORY='{ReadFileTool.PowerShellLiteral(workingDirectory)}'; {pathPrefix}$env:PYTHONPATH='{ReadFileTool.PowerShellLiteral(packages)}'; $env:PIP_TARGET='{ReadFileTool.PowerShellLiteral(packages)}'; $env:PIP_CONFIG_FILE='NUL'; $env:PIP_DISABLE_PIP_VERSION_CHECK='1'; $env:PYTHONNOUSERSITE='1'; $env:PYTHONUTF8='1';";
+        // Windows PowerShell 5.1 can start with an empty provider location in AppContainer even
+        // though the process current directory is valid. A rooted session-only drive initializes
+        // $PWD without granting any additional filesystem access, so native child launchers receive
+        // the intended working directory instead of silently skipping the process or rejecting it.
+        return $"[Console]::OutputEncoding=[Text.Encoding]::UTF8; $ErrorActionPreference='Stop'; $env:CATASSISTANT_WORKSPACE='{ReadFileTool.PowerShellLiteral(workspaceRoot)}'; $env:CATASSISTANT_WORKING_DIRECTORY='{ReadFileTool.PowerShellLiteral(workingDirectory)}'; {pathPrefix}$env:PYTHONPATH='{ReadFileTool.PowerShellLiteral(packages)}'; $env:PIP_TARGET='{ReadFileTool.PowerShellLiteral(packages)}'; $env:PIP_CONFIG_FILE='NUL'; $env:PIP_DISABLE_PIP_VERSION_CHECK='1'; $env:PYTHONNOUSERSITE='1'; $env:PYTHONUTF8='1'; New-PSDrive -Name CATWORK -PSProvider FileSystem -Root $env:CATASSISTANT_WORKING_DIRECTORY | Out-Null; Set-Location CATWORK:\\;";
     }
 
     internal static string BuildCmdPrelude(string workspaceRoot, string workingDirectory)
@@ -122,8 +126,8 @@ public sealed class ReadFileTool(WindowsSandboxController sandbox, WorkApprovalS
 {
     public WorkToolDefinition Definition { get; } = new(
         "read_file",
-        "Read a text file through the current conversation's OS sandbox. Decodes UTF-8 (with or without BOM) and falls back to the system ANSI/OEM code page (e.g. GBK) for legacy Chinese files.",
-        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"approval_scope\":{\"type\":\"string\",\"enum\":[\"single\",\"task_directory\"]}},\"required\":[\"path\"],\"additionalProperties\":false}");
+        "Read a text file, decoding UTF-8 and falling back to the system ANSI/OEM code page. Accessing a file outside the workspace requests user approval.",
+        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Workspace-relative or absolute path\"},\"approval_scope\":{\"type\":\"string\",\"enum\":[\"single\",\"task_directory\"],\"description\":\"Approval scope for access outside the workspace: one operation or the approved path for the current run\"}},\"required\":[\"path\"],\"additionalProperties\":false}");
 
     public async Task<WorkToolResult> ExecuteAsync(WorkToolExecutionContext context, string argumentsJson, CancellationToken cancellationToken)
     {
@@ -179,8 +183,8 @@ public sealed class WriteFileTool(WindowsSandboxController sandbox, WorkApproval
 {
     public WorkToolDefinition Definition { get; } = new(
         "write_file",
-        "Create or replace a UTF-8 text file through the current conversation's OS sandbox.",
-        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"},\"approval_scope\":{\"type\":\"string\",\"enum\":[\"single\",\"task_directory\"]}},\"required\":[\"path\",\"content\"],\"additionalProperties\":false}");
+        "Create or replace a UTF-8 text file. Writing outside the workspace requests user approval.",
+        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Workspace-relative or absolute path\"},\"content\":{\"type\":\"string\"},\"approval_scope\":{\"type\":\"string\",\"enum\":[\"single\",\"task_directory\"],\"description\":\"Approval scope for access outside the workspace: one operation or the approved path for the current run\"}},\"required\":[\"path\",\"content\"],\"additionalProperties\":false}");
 
     public async Task<WorkToolResult> ExecuteAsync(WorkToolExecutionContext context, string argumentsJson, CancellationToken cancellationToken)
     {
@@ -224,8 +228,8 @@ public sealed class ListDirectoryTool(WindowsSandboxController sandbox, WorkAppr
 {
     public WorkToolDefinition Definition { get; } = new(
         "list_directory",
-        "List files and directories through the current conversation's OS sandbox.",
-        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"approval_scope\":{\"type\":\"string\",\"enum\":[\"single\",\"task_directory\"]}},\"additionalProperties\":false}");
+        "List files and subdirectories in a directory. Accessing a directory outside the workspace requests user approval.",
+        "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Workspace-relative or absolute path; defaults to the workspace root\"},\"approval_scope\":{\"type\":\"string\",\"enum\":[\"single\",\"task_directory\"],\"description\":\"Approval scope for access outside the workspace: one operation or the approved path for the current run\"}},\"additionalProperties\":false}");
 
     public async Task<WorkToolResult> ExecuteAsync(WorkToolExecutionContext context, string argumentsJson, CancellationToken cancellationToken)
     {

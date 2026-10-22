@@ -78,10 +78,43 @@ public sealed class WorkProviderTests
         Assert.Equal("call-a", items[2].GetProperty("tool_calls")[0].GetProperty("id").GetString());
         Assert.Equal("call-a", items[3].GetProperty("tool_call_id").GetString());
         var system = items[0].GetProperty("content").GetString();
-        Assert.Contains("第一次工具调用前", system);
-        Assert.Contains("工作区根目录（也是命令默认目录）", system);
-        Assert.Contains(@"C:\runtime\python.exe", system);
-        Assert.Contains("PIP_TARGET", system);
-        Assert.Contains("shell=\"cmd\"", system);
+        Assert.Contains("For longer tasks", system);
+        Assert.Contains($"Windows workspace: {workspace}", system);
+        Assert.Contains("Python: available.", system);
+        Assert.Contains("place the verified files in outputs and call deliver_files", system);
+        Assert.DoesNotContain("history has been compacted", system);
+        Assert.DoesNotContain(@"C:\runtime\python.exe", system);
+        Assert.DoesNotContain("PIP_TARGET", system);
+        Assert.DoesNotContain("shell=\"cmd\"", system);
+    }
+
+    [Fact]
+    public void AddsHistoryLocationsOnlyWhenWorkContextWasCompacted()
+    {
+        var conversationId = Guid.NewGuid().ToString("N");
+        var now = DateTimeOffset.UtcNow;
+        var context = new WorkContextItem[]
+        {
+            new("summary", conversationId, null, 1, "message", "system", null, null, "context_summary", "{\"content\":\"Earlier work summary\"}", now),
+            new("message", conversationId, "run", 2, "message", "user", "message", null, null, "{\"content\":\"Continue\"}", now)
+        };
+        var workspace = Path.Combine(Path.GetTempPath(), "work-provider", conversationId);
+        var environment = new WorkEnvironmentInfo(
+            workspace,
+            Path.Combine(workspace, "inputs"),
+            Path.Combine(workspace, "work"),
+            Path.Combine(workspace, "outputs"),
+            Path.Combine(workspace, "work", "python-packages"),
+            null);
+
+        var messages = DashScopeClient.BuildWorkMessages(context, environment);
+        var encoded = JsonSerializer.Serialize(messages);
+        using var json = JsonDocument.Parse(encoded);
+        var system = json.RootElement[0].GetProperty("content").GetString();
+
+        Assert.Contains("history has been compacted", system);
+        Assert.Contains("work/.context/history.jsonl", system);
+        Assert.Contains("work/.context/search_history.py", system);
+        Assert.Contains("Python: unavailable.", system);
     }
 }

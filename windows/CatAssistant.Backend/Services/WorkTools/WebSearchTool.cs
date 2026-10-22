@@ -8,8 +8,8 @@ public sealed class WebSearchTool(IqsWebSearchClient client, Func<string> apiKey
 
     public WorkToolDefinition Definition { get; } = new(
         "web_search",
-        "Search the public web through an independent search API. Returns ranked results with title, url, snippet, site and publish time. Use it for current facts, prices, releases or anything after your training cutoff, then cite the urls you rely on.",
-        "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"检索问题或关键词，控制在 30 字以内效果最好。\"},\"count\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":10,\"description\":\"需要的搜索结果条数，默认 6。\"},\"time_range\":{\"type\":\"string\",\"enum\":[\"OneDay\",\"OneWeek\",\"OneMonth\",\"OneYear\",\"NoLimit\"],\"description\":\"发布时间范围，默认 NoLimit。\"}},\"required\":[\"query\"],\"additionalProperties\":false}");
+        "Search the public web and return ranked results with title, URL, snippet, site, and publish time.",
+        "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query or keywords; 30 characters or fewer usually works best\"},\"count\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":10,\"description\":\"Number of results; defaults to 6\"},\"time_range\":{\"type\":\"string\",\"enum\":[\"OneDay\",\"OneWeek\",\"OneMonth\",\"OneYear\",\"NoLimit\"],\"description\":\"Publication time range; defaults to NoLimit\"}},\"required\":[\"query\"],\"additionalProperties\":false}");
 
     public async Task<WorkToolResult> ExecuteAsync(WorkToolExecutionContext context, string argumentsJson, CancellationToken cancellationToken)
     {
