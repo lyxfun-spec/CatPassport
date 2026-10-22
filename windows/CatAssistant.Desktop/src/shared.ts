@@ -162,7 +162,6 @@ export interface BackendApi {
   selectWorkFiles(): Promise<string[]>;
   revealArtifact(conversationId: string, artifactId: string): Promise<void>;
   paste(): Promise<void>;
-  markChromeReady(): void;
 }
 
 declare global {

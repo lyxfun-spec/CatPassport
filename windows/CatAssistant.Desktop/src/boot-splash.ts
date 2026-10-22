@@ -21,8 +21,5 @@ export function hideSplash(): void {
   if (!boot || hidden) return;
   hidden = true;
   boot.classList.add('is-hidden');
-  // With the white startup screen gone, switch the caption-button area to the app's
-  // grey title-bar colour so it keeps matching whatever is behind it.
-  window.catAssistant?.markChromeReady?.();
   setTimeout(() => { if (boot.isConnected) boot.remove(); }, 400);
 }

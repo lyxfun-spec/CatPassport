@@ -10,8 +10,7 @@ const api: BackendApi = {
   },
   selectWorkFiles: () => ipcRenderer.invoke('work:select-files'),
   revealArtifact: (conversationId, artifactId) => ipcRenderer.invoke('work:reveal-artifact', conversationId, artifactId),
-  paste: () => ipcRenderer.invoke('edit:paste'),
-  markChromeReady: () => ipcRenderer.send('chrome:ready')
+  paste: () => ipcRenderer.invoke('edit:paste')
 };
 
 contextBridge.exposeInMainWorld('catAssistant', api);
