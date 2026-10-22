@@ -14,18 +14,18 @@
       .boot { position: fixed; inset: 0; display: grid; place-content: center; justify-items: center;
         background: radial-gradient(460px 300px at 50% 40%, #eef4f8 0%, rgba(238, 244, 248, 0) 72%), #fff;
         text-align: center; }
-      .boot-mark { width: 64px; height: 64px; object-fit: contain; filter: drop-shadow(0 10px 22px rgba(35, 51, 71, .16));
-        animation: boot-float 3.2s ease-in-out infinite; }
+      .boot-mark { width: 64px; height: 64px; object-fit: contain; filter: drop-shadow(0 10px 22px rgba(35, 51, 71, .16)); }
       .boot-title { margin: 18px 0 8px; font-size: 20px; font-weight: 600; letter-spacing: .04em; }
       .boot-status { margin: 0 0 20px; color: var(--boot-muted); font-size: 12.5px; letter-spacing: .02em; }
       .boot-progress { position: relative; width: 132px; height: 3px; border-radius: 999px; background: var(--boot-track); overflow: hidden; }
       .boot-progress i { position: absolute; top: 0; bottom: 0; left: 0; width: 42%; border-radius: 999px;
         background: linear-gradient(90deg, rgba(70, 105, 135, 0) 0%, var(--boot-accent) 50%, rgba(70, 105, 135, 0) 100%);
-        animation: boot-slide 1.5s cubic-bezier(.45, .05, .55, .95) infinite; }
-      @keyframes boot-float { 0%, 100% { transform: translateY(0) scale(1); } 50% { transform: translateY(-5px) scale(1.02); } }
+        animation: boot-slide 1.5s cubic-bezier(.45, .05, .55, .95) infinite;
+        /* Kept in sync with index.html; the splash starts at offset 0. */
+        animation-delay: calc(0s - var(--boot-offset, 0s)); }
       @keyframes boot-slide { 0% { transform: translateX(-110%); } 100% { transform: translateX(250%); } }
       @media (prefers-reduced-motion: reduce) {
-        .boot-mark, .boot-progress i { animation: none; }
+        .boot-progress i { animation: none; }
         .boot-progress i { width: 100%; transform: none; background: var(--boot-accent); opacity: .35; }
       }
     </style>

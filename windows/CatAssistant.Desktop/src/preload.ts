@@ -15,6 +15,23 @@ const api: BackendApi = {
 
 contextBridge.exposeInMainWorld('catAssistant', api);
 
+// main.ts tags the dev URL with the splash start time; seed the inline startup
+// screen's progress offset before it paints so the bar survives the document swap.
+const bootStartedAt = Number(new URLSearchParams(location.hash.slice(1)).get('boot'));
+if (Number.isFinite(bootStartedAt) && bootStartedAt > 0) {
+  const applyBootOffset = () => {
+    if (!document.documentElement) return false;
+    document.documentElement.style.setProperty('--boot-offset', `${Date.now() - bootStartedAt}ms`);
+    return true;
+  };
+  if (!applyBootOffset()) {
+    const observer = new MutationObserver(() => {
+      if (applyBootOffset()) observer.disconnect();
+    });
+    observer.observe(document, { childList: true });
+  }
+}
+
 // The startup screen is inline markup, so it is on screen long before the bundled
 // renderer runs; report it as soon as it exists instead of waiting for DOMContentLoaded.
 const reportBootPainted = () => requestAnimationFrame(() => requestAnimationFrame(() => ipcRenderer.send('boot:ready')));

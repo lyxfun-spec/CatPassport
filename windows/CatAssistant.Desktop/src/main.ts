@@ -99,10 +99,16 @@ function createWindow(): void {
     // the server answers; the swap commits atomically, so no blank frame in between.
     const devServerUrl = MAIN_WINDOW_VITE_DEV_SERVER_URL;
     mark('splash load requested');
+    const splashStartedAt = Date.now();
     void mainWindow.loadFile(path.join(__dirname, '..', '..', 'splash.html'));
     void waitForHttpOk(devServerUrl).then(() => {
       mark('dev server answered');
-      if (mainWindow && !mainWindow.isDestroyed()) void mainWindow.loadURL(devServerUrl);
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      // The swap restarts CSS animations; hand the splash start time to the next
+      // document so its progress bar continues from the same phase.
+      const bootUrl = new URL(devServerUrl);
+      bootUrl.hash = `boot=${splashStartedAt}`;
+      void mainWindow.loadURL(bootUrl.toString());
     });
   } else {
     mark('load requested');
