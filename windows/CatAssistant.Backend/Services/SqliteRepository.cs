@@ -6,7 +6,7 @@ namespace CatAssistant.Backend.Services;
 
 public sealed partial class SqliteRepository
 {
-    private const string WorkRequestSelect = "SELECT id,source_conversation_id,source_message_id,source_run_id,tool_call_id,title,prompt,context_summary,state,target_conversation_id,error_message,created_utc,updated_utc FROM work_requests";
+    private const string WorkRequestSelect = "SELECT id,source_conversation_id,source_message_id,source_run_id,tool_call_id,title,prompt,context_summary,state,target_conversation_id,error_message,created_utc,updated_utc,anchor_offset FROM work_requests";
     // A conversation keeps this title and title_source='fallback' until a model-generated title lands, so
     // 'fallback' is the only durable marker for "still needs a title".
     internal const string UntitledTitle = "新对话";
@@ -104,7 +104,8 @@ public sealed partial class SqliteRepository
                 target_conversation_id TEXT NULL,
                 error_message TEXT NULL,
                 created_utc TEXT NOT NULL,
-                updated_utc TEXT NOT NULL
+                updated_utc TEXT NOT NULL,
+                anchor_offset INTEGER NULL
             );
             CREATE TABLE IF NOT EXISTS work_context_items (
                 id TEXT PRIMARY KEY,
@@ -440,22 +441,25 @@ public sealed partial class SqliteRepository
         string toolCallId,
         string title,
         string prompt,
-        string contextSummary) =>
+        string contextSummary,
+        int? anchorOffset = null) =>
         UpsertWorkRequestAsync(sourceConversationId, sourceMessageId, sourceRunId, toolCallId, "proposed",
             NormalizeTitle(title),
             NormalizeWorkRequestText(prompt, nameof(prompt), 12_000),
             NormalizeWorkRequestText(contextSummary, nameof(contextSummary), 12_000),
-            errorMessage: null);
+            errorMessage: null,
+            anchorOffset: anchorOffset);
 
     public Task<WorkRequestRecord> CreateFailedWorkRequestAsync(
         string sourceConversationId,
         string sourceMessageId,
         string sourceRunId,
         string toolCallId,
-        string errorMessage) =>
+        string errorMessage,
+        int? anchorOffset = null) =>
         // An empty prompt marks the row as unparseable so the desktop client can hide "retry".
         UpsertWorkRequestAsync(sourceConversationId, sourceMessageId, sourceRunId, toolCallId, "failed",
-            "Work 提议解析失败", string.Empty, string.Empty, errorMessage);
+            "Work 提议解析失败", string.Empty, string.Empty, errorMessage, anchorOffset);
 
     private async Task<WorkRequestRecord> UpsertWorkRequestAsync(
         string sourceConversationId,
@@ -466,7 +470,8 @@ public sealed partial class SqliteRepository
         string title,
         string prompt,
         string contextSummary,
-        string? errorMessage)
+        string? errorMessage,
+        int? anchorOffset)
     {
         if (string.IsNullOrWhiteSpace(toolCallId)) throw new ArgumentException("工具调用 ID 不能为空。", nameof(toolCallId));
         var now = DateTimeOffset.UtcNow;
@@ -482,7 +487,7 @@ public sealed partial class SqliteRepository
             update.CommandText = """
                 UPDATE work_requests
                 SET source_message_id=$message,source_run_id=$run,title=$title,prompt=$prompt,context_summary=$summary,
-                    state=$state,error_message=$error,updated_utc=$updated
+                    state=$state,error_message=$error,anchor_offset=$offset,updated_utc=$updated
                 WHERE id=$id AND state NOT IN ('approved','started')
                 """;
             update.Parameters.AddWithValue("$message", sourceMessageId);
@@ -492,6 +497,7 @@ public sealed partial class SqliteRepository
             update.Parameters.AddWithValue("$summary", contextSummary);
             update.Parameters.AddWithValue("$state", state);
             update.Parameters.AddWithValue("$error", (object?)errorMessage ?? DBNull.Value);
+            update.Parameters.AddWithValue("$offset", (object?)anchorOffset ?? DBNull.Value);
             update.Parameters.AddWithValue("$updated", Format(now));
             update.Parameters.AddWithValue("$id", existing.Id);
             await update.ExecuteNonQueryAsync();
@@ -501,8 +507,8 @@ public sealed partial class SqliteRepository
         var insert = db.CreateCommand();
         insert.CommandText = """
             INSERT OR IGNORE INTO work_requests(
-                id,source_conversation_id,source_message_id,source_run_id,tool_call_id,title,prompt,context_summary,state,target_conversation_id,error_message,created_utc,updated_utc)
-            VALUES($id,$conversation,$message,$run,$tool,$title,$prompt,$summary,$state,NULL,$error,$created,$updated)
+                id,source_conversation_id,source_message_id,source_run_id,tool_call_id,title,prompt,context_summary,state,target_conversation_id,error_message,created_utc,updated_utc,anchor_offset)
+            VALUES($id,$conversation,$message,$run,$tool,$title,$prompt,$summary,$state,NULL,$error,$created,$updated,$offset)
             """;
         insert.Parameters.AddWithValue("$id", Guid.NewGuid().ToString("N"));
         insert.Parameters.AddWithValue("$conversation", sourceConversationId);
@@ -514,6 +520,7 @@ public sealed partial class SqliteRepository
         insert.Parameters.AddWithValue("$summary", contextSummary);
         insert.Parameters.AddWithValue("$state", state);
         insert.Parameters.AddWithValue("$error", (object?)errorMessage ?? DBNull.Value);
+        insert.Parameters.AddWithValue("$offset", (object?)anchorOffset ?? DBNull.Value);
         insert.Parameters.AddWithValue("$created", Format(now));
         insert.Parameters.AddWithValue("$updated", Format(now));
         await insert.ExecuteNonQueryAsync();
@@ -1227,7 +1234,7 @@ public sealed partial class SqliteRepository
     private static WorkRequestRecord ReadWorkRequest(SqliteDataReader reader) => new(
         reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetString(5), reader.GetString(6),
         reader.GetString(7), reader.GetString(8), reader.IsDBNull(9) ? null : reader.GetString(9), reader.IsDBNull(10) ? null : reader.GetString(10),
-        Parse(reader.GetString(11)), Parse(reader.GetString(12)));
+        Parse(reader.GetString(11)), Parse(reader.GetString(12)), reader.IsDBNull(13) ? null : reader.GetInt32(13));
 
     private static async Task<WorkRequestRecord?> GetWorkRequestByToolCallAsync(SqliteConnection db, string sourceConversationId, string toolCallId)
     {
@@ -1308,7 +1315,8 @@ public sealed partial class SqliteRepository
             ("source_run_id", "TEXT NOT NULL DEFAULT ''"),
             ("tool_call_id", "TEXT NOT NULL DEFAULT ''"),
             ("error_message", "TEXT NULL"),
-            ("updated_utc", "TEXT NULL")
+            ("updated_utc", "TEXT NULL"),
+            ("anchor_offset", "INTEGER NULL")
         })
         {
             if (columns.Contains(name)) continue;

@@ -72,6 +72,7 @@ export interface WorkRequest {
   errorMessage?: string;
   createdAt: string;
   updatedAt: string;
+  anchorOffset?: number;
 }
 
 export interface DeviceState {

@@ -1,4 +1,4 @@
-import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
+import React, { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import ReactMarkdown, { type Components } from 'react-markdown';
@@ -7,7 +7,7 @@ import type { BackendEvent, BootstrapState, CatDevice, Citation, ConversationDet
 import { citationOrdinal, hidePartialCitationMarker, remarkCitations, stripCitationMarkers } from './citations';
 import { hideSplash, showSplashError } from './boot-splash';
 import { deviceDiscoveryMessage, initialState, reduceBackendEvent } from './state';
-import { assistantCopyTargets, buildWorkTimeline, clampTextareaHeight, draftGreetingForHour, greetingForHour, isAtScrollEnd, scrollThumbMetrics, shouldSubmitComposer, summarizeWorkToolGroup, workTimelineCopyActions } from './ui-behavior';
+import { assistantCopyTargets, buildWorkTimeline, clampTextareaHeight, draftGreetingForHour, greetingForHour, groupWorkRequests, isAtScrollEnd, scrollThumbMetrics, shouldSubmitComposer, splitAtAnchors, summarizeWorkToolGroup, workTimelineCopyActions, type AnchoredWorkRequest } from './ui-behavior';
 import { textMenuEntries, type TextMenuAction, type TextMenuScene } from './text-context-menu';
 import { AnchorRect, AnchoredSurface, rectOf, ScrollArea } from './ui-primitives';
 import brandUrl from './assets/brand.png';
@@ -524,6 +524,13 @@ function maskSensitiveJson(value: string): string {
 const noCitations: Citation[] = [];
 const noWorkToolCalls: WorkToolCall[] = [];
 const noWorkArtifacts: WorkArtifact[] = [];
+const noAnchoredRequests: AnchoredWorkRequest[] = [];
+
+const WorkRequestCardContext = createContext<{
+  busy: Set<string>;
+  resolve(request: WorkRequest, approved: boolean): void;
+  openConversation(id: string): void;
+}>({ busy: new Set(), resolve: () => {}, openConversation: () => {} });
 
 function MessageList({ detail, runError, busy, tools, artifacts, onReveal, onResolveWorkRequest, onOpenConversation }: {
   detail: ConversationDetail; runError?: string; busy: Set<string>;
@@ -540,14 +547,7 @@ function MessageList({ detail, runError, busy, tools, artifacts, onReveal, onRes
     for (const citation of detail.citations) grouped.set(citation.messageId, [...(grouped.get(citation.messageId) ?? []), citation]);
     return grouped;
   }, [detail.citations]);
-  const requestsByMessage = useMemo(() => {
-    const grouped = new Map<string, WorkRequest[]>();
-    for (const request of detail.workRequests ?? []) {
-      if (request.sourceConversationId !== detail.conversation.id) continue;
-      grouped.set(request.sourceMessageId, [...(grouped.get(request.sourceMessageId) ?? []), request]);
-    }
-    return grouped;
-  }, [detail.conversation.id, detail.workRequests]);
+  const requestsByMessage = useMemo(() => groupWorkRequests(detail.messages, detail.workRequests ?? [], detail.conversation.id), [detail.conversation.id, detail.messages, detail.workRequests]);
   const timeline = useMemo(() => detail.conversation.mode === 'work' ? buildWorkTimeline(detail.messages, tools, artifacts) : undefined, [detail.conversation.mode, detail.messages, tools, artifacts]);
   const copyTargets = useMemo(() => assistantCopyTargets(detail.messages, detail.activeRunId), [detail.messages, detail.activeRunId]);
   const timelineCopyActions = useMemo(() => timeline ? workTimelineCopyActions(timeline, detail.messages, detail.activeRunId) : new Map<string, string>(), [timeline, detail.messages, detail.activeRunId]);
@@ -581,8 +581,8 @@ function MessageList({ detail, runError, busy, tools, artifacts, onReveal, onRes
     if (!element || pinned.current || lastIntent.current !== 'down') return;
     if (isAtScrollEnd(element.scrollHeight, element.scrollTop, element.clientHeight)) followLatest();
   };
-  const renderMessage = (message: ConversationMessage, showCopy = true) => <React.Fragment key={message.id}><MessageItem message={message} citations={citationsByMessage.get(message.id) ?? noCitations} copyContent={showCopy ? copyTargets.get(message.id) : undefined}/>{(requestsByMessage.get(message.id) ?? []).map(request => <WorkRequestCard key={request.id} request={request} busy={busy.has(`work-request-${request.id}`)} onResolve={onResolveWorkRequest} onOpenConversation={onOpenConversation}/>)}</React.Fragment>;
-  return <ScrollArea ref={scroller} className="message-scroll" viewportClassName={`messages ${detail.messages.length ? '' : 'empty-chat'}`} onScroll={onScroll} onScrollIntent={direction => direction === 'up' ? releaseScroll() : requestFollow()}>
+  const renderMessage = (message: ConversationMessage, showCopy = true) => <React.Fragment key={message.id}><MessageItem message={message} citations={citationsByMessage.get(message.id) ?? noCitations} copyContent={showCopy ? copyTargets.get(message.id) : undefined} workRequests={requestsByMessage.anchored.get(message.id) ?? noAnchoredRequests}/>{(requestsByMessage.trailing.get(message.id) ?? []).map(request => <WorkRequestCard key={request.id} request={request}/>)}</React.Fragment>;
+  return <WorkRequestCardContext.Provider value={{ busy, resolve: onResolveWorkRequest, openConversation: onOpenConversation }}><ScrollArea ref={scroller} className="message-scroll" viewportClassName={`messages ${detail.messages.length ? '' : 'empty-chat'}`} onScroll={onScroll} onScrollIntent={direction => direction === 'up' ? releaseScroll() : requestFollow()}>
     {detail.messages.length === 0
       ? <div className="empty-greeting"><BrandMark large/><h2>{greetingForHour(new Date().getHours())}</h2></div>
       : <div className="message-column">
@@ -594,12 +594,12 @@ function MessageList({ detail, runError, busy, tools, artifacts, onReveal, onRes
         {showRunning && <ThinkingBubble/>}
         {!timeline && runError && <div className="run-error" role="alert"><Icon name="info"/><span>{runError}</span></div>}
       </div>}
-  </ScrollArea>;
+  </ScrollArea></WorkRequestCardContext.Provider>;
 }
 
-function WorkRequestCard({ request, busy, onResolve, onOpenConversation }: {
-  request: WorkRequest; busy: boolean; onResolve(request: WorkRequest, approved: boolean): void; onOpenConversation(id: string): void;
-}) {
+function WorkRequestCard({ request }: { request: WorkRequest }) {
+  const actions = useContext(WorkRequestCardContext);
+  const busy = actions.busy.has(`work-request-${request.id}`);
   const stateLabel = ({ proposed: '等待批准', approved: '正在创建', rejected: '已拒绝', started: '已开始', failed: '创建失败' } as const)[request.state];
   // The backend stores an empty prompt when the model's proposal could not be parsed at all.
   const retryable = request.prompt.trim().length > 0;
@@ -609,9 +609,9 @@ function WorkRequestCard({ request, busy, onResolve, onOpenConversation }: {
     {retryable && <details><summary>查看传递的背景摘要</summary><div>{request.contextSummary}</div></details>}
     {request.errorMessage && <div className="work-request-error" role="alert">{request.errorMessage}</div>}
     <div className="work-request-actions">
-      {request.state === 'proposed' && <><button className="text-button" disabled={busy} onClick={() => onResolve(request, false)}>拒绝</button><button className="primary-button" disabled={busy} onClick={() => onResolve(request, true)}>{busy ? '正在创建…' : '批准并开始'}</button></>}
-      {request.state === 'failed' && retryable && <button className="primary-button" disabled={busy} onClick={() => onResolve(request, true)}>{busy ? '正在重试…' : '重试创建'}</button>}
-      {request.state === 'started' && request.targetConversationId && <button className="primary-button" onClick={() => onOpenConversation(request.targetConversationId!)}>打开 Work<Icon name="chevron" size={14}/></button>}
+      {request.state === 'proposed' && <><button className="text-button" disabled={busy} onClick={() => actions.resolve(request, false)}>拒绝</button><button className="primary-button" disabled={busy} onClick={() => actions.resolve(request, true)}>{busy ? '正在创建…' : '批准并开始'}</button></>}
+      {request.state === 'failed' && retryable && <button className="primary-button" disabled={busy} onClick={() => actions.resolve(request, true)}>{busy ? '正在重试…' : '重试创建'}</button>}
+      {request.state === 'started' && request.targetConversationId && <button className="primary-button" onClick={() => actions.openConversation(request.targetConversationId!)}>打开 Work<Icon name="chevron" size={14}/></button>}
     </div>
   </section>;
 }
@@ -633,7 +633,9 @@ function TimelineCopyAction({ content }: { content: string }) {
   return <div className="timeline-actions"><button onClick={() => void copy()} aria-label="复制本轮回复"><Icon name={copyState === 'copied' ? 'check' : 'copy'} size={15}/>{copyState === 'copied' ? '已复制' : copyState === 'failed' ? '复制失败' : '复制'}</button></div>;
 }
 
-const MessageItem = memo(function MessageItem({ message, citations, copyContent }: { message: ConversationMessage; citations: ConversationDetail['citations']; copyContent?: string }) {
+const MessageItem = memo(function MessageItem({ message, citations, copyContent, workRequests }: {
+  message: ConversationMessage; citations: ConversationDetail['citations']; copyContent?: string; workRequests?: AnchoredWorkRequest[];
+}) {
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(copyTimer.current), []);
@@ -646,11 +648,25 @@ const MessageItem = memo(function MessageItem({ message, citations, copyContent 
     setSourcesOpen(true);
   }, []);
   const copy = async () => { clearTimeout(copyTimer.current); try { await navigator.clipboard.writeText(stripCitationMarkers(copyContent ?? message.content)); setCopyState('copied'); } catch { setCopyState('failed'); } copyTimer.current = setTimeout(() => setCopyState('idle'), 1650); };
-  if (message.role === 'assistant' && message.status === 'streaming' && !message.content) return null;
+  const cards = workRequests ?? noAnchoredRequests;
+  if (message.role === 'assistant' && message.status === 'streaming' && !message.content && cards.length === 0) return null;
   const safeCitations = citations.filter(citation => safeHttpUrl(citation.url));
   const showStatus = message.status === 'interrupted' || message.status === 'failed';
-  return <article className={`message ${message.role} ${message.status}`}><div className="message-body">{message.role === 'assistant' ? <AssistantMarkdown content={message.content} streaming={message.status === 'streaming'} citations={safeCitations} onCite={revealSource}/> : <p>{message.content}</p>}</div>{safeCitations.length > 0 && <SourceList messageId={message.id} citations={safeCitations} open={sourcesOpen} onToggle={() => setSourcesOpen(value => !value)} target={sourceTarget}/>}{message.role === 'assistant' && message.content && (copyContent || showStatus) && <div className="message-actions">{message.status === 'interrupted' && <span>已中断</span>}{message.status === 'failed' && <span className="failed-label">生成失败</span>}{copyContent && <button onClick={() => void copy()} aria-label="复制本轮回复"><Icon name={copyState === 'copied' ? 'check' : 'copy'} size={15}/>{copyState === 'copied' ? '已复制' : copyState === 'failed' ? '复制失败' : '复制'}</button>}</div>}</article>;
+  return <article className={`message ${message.role} ${message.status}`}><div className="message-body">{message.role === 'assistant' ? <AssistantContent content={message.content} streaming={message.status === 'streaming'} citations={safeCitations} onCite={revealSource} cards={cards}/> : <p>{message.content}</p>}</div>{safeCitations.length > 0 && <SourceList messageId={message.id} citations={safeCitations} open={sourcesOpen} onToggle={() => setSourcesOpen(value => !value)} target={sourceTarget}/>}{message.role === 'assistant' && message.content && (copyContent || showStatus) && <div className="message-actions">{message.status === 'interrupted' && <span>已中断</span>}{message.status === 'failed' && <span className="failed-label">生成失败</span>}{copyContent && <button onClick={() => void copy()} aria-label="复制本轮回复"><Icon name={copyState === 'copied' ? 'check' : 'copy'} size={15}/>{copyState === 'copied' ? '已复制' : copyState === 'failed' ? '复制失败' : '复制'}</button>}</div>}</article>;
 });
+
+// Cards are split into the reply at the exact offsets where the model called `request_work`,
+// so text emitted before the call stays above the card and text emitted after stays below it.
+function AssistantContent({ content, streaming, citations, onCite, cards }: {
+  content: string; streaming: boolean; citations: Citation[]; onCite(ordinal: number): void; cards: AnchoredWorkRequest[];
+}) {
+  const segments = useMemo(() => splitAtAnchors(content, cards.map(card => card.offset)), [content, cards]);
+  if (cards.length === 0) return <AssistantMarkdown content={content} streaming={streaming} citations={citations} onCite={onCite}/>;
+  return <>{segments.map((segment, index) => <React.Fragment key={index}>
+    {segment.trim().length > 0 && <AssistantMarkdown content={segment} streaming={streaming} citations={citations} onCite={onCite}/>}
+    {cards[index] && <WorkRequestCard key={cards[index].request.id} request={cards[index].request}/>}
+  </React.Fragment>)}</>;
+}
 
 const markdownPlugins = [remarkGfm, remarkCitations];
 

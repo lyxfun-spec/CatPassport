@@ -1,4 +1,4 @@
-import type { ConversationMessage, WorkArtifact, WorkToolCall } from './shared';
+import type { ConversationMessage, WorkArtifact, WorkRequest, WorkToolCall } from './shared';
 
 export function shouldSubmitComposer(key: string, shiftKey: boolean, isComposing: boolean): boolean {
   return key === 'Enter' && !shiftKey && !isComposing;
@@ -168,4 +168,46 @@ export function summarizeWorkToolGroup(tools: WorkToolCall[]): WorkToolGroupSumm
     label: `工具调用 · ${parts.join(' · ') || '已结束'}`,
     isActive: false
   };
+}
+
+/** Splits a reply into segments at the points where an inline card must be rendered. Always returns offsets.length + 1 pieces. */
+export function splitAtAnchors(content: string, offsets: number[]): string[] {
+  const cuts = offsets.map(offset => Math.max(0, Math.min(offset, content.length))).sort((left, right) => left - right);
+  const segments: string[] = [];
+  let start = 0;
+  for (const cut of cuts) {
+    segments.push(content.slice(start, cut));
+    start = cut;
+  }
+  segments.push(content.slice(start));
+  return segments;
+}
+
+export interface AnchoredWorkRequest { request: WorkRequest; offset: number }
+
+export interface WorkRequestGroups {
+  anchored: Map<string, AnchoredWorkRequest[]>;
+  trailing: Map<string, WorkRequest[]>;
+}
+
+/** Binds each proposal to the assistant message of its run so it renders where the model actually called the tool. */
+export function groupWorkRequests(messages: ConversationMessage[], requests: WorkRequest[], conversationId: string): WorkRequestGroups {
+  const anchored = new Map<string, AnchoredWorkRequest[]>();
+  const trailing = new Map<string, WorkRequest[]>();
+  const assistantByRun = new Map<string, ConversationMessage>();
+  for (const message of messages)
+    if (message.role === 'assistant' && message.runId) assistantByRun.set(message.runId, message);
+  for (const request of requests) {
+    if (request.sourceConversationId !== conversationId) continue;
+    const assistant = assistantByRun.get(request.sourceRunId);
+    if (assistant) {
+      // Rows created before offsets were recorded go after the reply text of their run.
+      const offset = request.anchorOffset ?? Number.MAX_SAFE_INTEGER;
+      anchored.set(assistant.id, [...(anchored.get(assistant.id) ?? []), { request, offset }]);
+    } else {
+      trailing.set(request.sourceMessageId, [...(trailing.get(request.sourceMessageId) ?? []), request]);
+    }
+  }
+  for (const group of anchored.values()) group.sort((left, right) => left.offset - right.offset);
+  return { anchored, trailing };
 }

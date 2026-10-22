@@ -605,7 +605,8 @@ public sealed class ConversationService : IAsyncDisposable
                 toolCall.ToolCallId,
                 arguments.Title,
                 arguments.Prompt,
-                arguments.ContextSummary);
+                arguments.ContextSummary,
+                RunContentLength(run));
             if (request.State == "proposed")
                 Publish(new ConversationEvent("work.request.proposed", run.ConversationId, run.TriggerMessageId, run.Id, WorkRequest: request));
             return request.State == "proposed";
@@ -621,8 +622,14 @@ public sealed class ConversationService : IAsyncDisposable
     private async Task ProposeFailedWorkRequestAsync(ActiveRun run, string toolCallId, string errorMessage)
     {
         if (!IsCurrent(run)) return;
-        var request = await _repository.CreateFailedWorkRequestAsync(run.ConversationId, run.TriggerMessageId, run.Id, toolCallId, errorMessage);
+        var request = await _repository.CreateFailedWorkRequestAsync(run.ConversationId, run.TriggerMessageId, run.Id, toolCallId, errorMessage, RunContentLength(run));
         Publish(new ConversationEvent("work.request.proposed", run.ConversationId, run.TriggerMessageId, run.Id, WorkRequest: request));
+    }
+
+    // Anchors the approval card to the point of the reply where the model actually called `request_work`.
+    private static int RunContentLength(ActiveRun run)
+    {
+        lock (run.ContentLock) return run.Content.Length;
     }
 
     private static WorkRequestArguments ParseWorkRequestArguments(string argumentsJson)

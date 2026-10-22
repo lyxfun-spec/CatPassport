@@ -168,6 +168,7 @@ button:disabled, input:disabled { cursor: not-allowed; }
 .source-menu-info small { overflow: hidden; color: #9aa5ae; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .run-error { display: flex; align-items: flex-start; gap: 8px; margin: -6px 0 22px; padding: 10px 0; border-block: 1px solid #edd4d1; color: var(--ui-danger); font-size: 13px; }
 .work-request-card { margin: -12px 0 28px; padding: 15px; border: 1px solid #d8e1e7; border-radius: 11px; background: linear-gradient(145deg,#fbfdfe,#f6f9fb); box-shadow: 0 4px 16px rgba(48,67,82,.05); animation: message-in 190ms var(--ui-motion-ease); }
+.message.assistant .message-body .work-request-card { margin: 2px 0 18px; }
 .work-request-card.state-proposed { border-color: #bfd1dc; background: linear-gradient(145deg,#fbfdff,#f1f7fa); }
 .work-request-card.state-failed { border-color: #e7c8c4; background: #fffafa; }
 .work-request-card.state-rejected { opacity: .78; }

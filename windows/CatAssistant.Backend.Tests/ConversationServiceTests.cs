@@ -349,6 +349,7 @@ public sealed class ConversationServiceTests
         fixture.Provider.CompleteStream(0);
         await completed.Task.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.Equal("proposed", request.State);
+        Assert.Equal(0, request.AnchorOffset);
         Assert.Single((await fixture.Service.GetAsync(sourceId)).WorkRequests!);
         Assert.DoesNotContain(await fixture.Service.ListAsync(), item => item.Mode == "work");
         var rejected = await fixture.Service.ResolveWorkRequestAsync(request.Id, approved: false);
@@ -421,6 +422,7 @@ public sealed class ConversationServiceTests
         Assert.Equal("failed", request.State);
         Assert.Empty(request.Prompt);
         Assert.NotNull(request.ErrorMessage);
+        Assert.Equal("好的，我来安排。".Length, request.AnchorOffset);
         var detail = await fixture.Service.GetAsync(sourceId);
         Assert.Equal("好的，我来安排。", Assert.Single(detail.Messages, message => message.Role == "assistant").Content);
         Assert.DoesNotContain(await fixture.Service.ListAsync(), item => item.Mode == "work");

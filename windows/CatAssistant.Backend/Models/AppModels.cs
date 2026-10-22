@@ -75,7 +75,8 @@ public sealed record WorkRequestRecord(
     string? TargetConversationId,
     string? ErrorMessage,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    int? AnchorOffset = null);
 
 public sealed record DeviceState(
     string Status,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { ConversationMessage, WorkArtifact, WorkToolCall } from './shared';
-import { assistantCopyTargets, buildWorkTimeline, clampTextareaHeight, draftGreetingForHour, greetingForHour, isAtScrollEnd, scrollThumbMetrics, shouldSubmitComposer, summarizeWorkToolGroup, workTimelineCopyActions } from './ui-behavior';
+import type { ConversationMessage, WorkArtifact, WorkRequest, WorkToolCall } from './shared';
+import { assistantCopyTargets, buildWorkTimeline, clampTextareaHeight, draftGreetingForHour, greetingForHour, groupWorkRequests, isAtScrollEnd, scrollThumbMetrics, shouldSubmitComposer, splitAtAnchors, summarizeWorkToolGroup, workTimelineCopyActions } from './ui-behavior';
 
 describe('composer keyboard behavior', () => {
   it('submits on plain Enter', () => {
@@ -129,6 +129,61 @@ describe('Work transient activity', () => {
 
     expect([...actions.keys()]).toEqual(['tools-tool-cancelled']);
     expect(actions.get('tools-tool-cancelled')).toBe('阶段输出。');
+  });
+});
+
+describe('inline proposal card anchors', () => {
+  const chatMessage = (id: string, role: 'user' | 'assistant', runId?: string): ConversationMessage => ({
+    id, conversationId: 'chat-1', role, source: role === 'user' ? 'desktop' : 'runtime', status: 'complete',
+    sequence: 1, content: '', createdAt: '2026-01-01T00:00:00Z', runId
+  });
+  const request = (id: string, offset?: number): WorkRequest => ({
+    id, sourceConversationId: 'chat-1', sourceMessageId: 'user-1', sourceRunId: 'run-1', toolCallId: `call-${id}`,
+    title: '任务', prompt: '执行。', contextSummary: '背景。', state: 'proposed', anchorOffset: offset,
+    createdAt: '2026-01-01T00:00:01Z', updatedAt: '2026-01-01T00:00:01Z'
+  });
+
+  it('keeps the whole reply in one segment when no proposal was made', () => {
+    expect(splitAtAnchors('先说明，再交给 Work。', [])).toEqual(['先说明，再交给 Work。']);
+  });
+
+  it('splits before and after the recorded call position', () => {
+    expect(splitAtAnchors('先说明。后面继续。', [4])).toEqual(['先说明。', '后面继续。']);
+    expect(splitAtAnchors('调用后再说明。', [0])).toEqual(['', '调用后再说明。']);
+  });
+
+  it('orders offsets and clamps stale values to the streamed content', () => {
+    expect(splitAtAnchors('abcdef', [4, 2])).toEqual(['ab', 'cd', 'ef']);
+    expect(splitAtAnchors('abc', [1, 99])).toEqual(['a', 'bc', '']);
+  });
+
+  it('attaches proposals to the assistant reply of their run in call order', () => {
+    const groups = groupWorkRequests(
+      [chatMessage('user-1', 'user'), chatMessage('assistant-1', 'assistant', 'run-1')],
+      [request('late', 12), request('early', 2), request('legacy')],
+      'chat-1'
+    );
+    expect(groups.anchored.get('assistant-1')?.map(item => [item.request.id, item.offset])).toEqual([
+      ['early', 2], ['late', 12], ['legacy', Number.MAX_SAFE_INTEGER]
+    ]);
+    expect(groups.trailing.size).toBe(0);
+  });
+
+  it('falls back to the trigger message when the empty reply was removed', () => {
+    const groups = groupWorkRequests([chatMessage('user-1', 'user')], [request('only', 0)], 'chat-1');
+    expect(groups.anchored.size).toBe(0);
+    expect(groups.trailing.get('user-1')?.map(item => item.id)).toEqual(['only']);
+  });
+
+  it('ignores proposals that belong to another conversation', () => {
+    const foreign = { ...request('foreign', 0), sourceConversationId: 'chat-2' };
+    const groups = groupWorkRequests(
+      [chatMessage('user-1', 'user'), chatMessage('assistant-1', 'assistant', 'run-1')],
+      [foreign],
+      'chat-1'
+    );
+    expect(groups.anchored.size).toBe(0);
+    expect(groups.trailing.size).toBe(0);
   });
 });
 
