@@ -83,7 +83,7 @@ function useViewTransition(target: AppView) {
 
 function App() {
   const [state, dispatch] = useReducer(reduceBackendEvent, initialState);
-  const [requestedView, setRequestedView] = useState<AppView>('conversation');
+  const [requestedView, setRequestedView] = useState<AppView>('compose');
   const { displayed: displayedView, phase: viewPhase } = useViewTransition(requestedView);
   const [draftMode, setDraftMode] = useState<'chat' | 'work'>('chat');
   const [actionSurface, setActionSurface] = useState<ActionSurface>();
