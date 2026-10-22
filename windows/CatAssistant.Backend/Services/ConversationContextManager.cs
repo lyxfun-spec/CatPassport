@@ -212,7 +212,7 @@ public sealed class ConversationContextManager(
         var result = new List<ConversationMessage>
         {
             new($"summary-{summary.Id}", conversationId, "system", "runtime", "complete", summary.EndSequence,
-                $"较早对话的已验证状态摘要（如需原话请使用历史查询；摘要不是权限凭证）：\n{summary.Content}", summary.CreatedAt, summary.CreatedAt, null)
+                $"Earlier conversation history has been compacted into the following state summary. Use search_conversation_history if you need to verify the original wording:\n\n{summary.Content}", summary.CreatedAt, summary.CreatedAt, null)
         };
         result.AddRange(history.Where(item => item.Sequence > summary.EndSequence));
         return result;

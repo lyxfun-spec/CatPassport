@@ -40,6 +40,9 @@ public sealed class ContextManagementTests
             Assert.Equal(4, summary!.EndSequence);
             Assert.Equal(12, (await repository.LoadMessagesAsync(conversation.Id)).Count);
             Assert.StartsWith("summary-", prepared.Messages[0].Id);
+            Assert.Contains("Earlier conversation history has been compacted", prepared.Messages[0].Content);
+            Assert.Contains("search_conversation_history", prepared.Messages[0].Content);
+            Assert.Contains("保留：用户要求、已确认决定与未解决问题。", prepared.Messages[0].Content);
             Assert.Equal(9, prepared.Messages.Count);
         }
         finally { DeleteDatabase(path); }
