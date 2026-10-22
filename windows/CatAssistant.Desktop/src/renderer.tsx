@@ -15,7 +15,7 @@ import './ui-tokens.css';
 import './styles.css';
 
 type IconName = 'new' | 'search' | 'chat' | 'work' | 'device' | 'settings' | 'menu' | 'send'
-  | 'copy' | 'cut' | 'paste' | 'selectAll' | 'close' | 'sidebar' | 'check' | 'back' | 'rename' | 'delete' | 'refresh'
+  | 'copy' | 'cut' | 'paste' | 'selectAll' | 'close' | 'check' | 'back' | 'rename' | 'delete' | 'refresh'
   | 'key' | 'shield' | 'info' | 'chevron' | 'pin' | 'external' | 'attach' | 'stop' | 'file';
 
 const iconPaths: Record<IconName, React.ReactNode> = {
@@ -32,7 +32,6 @@ const iconPaths: Record<IconName, React.ReactNode> = {
   paste: <><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></>,
   selectAll: <><path d="M5 3a2 2 0 0 0-2 2M19 3a2 2 0 0 1 2 2M21 19a2 2 0 0 1-2 2M5 21a2 2 0 0 1-2-2"/><path d="M9 3h1M9 21h1M14 3h1M14 21h1M3 9v1M21 9v1M3 14v1M21 14v1"/></>,
   close: <path d="m6 6 12 12M18 6 6 18"/>,
-  sidebar: <><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></>,
   check: <path d="m5 12 4 4L19 6"/>,
   back: <path d="m15 18-6-6 6-6"/>,
   rename: <><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></>,
@@ -84,7 +83,6 @@ function useViewTransition(target: AppView) {
 
 function App() {
   const [state, dispatch] = useReducer(reduceBackendEvent, initialState);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [requestedView, setRequestedView] = useState<AppView>('conversation');
   const { displayed: displayedView, phase: viewPhase } = useViewTransition(requestedView);
   const [draftMode, setDraftMode] = useState<'chat' | 'work'>('chat');
@@ -293,9 +291,8 @@ function App() {
   };
 
   return <>
-    <div className={`app-frame ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
-      <Sidebar bootstrap={bootstrap} query={query} onQuery={setQuery} collapsed={sidebarCollapsed}
-        onToggle={() => setSidebarCollapsed(value => !value)} onNew={startCompose}
+    <div className="app-frame">
+      <Sidebar bootstrap={bootstrap} query={query} onQuery={setQuery} onNew={startCompose}
         onSelect={id => void selectConversation(id)} onDevice={() => setDeviceOpen(true)}
         onContext={(conversation, left, top) => setConversationContext({ conversation, left, top })}
         composeActive={requestedView === 'compose'}
@@ -333,8 +330,8 @@ function BrandMark({ large = false }: { large?: boolean }) {
   return <img className={`brand-mark ${large ? 'large' : ''}`} src={brandUrl} alt="" aria-hidden="true"/>;
 }
 
-function Sidebar({ bootstrap, query, onQuery, collapsed, onToggle, onNew, onSelect, onDevice, onContext, composeActive, settingsActive, onSettings }: {
-  bootstrap: BootstrapState; query: string; onQuery(value: string): void; collapsed: boolean; onToggle(): void;
+function Sidebar({ bootstrap, query, onQuery, onNew, onSelect, onDevice, onContext, composeActive, settingsActive, onSettings }: {
+  bootstrap: BootstrapState; query: string; onQuery(value: string): void;
   onNew(): void; onSelect(id: string): void; onDevice(): void; composeActive: boolean; settingsActive: boolean; onSettings(): void;
   onContext(conversation: ConversationSummary, left: number, top: number): void;
 }) {
@@ -342,9 +339,9 @@ function Sidebar({ bootstrap, query, onQuery, collapsed, onToggle, onNew, onSele
   const groups = groupConversations(filtered);
   const activeDeviceConversation = bootstrap.conversations.find(item => item.id === bootstrap.device.activeConversationId);
   return <aside className="sidebar" aria-label="会话导航">
-    <div className="brand-row"><BrandMark/><strong className="brand-name">小猫助手</strong><button className="icon-button sidebar-toggle" onClick={onToggle} aria-label={collapsed ? '展开侧边栏' : '收起侧边栏'}><Icon name="sidebar"/></button></div>
+    <div className="brand-row"><BrandMark/><strong className="brand-name">小猫助手</strong></div>
     <button className={`new-conversation ${composeActive ? 'active' : ''}`} onClick={onNew} aria-label="新建对话" aria-current={composeActive ? 'true' : undefined}><Icon name="new"/><span>新对话</span></button>
-    {!collapsed && <label className="search-box"><Icon name="search"/><input value={query} onChange={event => onQuery(event.target.value)} placeholder="搜索对话" aria-label="搜索对话"/></label>}
+    <label className="search-box"><Icon name="search"/><input value={query} onChange={event => onQuery(event.target.value)} placeholder="搜索对话" aria-label="搜索对话"/></label>
     <ScrollArea className="conversation-scroll" viewportClassName="conversation-list">
       {groups.map(group => <section className="conversation-group" key={group.label} aria-label={group.label}><h2>{group.label}</h2>{group.items.map(item => <button key={item.id} className={`conversation-item ${!settingsActive && !composeActive && bootstrap.activeConversationId === item.id ? 'active' : ''}`} onClick={() => onSelect(item.id)} onContextMenu={event => { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); onContext(item, event.clientX || rect.right, event.clientY || rect.top); }} aria-current={!settingsActive && !composeActive && bootstrap.activeConversationId === item.id ? 'page' : undefined} aria-label={`${item.title}${item.isPinned ? '，已置顶' : ''}`} title={item.title}><Icon name={item.mode === 'work' ? 'work' : 'chat'} size={16}/><span>{item.title}</span></button>)}</section>)}
       {filtered.length === 0 && <div className="no-results">{query ? '没有匹配的对话' : '还没有对话'}</div>}
