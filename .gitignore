@@ -1,5 +1,6 @@
 work/
 outputs/
+.tmp/
 firmware/build/
 firmware/sdkconfig
 firmware/sdkconfig.old
