@@ -1,3 +1,4 @@
+import { t } from './i18n';
 import type { ConversationMessage, WorkArtifact, WorkRequest, WorkToolCall } from './shared';
 
 export function shouldSubmitComposer(key: string, shiftKey: boolean, isComposing: boolean): boolean {
@@ -41,17 +42,17 @@ export function scrollThumbMetrics(
 }
 
 function greetingPrefixForHour(hour: number): string {
-  if (hour < 11) return '早上好';
-  if (hour < 18) return '下午好';
-  return '晚上好';
+  if (hour < 11) return t("早上好");
+  if (hour < 18) return t("下午好");
+  return t("晚上好");
 }
 
 export function greetingForHour(hour: number): string {
-  return `${greetingPrefixForHour(hour)}，想聊些什么？`;
+  return t("{0}，想聊些什么？", greetingPrefixForHour(hour));
 }
 
 export function draftGreetingForHour(mode: 'chat' | 'work', hour: number): string {
-  return `${greetingPrefixForHour(hour)}，${mode === 'work' ? '今天想完成什么？' : '想聊些什么？'}`;
+  return t("{0}，{1}", greetingPrefixForHour(hour), mode === 'work' ? t("今天想完成什么？") : t("想聊些什么？"));
 }
 
 export type WorkTimelineItem =
@@ -157,15 +158,15 @@ export function summarizeWorkToolGroup(tools: WorkToolCall[]): WorkToolGroupSumm
     ['rejected', 'cancelled'].includes(tool.state) || tool.errorCode === 'permission_rejected'
   ).length;
   const failed = Math.max(0, tools.length - active - completed - notExecuted);
-  if (active > 0) return { label: `工具调用 · ${completed}/${tools.length} 执行中`, isActive: true };
+  if (active > 0) return { label: t("工具调用 · {0}/{1} 执行中", completed, tools.length), isActive: true };
 
   const parts = [
-    completed > 0 ? `${completed} 项已完成` : '',
-    notExecuted > 0 ? `${notExecuted} 项未执行` : '',
-    failed > 0 ? `${failed} 项失败` : ''
+    completed > 0 ? t("{0} 项已完成", completed) : '',
+    notExecuted > 0 ? t("{0} 项未执行", notExecuted) : '',
+    failed > 0 ? t("{0} 项失败", failed) : ''
   ].filter(Boolean);
   return {
-    label: `工具调用 · ${parts.join(' · ') || '已结束'}`,
+    label: t("工具调用 · {0}", parts.join(' · ') || t("已结束")),
     isActive: false
   };
 }

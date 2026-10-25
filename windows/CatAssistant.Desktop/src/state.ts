@@ -1,3 +1,4 @@
+import { t } from './i18n';
 import type { BackendEvent, BootstrapState, ConversationDetail, ConversationEvent, DeviceState, WorkRequest } from './shared';
 
 export interface UiState {
@@ -21,8 +22,8 @@ export function deviceDiscoveryMessage(device: DeviceState): string {
     || device.detail.startsWith('Windows 蓝牙已关闭')
     || device.detail.startsWith('蓝牙扫描错误');
   return scanFailed && device.detail
-    ? device.detail
-    : '正在查找附近的 AI 卡片…';
+    ? t(device.detail)
+    : t("正在查找附近的 AI 卡片…");
 }
 
 export function reduceBackendEvent(state: UiState, action: UiAction): UiState {
@@ -32,7 +33,7 @@ export function reduceBackendEvent(state: UiState, action: UiAction): UiState {
     return { bootstrap, backendError: undefined, runError: state.runError, endedRunIds: state.endedRunIds };
   }
   if (action.event === 'backend.exited') {
-    return { ...state, backendError: action.data.message ?? `后台服务已退出${action.data.code === null ? '' : `（代码 ${action.data.code}）`}` };
+    return { ...state, backendError: action.data.message ?? t("后台服务已退出{0}", action.data.code === null ? '' : t("（代码 {0}）", action.data.code)) };
   }
   if (action.event === 'device.changed' || action.event === 'ui.device') {
     if (!state.bootstrap) return state;
@@ -85,7 +86,7 @@ function reduceConversationEvent(state: UiState, event: ConversationEvent): UiSt
     const endedRunIds = event.runId ? new Set(state.endedRunIds).add(event.runId) : state.endedRunIds;
     const activeRunId = event.runId && event.runId !== detail.activeRunId ? detail.activeRunId : undefined;
     const next: UiState = { ...state, endedRunIds, bootstrap: { ...bootstrap, activeConversation: { ...detail, activeRunId } } };
-    return event.type === 'run.failed' ? { ...next, runError: event.error ?? 'AI 服务暂时不可用。' } : next;
+    return event.type === 'run.failed' ? { ...next, runError: event.error ?? t("AI 服务暂时不可用。") } : next;
   }
   if (event.type === 'message.created' && event.message) {
     const created = event.message;

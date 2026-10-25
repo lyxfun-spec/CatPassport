@@ -2,6 +2,9 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, shell, Tray } from 'electron
 import http from 'node:http';
 import path from 'node:path';
 import { BackendClient } from './backend-client';
+import { readLanguagePreference, saveLanguagePreference } from './language-preferences';
+import { isLanguagePreference, resolveLanguage, setTranslationLanguage, t, type LanguagePreference } from './i18n';
+import type { LanguageSettings } from './shared';
 
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
 declare const MAIN_WINDOW_VITE_NAME: string;
@@ -20,6 +23,20 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let quitting = false;
 let windowRevealed = false;
+let languagePreference: LanguagePreference = 'system';
+function languageSettings(): LanguageSettings {
+  return { preference: languagePreference, language: resolveLanguage(languagePreference, app.getSystemLocale(), app.getPreferredSystemLanguages()) };
+}
+function updateLanguage(): void {
+  setTranslationLanguage(languageSettings().language);
+  mainWindow?.setTitle(t('小猫助手'));
+  tray?.setToolTip(t('小猫助手'));
+  tray?.setContextMenu(Menu.buildFromTemplate([
+    { label: t('打开小猫助手'), click: showWindow },
+    { type: 'separator' },
+    { label: t('退出'), click: () => void quitApplication() }
+  ]));
+}
 const brandingDir = app.isPackaged
   ? process.resourcesPath
   : path.resolve(__dirname, '..', '..', '..', '..', 'assets', 'branding');
@@ -59,7 +76,7 @@ function createWindow(): void {
   windowRevealed = false;
   mainWindow = new BrowserWindow({
     width: 1080, height: 720, minWidth: 720, minHeight: 600, show: false,
-    backgroundColor: '#ffffff', title: '小猫助手', icon: windowIconPath, autoHideMenuBar: true,
+    backgroundColor: '#ffffff', title: t('小猫助手'), icon: windowIconPath, autoHideMenuBar: true,
     // Blend the app into the window: hide the native title bar but keep the real
     // caption buttons (snap layouts, Aero Shake, accessibility all stay native).
     // The overlay is transparent so the buttons always sit on whatever the page
@@ -118,12 +135,8 @@ function createWindow(): void {
 }
 
 function createTray(): void {
-  tray = new Tray(trayIconPath); tray.setToolTip('小猫助手');
-  tray.setContextMenu(Menu.buildFromTemplate([
-    { label: '打开小猫助手', click: showWindow },
-    { type: 'separator' },
-    { label: '退出', click: () => void quitApplication() }
-  ]));
+  tray = new Tray(trayIconPath);
+  updateLanguage();
   tray.on('double-click', showWindow);
 }
 
@@ -144,6 +157,17 @@ app.on('before-quit', event => {
 
 app.whenReady().then(() => {
   mark('app ready');
+  const languagePath = path.join(app.getPath('userData'), 'ui-language.json');
+  languagePreference = readLanguagePreference(languagePath);
+  updateLanguage();
+  ipcMain.on('ui:language', event => { event.returnValue = languageSettings(); });
+  ipcMain.handle('ui:set-language', (_event, preference: unknown) => {
+    if (!isLanguagePreference(preference)) throw new Error('Invalid interface language');
+    saveLanguagePreference(languagePath, preference);
+    languagePreference = preference;
+    updateLanguage();
+    return languageSettings();
+  });
   Menu.setApplicationMenu(null);
   // Paint the startup screen before the backend spawns: `dotnet run` can take
   // several seconds while rebuilding CatAssistant.Backend.

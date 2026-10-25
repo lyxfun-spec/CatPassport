@@ -1,3 +1,10 @@
+import type { LanguagePreference, UiLanguage } from './i18n';
+
+export interface LanguageSettings {
+  preference: LanguagePreference;
+  language: UiLanguage;
+}
+
 export interface CatDevice {
   address: number;
   addressText: string;
@@ -158,6 +165,8 @@ export type BackendEvent =
   | { event: ConversationEventName; data: ConversationEvent };
 
 export interface BackendApi {
+  languageSettings: LanguageSettings;
+  setLanguage(preference: LanguagePreference): Promise<LanguageSettings>;
   invoke<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T>;
   onEvent(listener: (event: BackendEvent) => void): () => void;
   selectWorkFiles(): Promise<string[]>;

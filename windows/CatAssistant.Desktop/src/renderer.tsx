@@ -1,3 +1,6 @@
+import { changeLanguage, useLanguage } from './language-store';
+import type { LanguagePreference } from './i18n';
+import { t } from './i18n';
 import React, { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
@@ -83,6 +86,7 @@ function useViewTransition(target: AppView) {
 }
 
 function App() {
+  useLanguage();
   const [state, dispatch] = useReducer(reduceBackendEvent, initialState);
   const [requestedView, setRequestedView] = useState<AppView>('compose');
   const { displayed: displayedView, phase: viewPhase } = useViewTransition(requestedView);
@@ -234,7 +238,7 @@ function App() {
       for (const sourcePath of files) await invoke('work.inputs.add', { id, sourcePath });
       return invoke<ConversationDetail>('conversations.get', { id });
     });
-    if (copied) { dispatch({ event: 'ui.conversation', data: copied }); setRequestedView('conversation'); showNotice(`已添加 ${files.length} 个文件`); }
+    if (copied) { dispatch({ event: 'ui.conversation', data: copied }); setRequestedView('conversation'); showNotice(t("已添加 {0} 个文件", files.length)); }
   };
   const stopWork = async () => {
     if (!active?.activeRunId) return;
@@ -253,27 +257,27 @@ function App() {
     }));
     if (!result) return;
     await refresh();
-    showNotice(approved ? result.state === 'started' ? 'Work 任务已在后台开始' : '正在创建 Work 任务' : '已拒绝 Work 任务');
+    showNotice(approved ? result.state === 'started' ? t("Work 任务已在后台开始") : t("正在创建 Work 任务") : t("已拒绝 Work 任务"));
   };
   const rename = async (title: string) => {
     const target = actionSurface?.conversation;
     if (!target || title === target.title) { setActionSurface(undefined); return; }
     const result = await run('rename', () => invoke('conversations.rename', { id: target.id, title }));
     if (result === undefined) return;
-    setActionSurface(undefined); await refresh(); showNotice('对话名称已更新');
+    setActionSurface(undefined); await refresh(); showNotice(t("对话名称已更新"));
   };
   const remove = async () => {
     const target = actionSurface?.conversation;
     if (!target) return;
     const result = await run('delete', () => invoke('conversations.delete', { id: target.id }));
     if (result === undefined) return;
-    setActionSurface(undefined); await refresh(); showNotice('对话已删除');
+    setActionSurface(undefined); await refresh(); showNotice(t("对话已删除"));
   };
   const setPinned = async (conversation: ConversationSummary) => {
     setConversationContext(undefined);
     const result = await run('pin', () => invoke('conversations.pin', { id: conversation.id, pinned: !conversation.isPinned }));
     if (result === undefined) return;
-    await refresh(); showNotice(conversation.isPinned ? '已取消置顶' : '对话已置顶');
+    await refresh(); showNotice(conversation.isPinned ? t("已取消置顶") : t("对话已置顶"));
   };
   const saveSettings = async (patch: Partial<PublicSettings> & { apiKey?: string; searchApiKey?: string }, successText: string) => {
     const current = bootstrap.settings;
@@ -336,20 +340,21 @@ function Sidebar({ bootstrap, query, onQuery, onNew, onSelect, onDevice, onConte
   onNew(): void; onSelect(id: string): void; onDevice(): void; composeActive: boolean; settingsActive: boolean; onSettings(): void;
   onContext(conversation: ConversationSummary, left: number, top: number): void;
 }) {
+  useLanguage();
   const filtered = useMemo(() => bootstrap.conversations.filter(item => item.title.toLocaleLowerCase().includes(query.toLocaleLowerCase())), [bootstrap.conversations, query]);
   const groups = groupConversations(filtered);
   const activeDeviceConversation = bootstrap.conversations.find(item => item.id === bootstrap.device.activeConversationId);
-  return <aside className="sidebar" aria-label="会话导航">
-    <div className="brand-row"><BrandMark/><strong className="brand-name">小猫助手</strong></div>
-    <button className={`new-conversation ${composeActive ? 'active' : ''}`} onClick={onNew} aria-label="新建对话" aria-current={composeActive ? 'true' : undefined}><Icon name="new"/><span>新对话</span></button>
-    <label className="search-box"><Icon name="search"/><input value={query} onChange={event => onQuery(event.target.value)} placeholder="搜索对话" aria-label="搜索对话"/></label>
+  return <aside className="sidebar" aria-label={t("会话导航")}>
+    <div className="brand-row"><BrandMark/><strong className="brand-name">{t("小猫助手")}</strong></div>
+    <button className={`new-conversation ${composeActive ? 'active' : ''}`} onClick={onNew} aria-label={t("新建对话")} aria-current={composeActive ? 'true' : undefined}><Icon name="new"/><span>{t("新对话")}</span></button>
+    <label className="search-box"><Icon name="search"/><input value={query} onChange={event => onQuery(event.target.value)} placeholder={t("搜索对话")} aria-label={t("搜索对话")}/></label>
     <ScrollArea className="conversation-scroll" viewportClassName="conversation-list">
-      {groups.map(group => <section className="conversation-group" key={group.label} aria-label={group.label}><h2>{group.label}</h2>{group.items.map(item => <button key={item.id} className={`conversation-item ${!settingsActive && !composeActive && bootstrap.activeConversationId === item.id ? 'active' : ''}`} onClick={() => onSelect(item.id)} onContextMenu={event => { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); onContext(item, event.clientX || rect.right, event.clientY || rect.top); }} aria-current={!settingsActive && !composeActive && bootstrap.activeConversationId === item.id ? 'page' : undefined} aria-label={`${item.title}${item.isPinned ? '，已置顶' : ''}`} title={item.title}><Icon name={item.mode === 'work' ? 'work' : 'chat'} size={16}/><span>{item.title}</span></button>)}</section>)}
-      {filtered.length === 0 && <div className="no-results">{query ? '没有匹配的对话' : '还没有对话'}</div>}
+      {groups.map(group => <section className="conversation-group" key={group.label} aria-label={group.label}><h2>{group.label}</h2>{group.items.map(item => <button key={item.id} className={`conversation-item ${!settingsActive && !composeActive && bootstrap.activeConversationId === item.id ? 'active' : ''}`} onClick={() => onSelect(item.id)} onContextMenu={event => { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); onContext(item, event.clientX || rect.right, event.clientY || rect.top); }} aria-current={!settingsActive && !composeActive && bootstrap.activeConversationId === item.id ? 'page' : undefined} aria-label={`${item.title}${item.isPinned ? t("，已置顶") : ''}`} title={item.title}><Icon name={item.mode === 'work' ? 'work' : 'chat'} size={16}/><span>{item.title}</span></button>)}</section>)}
+      {filtered.length === 0 && <div className="no-results">{query ? t("没有匹配的对话") : t("还没有对话")}</div>}
     </ScrollArea>
     <div className="sidebar-footer">
-      <button className="footer-entry" onClick={onDevice}><span className={`status-dot ${bootstrap.device.isConnected ? 'online' : ''}`}/><Icon name="device"/><span className="footer-copy"><b>{bootstrap.device.isConnected ? 'AI 卡片' : '连接 AI 卡片'}</b><small>{bootstrap.device.isConnected ? activeDeviceConversation?.title ?? '已连接' : '可选辅助硬件'}</small></span></button>
-      <button className={`footer-entry ${settingsActive ? 'active' : ''}`} onClick={onSettings}><Icon name="settings"/><span className="footer-copy"><b>设置</b><small>{bootstrap.settings.hasApiKey ? '服务已配置' : '需要配置 API Key'}</small></span></button>
+      <button className="footer-entry" onClick={onDevice}><span className={`status-dot ${bootstrap.device.isConnected ? 'online' : ''}`}/><Icon name="device"/><span className="footer-copy"><b>{bootstrap.device.isConnected ? t("AI 卡片") : t("连接 AI 卡片")}</b><small>{bootstrap.device.isConnected ? activeDeviceConversation?.title ?? t("已连接") : t("可选辅助硬件")}</small></span></button>
+      <button className={`footer-entry ${settingsActive ? 'active' : ''}`} onClick={onSettings}><Icon name="settings"/><span className="footer-copy"><b>{t("设置")}</b><small>{bootstrap.settings.hasApiKey ? t("服务已配置") : t("需要配置 API Key")}</small></span></button>
     </div>
   </aside>;
 }
@@ -359,8 +364,9 @@ const textMenuIcons: Record<TextMenuAction, IconName> = { cut: 'cut', copy: 'cop
 function TextContextMenu({ value, onClose, onAction }: {
   value: TextMenuState; onClose(): void; onAction(action: TextMenuAction): void;
 }) {
+  useLanguage();
   const menu = useRef<HTMLDivElement>(null);
-  const entries = useMemo(() => value ? textMenuEntries(value.scene, value.hasSelection) : [], [value?.scene, value?.hasSelection]);
+  const entries = value ? textMenuEntries(value.scene, value.hasSelection) : [];
   const [active, setActive] = useState(-1);
   useLayoutEffect(() => {
     setActive(-1);
@@ -391,7 +397,7 @@ function TextContextMenu({ value, onClose, onAction }: {
     return () => { window.removeEventListener('resize', onClose); document.removeEventListener('pointerdown', closeOnPointer); document.removeEventListener('keydown', onKey, true); };
   }, [value, onClose, onAction, entries, active]);
   if (!value) return null;
-  return <div ref={menu} className="text-context-menu" role="menu" aria-label="文字操作" style={{ left: value.x, top: value.y }}>
+  return <div ref={menu} className="text-context-menu" role="menu" aria-label={t("文字操作")} style={{ left: value.x, top: value.y }}>
     {entries.map((entry, index) => <button key={entry.id} role="menuitem" tabIndex={-1} className={index === active ? 'is-active' : ''} onMouseDown={event => event.preventDefault()} onClick={() => onAction(entry.id)}><Icon name={textMenuIcons[entry.id]} size={15}/>{entry.label}</button>)}
   </div>;
 }
@@ -400,6 +406,7 @@ function ConversationContextMenu({ value, onClose, onPin, onAction }: {
   value: ConversationContext; onClose(): void; onPin(conversation: ConversationSummary): void;
   onAction(kind: 'rename' | 'delete', anchor: AnchorRect, conversation: ConversationSummary): void;
 }) {
+  useLanguage();
   const menu = useRef<HTMLDivElement>(null);
   const firstItem = useRef<HTMLButtonElement>(null);
   useLayoutEffect(() => {
@@ -418,10 +425,10 @@ function ConversationContextMenu({ value, onClose, onPin, onAction }: {
   }, [value, onClose]);
   if (!value) return null;
   const choose = (kind: 'rename' | 'delete', element: HTMLButtonElement) => onAction(kind, rectOf(element), value.conversation);
-  return <div ref={menu} className="conversation-context-menu" role="menu" aria-label="对话操作" style={{ left: value.left, top: value.top }}>
-    <button ref={firstItem} role="menuitem" onClick={() => onPin(value.conversation)}><Icon name="pin"/>{value.conversation.isPinned ? '取消置顶' : '置顶'}</button>
-    <button role="menuitem" onClick={event => choose('rename', event.currentTarget)}><Icon name="rename"/>重命名</button>
-    <button role="menuitem" className="danger" onClick={event => choose('delete', event.currentTarget)}><Icon name="delete"/>删除</button>
+  return <div ref={menu} className="conversation-context-menu" role="menu" aria-label={t("对话操作")} style={{ left: value.left, top: value.top }}>
+    <button ref={firstItem} role="menuitem" onClick={() => onPin(value.conversation)}><Icon name="pin"/>{value.conversation.isPinned ? t("取消置顶") : t("置顶")}</button>
+    <button role="menuitem" onClick={event => choose('rename', event.currentTarget)}><Icon name="rename"/>{t("重命名")}</button>
+    <button role="menuitem" className="danger" onClick={event => choose('delete', event.currentTarget)}><Icon name="delete"/>{t("删除")}</button>
   </div>;
 }
 
@@ -429,6 +436,7 @@ function ConversationHeader({ conversation, origin, onOpenConversation, onAction
   conversation: ConversationSummary; origin?: ConversationSummary; onOpenConversation(id: string): void;
   onAction(kind: 'rename' | 'delete', anchor: AnchorRect): void;
 }) {
+  useLanguage();
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuRendered, setMenuRendered] = useState(false);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
@@ -473,33 +481,35 @@ function ConversationHeader({ conversation, origin, onOpenConversation, onAction
     return () => { document.removeEventListener('pointerdown', onPointer); document.removeEventListener('keydown', onKey); };
   }, [menuOpen, keyboardOpen]);
   const choose = (kind: 'rename' | 'delete', element: HTMLButtonElement) => { const anchor = rectOf(element); closeMenu(true); onAction(kind, anchor); };
-  return <header className="conversation-header"><div className="conversation-heading"><h1>{conversation.title}</h1>{origin && <button className="origin-link" onClick={() => onOpenConversation(origin.id)} title={`返回来源 Chat：${origin.title}`}><Icon name="back" size={13}/>来源：{origin.title}</button>}</div><div className="header-menu" ref={wrapper}><button ref={trigger} className="icon-button" onClick={toggleMenu} aria-label="对话选项" aria-haspopup="menu" aria-expanded={menuOpen}><Icon name="menu"/></button>{menuRendered && <div className={`popover-menu ${menuOpen ? 'is-open' : 'is-closing'}`} role="menu" aria-hidden={!menuOpen} inert={!menuOpen}><button ref={firstItem} role="menuitem" onClick={event => choose('rename', event.currentTarget)}><Icon name="rename"/>重命名</button><button role="menuitem" className="danger" onClick={event => choose('delete', event.currentTarget)}><Icon name="delete"/>删除</button></div>}</div></header>;
+  return <header className="conversation-header"><div className="conversation-heading"><h1>{conversation.title}</h1>{origin && <button className="origin-link" onClick={() => onOpenConversation(origin.id)} title={t("返回来源 Chat：{0}", origin.title)}><Icon name="back" size={13}/>{t("来源：")}{origin.title}</button>}</div><div className="header-menu" ref={wrapper}><button ref={trigger} className="icon-button" onClick={toggleMenu} aria-label={t("对话选项")} aria-haspopup="menu" aria-expanded={menuOpen}><Icon name="menu"/></button>{menuRendered && <div className={`popover-menu ${menuOpen ? 'is-open' : 'is-closing'}`} role="menu" aria-hidden={!menuOpen} inert={!menuOpen}><button ref={firstItem} role="menuitem" onClick={event => choose('rename', event.currentTarget)}><Icon name="rename"/>{t("重命名")}</button><button role="menuitem" className="danger" onClick={event => choose('delete', event.currentTarget)}><Icon name="delete"/>{t("删除")}</button></div>}</div></header>;
 }
 
 function toolStateLabel(tool: WorkToolCall): string {
-  if (tool.state === 'failed' && tool.errorCode === 'permission_rejected') return '未执行';
-  return ({ pending: '等待中', waiting_approval: '等待批准', running: '执行中', completed: '已完成', failed: '失败', cancelled: '已取消', rejected: '未执行' } as Record<string, string>)[tool.state] ?? tool.state;
+  if (tool.state === 'failed' && tool.errorCode === 'permission_rejected') return t("未执行");
+  return ({ pending: t("等待中"), waiting_approval: t("等待批准"), running: t("执行中"), completed: t("已完成"), failed: t("失败"), cancelled: t("已取消"), rejected: t("未执行") } as Record<string, string>)[tool.state] ?? tool.state;
 }
 
 function toolDisplayName(name: string): string {
-  return ({ execute_command: '运行命令', read_file: '读取文件', write_file: '写入文件', list_directory: '查看文件夹', web_search: '搜索网络', deliver_files: '交付成果', load_skill: '读取技能' } as Record<string, string>)[name] ?? name;
+  return ({ execute_command: t("运行命令"), read_file: t("读取文件"), write_file: t("写入文件"), list_directory: t("查看文件夹"), web_search: t("搜索网络"), deliver_files: t("交付成果"), load_skill: t("读取技能") } as Record<string, string>)[name] ?? name;
 }
 
 function ToolGroup({ tools }: { tools: WorkToolCall[] }) {
+  useLanguage();
   const summary = summarizeWorkToolGroup(tools);
   return <details className={`timeline-tool-group ${summary.isActive ? 'is-running' : ''}`}>
     <summary><span className="timeline-disclosure"><Icon name="chevron" size={14}/></span><strong>{summary.label}</strong></summary>
     <div className="timeline-tool-list">{tools.map(tool => <details className="timeline-tool" key={tool.id}>
       <summary><span className="timeline-disclosure"><Icon name="chevron" size={13}/></span><span>{toolDisplayName(tool.toolName)}</span><em className={`tool-state state-${tool.errorCode === 'permission_rejected' ? 'rejected' : tool.state}`}>{toolStateLabel(tool)}</em>{tool.durationMilliseconds !== undefined && <small>{formatDuration(tool.durationMilliseconds)}</small>}</summary>
-      <div className="timeline-tool-detail"><b>工具</b><code>{tool.toolName}</code><b>参数</b><pre>{maskSensitiveJson(tool.argumentsJson)}</pre>{tool.resultJson && <><b>结果</b><pre>{maskSensitiveJson(tool.resultJson)}</pre></>}{tool.errorMessage && <p className="tool-error">{tool.errorMessage}</p>}</div>
+      <div className="timeline-tool-detail"><b>{t("工具")}</b><code>{tool.toolName}</code><b>{t("参数")}</b><pre>{maskSensitiveJson(tool.argumentsJson)}</pre>{tool.resultJson && <><b>{t("结果")}</b><pre>{maskSensitiveJson(tool.resultJson)}</pre></>}{tool.errorMessage && <p className="tool-error">{tool.errorMessage}</p>}</div>
     </details>)}</div>
   </details>;
 }
 
 function ArtifactGroup({ artifacts, onReveal }: { artifacts: WorkArtifact[]; onReveal(id: string): void }) {
-  return <section className="timeline-artifacts" aria-label={artifacts.length === 1 ? '交付成果' : `交付 ${artifacts.length} 个成果`}>
-    {artifacts.length > 1 && <span className="artifact-group-label">本次生成了 {artifacts.length} 个文件</span>}
-    <div>{artifacts.map(artifact => <button key={artifact.id} onClick={() => onReveal(artifact.id)} title={artifact.label}><span className="artifact-file-icon"><Icon name="file"/></span><span><b>{artifact.label}</b><small>在文件资源管理器中显示</small></span><Icon name="external" size={14}/></button>)}</div>
+  useLanguage();
+  return <section className="timeline-artifacts" aria-label={artifacts.length === 1 ? t("交付成果") : t("交付 {0} 个成果", artifacts.length)}>
+    {artifacts.length > 1 && <span className="artifact-group-label">{t("本次生成了 {0} 个文件", artifacts.length)}</span>}
+    <div>{artifacts.map(artifact => <button key={artifact.id} onClick={() => onReveal(artifact.id)} title={artifact.label}><span className="artifact-file-icon"><Icon name="file"/></span><span><b>{artifact.label}</b><small>{t("在文件资源管理器中显示")}</small></span><Icon name="external" size={14}/></button>)}</div>
   </section>;
 }
 
@@ -513,7 +523,7 @@ function maskSensitiveJson(value: string): string {
       if (Array.isArray(item)) return item.map(redact);
       if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item).map(([key, child]) => [key,
         /(?:api.?key|token|password|secret|authorization)/i.test(key) ? '••••••'
-          : /(?:content|body|binary|base64)/i.test(key) && typeof child === 'string' ? `[内容已隐藏，${child.length} 字符]`
+          : /(?:content|body|binary|base64)/i.test(key) && typeof child === 'string' ? t("[内容已隐藏，{0} 字符]", child.length)
           : redact(child)]));
       return item;
     };
@@ -537,6 +547,7 @@ function MessageList({ detail, runError, busy, tools, artifacts, onReveal, onRes
   tools: WorkToolCall[]; artifacts: WorkArtifact[]; onReveal(id: string): void;
   onResolveWorkRequest(request: WorkRequest, approved: boolean): void; onOpenConversation(id: string): void;
 }) {
+  useLanguage();
   const scroller = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
   const lastIntent = useRef<'up' | 'down'>('up');
@@ -598,29 +609,32 @@ function MessageList({ detail, runError, busy, tools, artifacts, onReveal, onRes
 }
 
 function WorkRequestCard({ request }: { request: WorkRequest }) {
+  useLanguage();
   const actions = useContext(WorkRequestCardContext);
   const busy = actions.busy.has(`work-request-${request.id}`);
-  const stateLabel = ({ proposed: '等待批准', approved: '正在创建', rejected: '已拒绝', started: '已开始', failed: '创建失败' } as const)[request.state];
+  const stateLabel = ({ proposed: t("等待批准"), approved: t("正在创建"), rejected: t("已拒绝"), started: t("已开始"), failed: t("创建失败") } as const)[request.state];
   // The backend stores an empty prompt when the model's proposal could not be parsed at all.
   const retryable = request.prompt.trim().length > 0;
-  return <section className={`work-request-card state-${request.state}`} aria-label={`Work 任务：${request.title}`}>
-    <div className="work-request-heading"><span className="work-request-icon"><Icon name="work"/></span><span><small>Chat 建议交给 Work</small><b>{request.title}</b></span><em>{stateLabel}</em></div>
-    {retryable ? <p>{request.prompt}</p> : <p className="work-request-hint">模型没有给出可执行的任务内容，无法创建 Work 对话。可以让它重新提议一次。</p>}
-    {retryable && <details><summary>查看传递的背景摘要</summary><div>{request.contextSummary}</div></details>}
+  return <section className={`work-request-card state-${request.state}`} aria-label={t("Work 任务：{0}", request.title)}>
+    <div className="work-request-heading"><span className="work-request-icon"><Icon name="work"/></span><span><small>{t("Chat 建议交给 Work")}</small><b>{request.title}</b></span><em>{stateLabel}</em></div>
+    {retryable ? <p>{request.prompt}</p> : <p className="work-request-hint">{t("模型没有给出可执行的任务内容，无法创建 Work 对话。可以让它重新提议一次。")}</p>}
+    {retryable && <details><summary>{t("查看传递的背景摘要")}</summary><div>{request.contextSummary}</div></details>}
     {request.errorMessage && <div className="work-request-error" role="alert">{request.errorMessage}</div>}
     <div className="work-request-actions">
-      {request.state === 'proposed' && <><button className="text-button" disabled={busy} onClick={() => actions.resolve(request, false)}>拒绝</button><button className="primary-button" disabled={busy} onClick={() => actions.resolve(request, true)}>{busy ? '正在创建…' : '批准并开始'}</button></>}
-      {request.state === 'failed' && retryable && <button className="primary-button" disabled={busy} onClick={() => actions.resolve(request, true)}>{busy ? '正在重试…' : '重试创建'}</button>}
-      {request.state === 'started' && request.targetConversationId && <button className="primary-button" onClick={() => actions.openConversation(request.targetConversationId!)}>打开 Work<Icon name="chevron" size={14}/></button>}
+      {request.state === 'proposed' && <><button className="text-button" disabled={busy} onClick={() => actions.resolve(request, false)}>{t("拒绝")}</button><button className="primary-button" disabled={busy} onClick={() => actions.resolve(request, true)}>{busy ? t("正在创建…") : t("批准并开始")}</button></>}
+      {request.state === 'failed' && retryable && <button className="primary-button" disabled={busy} onClick={() => actions.resolve(request, true)}>{busy ? t("正在重试…") : t("重试创建")}</button>}
+      {request.state === 'started' && request.targetConversationId && <button className="primary-button" onClick={() => actions.openConversation(request.targetConversationId!)}>{t("打开 Work")}<Icon name="chevron" size={14}/></button>}
     </div>
   </section>;
 }
 
 function ThinkingBubble() {
-  return <article className="message assistant"><div className="thinking" role="status"><i/><i/><i/><span className="sr-only">任务进行中</span></div></article>;
+  useLanguage();
+  return <article className="message assistant"><div className="thinking" role="status"><i/><i/><i/><span className="sr-only">{t("任务进行中")}</span></div></article>;
 }
 
 function TimelineCopyAction({ content }: { content: string }) {
+  useLanguage();
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(copyTimer.current), []);
@@ -630,12 +644,13 @@ function TimelineCopyAction({ content }: { content: string }) {
     catch { setCopyState('failed'); }
     copyTimer.current = setTimeout(() => setCopyState('idle'), 1650);
   };
-  return <div className="timeline-actions"><button onClick={() => void copy()} aria-label="复制本轮回复"><Icon name={copyState === 'copied' ? 'check' : 'copy'} size={15}/>{copyState === 'copied' ? '已复制' : copyState === 'failed' ? '复制失败' : '复制'}</button></div>;
+  return <div className="timeline-actions"><button onClick={() => void copy()} aria-label={t("复制本轮回复")}><Icon name={copyState === 'copied' ? 'check' : 'copy'} size={15}/>{copyState === 'copied' ? t("已复制") : copyState === 'failed' ? t("复制失败") : t("复制")}</button></div>;
 }
 
 const MessageItem = memo(function MessageItem({ message, citations, copyContent, workRequests }: {
   message: ConversationMessage; citations: ConversationDetail['citations']; copyContent?: string; workRequests?: AnchoredWorkRequest[];
 }) {
+  useLanguage();
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(copyTimer.current), []);
@@ -652,7 +667,7 @@ const MessageItem = memo(function MessageItem({ message, citations, copyContent,
   if (message.role === 'assistant' && message.status === 'streaming' && !message.content && cards.length === 0) return null;
   const safeCitations = citations.filter(citation => safeHttpUrl(citation.url));
   const showStatus = message.status === 'interrupted' || message.status === 'failed';
-  return <article className={`message ${message.role} ${message.status}`}><div className="message-body">{message.role === 'assistant' ? <AssistantContent content={message.content} streaming={message.status === 'streaming'} citations={safeCitations} onCite={revealSource} cards={cards}/> : <p>{message.content}</p>}</div>{safeCitations.length > 0 && <SourceList messageId={message.id} citations={safeCitations} open={sourcesOpen} onToggle={() => setSourcesOpen(value => !value)} target={sourceTarget}/>}{message.role === 'assistant' && message.content && (copyContent || showStatus) && <div className="message-actions">{message.status === 'interrupted' && <span>已中断</span>}{message.status === 'failed' && <span className="failed-label">生成失败</span>}{copyContent && <button onClick={() => void copy()} aria-label="复制本轮回复"><Icon name={copyState === 'copied' ? 'check' : 'copy'} size={15}/>{copyState === 'copied' ? '已复制' : copyState === 'failed' ? '复制失败' : '复制'}</button>}</div>}</article>;
+  return <article className={`message ${message.role} ${message.status}`}><div className="message-body">{message.role === 'assistant' ? <AssistantContent content={message.content} streaming={message.status === 'streaming'} citations={safeCitations} onCite={revealSource} cards={cards}/> : <p>{message.content}</p>}</div>{safeCitations.length > 0 && <SourceList messageId={message.id} citations={safeCitations} open={sourcesOpen} onToggle={() => setSourcesOpen(value => !value)} target={sourceTarget}/>}{message.role === 'assistant' && message.content && (copyContent || showStatus) && <div className="message-actions">{message.status === 'interrupted' && <span>{t("已中断")}</span>}{message.status === 'failed' && <span className="failed-label">{t("生成失败")}</span>}{copyContent && <button onClick={() => void copy()} aria-label={t("复制本轮回复")}><Icon name={copyState === 'copied' ? 'check' : 'copy'} size={15}/>{copyState === 'copied' ? t("已复制") : copyState === 'failed' ? t("复制失败") : t("复制")}</button>}</div>}</article>;
 });
 
 // Cards are split into the reply at the exact offsets where the model called `request_work`,
@@ -660,6 +675,7 @@ const MessageItem = memo(function MessageItem({ message, citations, copyContent,
 function AssistantContent({ content, streaming, citations, onCite, cards }: {
   content: string; streaming: boolean; citations: Citation[]; onCite(ordinal: number): void; cards: AnchoredWorkRequest[];
 }) {
+  useLanguage();
   const segments = useMemo(() => splitAtAnchors(content, cards.map(card => card.offset)), [content, cards]);
   if (cards.length === 0) return <AssistantMarkdown content={content} streaming={streaming} citations={citations} onCite={onCite}/>;
   return <>{segments.map((segment, index) => <React.Fragment key={index}>
@@ -688,11 +704,12 @@ function codeText(node: React.ReactNode): string {
 }
 
 function codeLanguageLabel(raw: string | undefined): string {
-  if (!raw) return '代码';
-  return codeLanguageLabels[raw.toLowerCase()] ?? raw.charAt(0).toUpperCase() + raw.slice(1);
+  if (!raw) return t("代码");
+  return t(codeLanguageLabels[raw.toLowerCase()] ?? raw.charAt(0).toUpperCase() + raw.slice(1));
 }
 
 function CodeBlock({ language, children }: { language?: string; children: React.ReactNode }) {
+  useLanguage();
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(copyTimer.current), []);
@@ -710,9 +727,9 @@ function CodeBlock({ language, children }: { language?: string; children: React.
   return <div className="code-block">
     {code.trim() !== '' && <div className="code-head">
       <span className="code-lang">{codeLanguageLabel(language)}</span>
-      <button type="button" className="code-copy" onClick={() => void copy()} aria-label="复制代码">
+      <button type="button" className="code-copy" onClick={() => void copy()} aria-label={t("复制代码")}>
         <Icon name={copyState === 'copied' ? 'check' : 'copy'} size={13}/>
-        {copyState === 'copied' ? '已复制' : copyState === 'failed' ? '复制失败' : '复制'}
+        {copyState === 'copied' ? t("已复制") : copyState === 'failed' ? t("复制失败") : t("复制")}
       </button>
     </div>}
     <div className="code-scroll"><pre>{children}</pre></div>
@@ -720,6 +737,7 @@ function CodeBlock({ language, children }: { language?: string; children: React.
 }
 
 function AssistantMarkdown({ content, streaming, citations, onCite }: { content: string; streaming: boolean; citations: Citation[]; onCite(ordinal: number): void }) {
+  useLanguage();
   const components = useMemo<Components>(() => {
     const byOrdinal = new Map(citations.map(citation => [citation.ordinal, citation]));
     return {
@@ -733,7 +751,7 @@ function AssistantMarkdown({ content, streaming, citations, onCite }: { content:
         const ordinal = citationOrdinal(href);
         if (ordinal === undefined) return safeHttpUrl(href) ? <a href={href} target="_blank" rel="noreferrer">{children}</a> : <span>{children}</span>;
         const citation = byOrdinal.get(ordinal);
-        if (citation) return <span className="citation-ref"><button type="button" onClick={() => onCite(ordinal)} title={citation.sourceName ? `${citation.title} · ${citation.sourceName}` : citation.title} aria-label={`查看来源 ${ordinal}：${citation.title}`}>{ordinal}</button></span>;
+        if (citation) return <span className="citation-ref"><button type="button" onClick={() => onCite(ordinal)} title={citation.sourceName ? `${citation.title} · ${citation.sourceName}` : citation.title} aria-label={t("查看来源 {0}：{1}", ordinal, citation.title)}>{ordinal}</button></span>;
         return streaming ? <span className="citation-ref pending" aria-hidden="true"><span>{ordinal}</span></span> : null;
       }
     };
@@ -745,6 +763,7 @@ interface SourceTarget { ordinal: number; nonce: number; delay: number }
 interface SourceMenuState { citation: Citation; anchor: AnchorRect; trigger: HTMLButtonElement; keyboard: boolean }
 
 function SourceList({ messageId, citations, open, onToggle, target }: { messageId: string; citations: Citation[]; open: boolean; onToggle(): void; target?: SourceTarget }) {
+  useLanguage();
   const items = useRef(new Map<number, HTMLButtonElement>());
   const [highlighted, setHighlighted] = useState<number>();
   const [menu, setMenu] = useState<SourceMenuState>();
@@ -796,7 +815,7 @@ function SourceList({ messageId, citations, open, onToggle, target }: { messageI
   }, [target]);
   return <section className={`sources ${open ? 'is-open' : ''}`}>
     <button type="button" className="sources-toggle" onClick={onToggle} aria-expanded={open} aria-controls={contentId}>
-      <span>参考来源</span><Icon name="chevron" size={13}/>
+      <span>{t("参考来源")}</span><Icon name="chevron" size={13}/>
     </button>
     <div className="sources-disclosure" id={contentId} inert={!open}><div><div className="sources-list">{citations.map(citation => <button type="button" key={citation.id}
       ref={element => { if (element) items.current.set(citation.ordinal, element); else items.current.delete(citation.ordinal); }}
@@ -809,6 +828,7 @@ function SourceList({ messageId, citations, open, onToggle, target }: { messageI
 }
 
 function SourceMenu({ state, open, onClose, onOpen }: { state: SourceMenuState; open: boolean; onClose(restoreFocus?: boolean): void; onOpen(): void }) {
+  useLanguage();
   const menu = useRef<HTMLDivElement>(null);
   const firstItem = useRef<HTMLButtonElement>(null);
   const host = new URL(state.citation.url).hostname;
@@ -850,14 +870,15 @@ function SourceMenu({ state, open, onClose, onOpen }: { state: SourceMenuState; 
     };
   }, [open, state]);
   return createPortal(<div ref={menu} className={`popover-menu source-menu ${open ? 'is-open' : 'is-closing'}`} role="menu"
-    aria-label={`来源 ${state.citation.ordinal}：${state.citation.title}`} aria-hidden={!open} inert={!open}>
+    aria-label={t("来源 {0}：{1}", state.citation.ordinal, state.citation.title)} aria-hidden={!open} inert={!open}>
     <div className="source-menu-info" aria-hidden="true"><b>{state.citation.title}</b><small>{state.citation.sourceName ? `${state.citation.sourceName} · ${host}` : host}</small></div>
-    <button ref={firstItem} role="menuitem" onClick={onOpen}><Icon name="external"/>打开网页</button>
-    <button role="menuitem" onClick={() => onClose(true)}><Icon name="close"/>取消</button>
+    <button ref={firstItem} role="menuitem" onClick={onOpen}><Icon name="external"/>{t("打开网页")}</button>
+    <button role="menuitem" onClick={() => onClose(true)}><Icon name="close"/>{t("取消")}</button>
   </div>, document.body);
 }
 
-function Composer({ value, onChange, onSend, onAttach, onStop, hasApiKey, sending, disabled = false, focusSignal, placeholder = '输入消息', onOpenSettings }: { value: string; onChange(value: string): void; onSend(): void; onAttach?: () => void; onStop?: () => void; hasApiKey: boolean; sending: boolean; disabled?: boolean; focusSignal: number; placeholder?: string; onOpenSettings(): void }) {
+function Composer({ value, onChange, onSend, onAttach, onStop, hasApiKey, sending, disabled = false, focusSignal, placeholder = t("输入消息"), onOpenSettings }: { value: string; onChange(value: string): void; onSend(): void; onAttach?: () => void; onStop?: () => void; hasApiKey: boolean; sending: boolean; disabled?: boolean; focusSignal: number; placeholder?: string; onOpenSettings(): void }) {
+  useLanguage();
   const textarea = useRef<HTMLTextAreaElement>(null);
   const rail = useRef<HTMLDivElement>(null);
   const [scrollActive, setScrollActive] = useState(false);
@@ -869,26 +890,27 @@ function Composer({ value, onChange, onSend, onAttach, onStop, hasApiKey, sendin
   useEffect(() => { const element = textarea.current; if (!element) return; element.style.height = '0px'; element.style.height = `${clampTextareaHeight(element.scrollHeight)}px`; element.style.overflowY = element.scrollHeight > 152 ? 'auto' : 'hidden'; requestAnimationFrame(updateThumb); }, [value]);
   useEffect(() => { if (focusSignal) textarea.current?.focus({ preventScroll: true }); }, [focusSignal]);
   useEffect(() => () => clearTimeout(hideTimer.current), []);
-  return <div className="composer-wrap"><div className={`composer ${onAttach ? 'has-tool' : ''}`}>{onAttach && <button className="composer-tool" onClick={onAttach} aria-label="添加本地文件" title="添加本地文件"><Icon name="plus"/></button>}<div className={`composer-editor ${scrollActive ? 'scroll-active' : ''}`}><textarea ref={textarea} value={value} rows={1} placeholder={placeholder} aria-label="输入消息" onScroll={() => { updateThumb(); revealThumb(); }} onChange={event => onChange(event.target.value)} onKeyDown={event => { if (shouldSubmitComposer(event.key, event.shiftKey, event.nativeEvent.isComposing)) { event.preventDefault(); if (canSend) onSend(); } }}/><div ref={rail} className={`textarea-rail ${thumb.visible ? 'has-overflow' : ''}`} aria-hidden="true"><i style={{ height: thumb.size, transform: `translateY(${thumb.offset}px)` }}/></div></div><div className="composer-actions">{onStop && <button className="composer-stop" onClick={onStop} aria-label="停止任务" title="停止任务"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="1" y="1" width="10" height="10" rx="2.5" fill="currentColor"/></svg></button>}<button className={`composer-send ${canSend ? 'ready' : ''}`} disabled={!canSend} onClick={onSend} aria-label={sending ? '正在发送' : '发送消息'} title={sending ? '正在发送' : '发送'}><Icon name="arrowUp"/></button></div></div>{!hasApiKey && value.trim() ? <button className="key-hint" onClick={onOpenSettings}><Icon name="key" size={14}/>配置 API Key 后即可发送</button> : <p>AI 生成的内容可能不准确，请核实重要信息。</p>}</div>;
+  return <div className="composer-wrap"><div className={`composer ${onAttach ? 'has-tool' : ''}`}>{onAttach && <button className="composer-tool" onClick={onAttach} aria-label={t("添加本地文件")} title={t("添加本地文件")}><Icon name="plus"/></button>}<div className={`composer-editor ${scrollActive ? 'scroll-active' : ''}`}><textarea ref={textarea} value={value} rows={1} placeholder={placeholder} aria-label={t("输入消息")} onScroll={() => { updateThumb(); revealThumb(); }} onChange={event => onChange(event.target.value)} onKeyDown={event => { if (shouldSubmitComposer(event.key, event.shiftKey, event.nativeEvent.isComposing)) { event.preventDefault(); if (canSend) onSend(); } }}/><div ref={rail} className={`textarea-rail ${thumb.visible ? 'has-overflow' : ''}`} aria-hidden="true"><i style={{ height: thumb.size, transform: `translateY(${thumb.offset}px)` }}/></div></div><div className="composer-actions">{onStop && <button className="composer-stop" onClick={onStop} aria-label={t("停止任务")} title={t("停止任务")}><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="1" y="1" width="10" height="10" rx="2.5" fill="currentColor"/></svg></button>}<button className={`composer-send ${canSend ? 'ready' : ''}`} disabled={!canSend} onClick={onSend} aria-label={sending ? t("正在发送") : t("发送消息")} title={sending ? t("正在发送") : t("发送")}><Icon name="arrowUp"/></button></div></div>{!hasApiKey && value.trim() ? <button className="key-hint" onClick={onOpenSettings}><Icon name="key" size={14}/>{t("配置 API Key 后即可发送")}</button> : <p>{t("AI 生成的内容可能不准确，请核实重要信息。")}</p>}</div>;
 }
 
 function ApprovalComposer({ approvals, busy, onResolve, onStop }: {
   approvals: WorkApproval[]; busy: Set<string>; onResolve(approval: WorkApproval, approved: boolean): void; onStop?: () => void;
 }) {
+  useLanguage();
   const approval = approvals[0];
   const resolving = busy.has(`approval-${approval.id}`);
-  const action = approval.capability === 'execute' ? '运行外部命令' : approval.capability === 'write' ? '修改外部文件' : '读取外部文件';
+  const action = approval.capability === 'execute' ? t("运行外部命令") : approval.capability === 'write' ? t("修改外部文件") : t("读取外部文件");
   return <div className="composer-wrap approval-composer-wrap">
-    <section className="approval-composer" role="dialog" aria-label="操作确认" aria-live="polite">
+    <section className="approval-composer" role="dialog" aria-label={t("操作确认")} aria-live="polite">
       <div className="approval-composer-head">
         <span className="approval-composer-icon"><Icon name="shield"/></span>
-        <strong>允许小猫助手{action}吗？</strong>
-        {approvals.length > 1 && <em>确认请求 1 / {approvals.length}</em>}
+        <strong>{t("允许小猫助手{0}吗？", action)}</strong>
+        {approvals.length > 1 && <em>{t("确认请求 1 / {0}", approvals.length)}</em>}
       </div>
       {approval.targetPath && <div className="approval-composer-target"><Icon name={approval.capability === 'execute' ? 'terminal' : 'file'} size={13}/><code title={approval.targetPath}>{approval.targetPath}</code></div>}
-      <div className="approval-composer-actions">{onStop && <button className="stop-button" onClick={onStop} disabled={resolving} aria-label="停止任务" title="停止任务"><Icon name="stop"/></button>}<button className="secondary-button" disabled={resolving} onClick={() => onResolve(approval, false)}>拒绝</button><button className="primary-button" disabled={resolving} onClick={() => onResolve(approval, true)}>{resolving ? '处理中…' : '允许'}</button></div>
+      <div className="approval-composer-actions">{onStop && <button className="stop-button" onClick={onStop} disabled={resolving} aria-label={t("停止任务")} title={t("停止任务")}><Icon name="stop"/></button>}<button className="secondary-button" disabled={resolving} onClick={() => onResolve(approval, false)}>{t("拒绝")}</button><button className="primary-button" disabled={resolving} onClick={() => onResolve(approval, true)}>{resolving ? t("处理中…") : t("允许")}</button></div>
     </section>
-    <p>确认后任务会自动继续。</p>
+    <p>{t("确认后任务会自动继续。")}</p>
   </div>;
 }
 
@@ -896,33 +918,108 @@ function DraftConversation({ mode, onMode, value, onChange, onSend, onAttach, ha
   mode: 'chat' | 'work'; onMode(mode: 'chat' | 'work'): void; value: string; onChange(value: string): void;
   onSend(): void; onAttach(): void; hasApiKey: boolean; sending: boolean; focusSignal: number; onOpenSettings(): void;
 }) {
+  useLanguage();
   const workSelected = mode === 'work';
   return <div className="draft-conversation">
     <div className="draft-hero">
       <BrandMark large/>
       <h1>{draftGreetingForHour(mode, new Date().getHours())}</h1>
-      <div className={`mode-selector mode-${mode}`} role="group" aria-label="对话模式">
+      <div className={`mode-selector mode-${mode}`} role="group" aria-label={t("对话模式")}>
         <span className="mode-slider" aria-hidden="true"/>
-        <button type="button" className={mode === 'chat' ? 'selected' : ''} onClick={() => onMode('chat')} aria-pressed={mode === 'chat'}><Icon name="chat"/><span><b>Chat</b><small>日常对话</small></span></button>
-        <button type="button" className={mode === 'work' ? 'selected' : ''} onClick={() => onMode('work')} aria-pressed={mode === 'work'}><Icon name="work"/><span><b>Work</b><small>本地任务</small></span></button>
+        <button type="button" className={mode === 'chat' ? 'selected' : ''} onClick={() => onMode('chat')} aria-pressed={mode === 'chat'}><Icon name="chat"/><span><b>Chat</b><small>{t("日常对话")}</small></span></button>
+        <button type="button" className={mode === 'work' ? 'selected' : ''} onClick={() => onMode('work')} aria-pressed={mode === 'work'}><Icon name="work"/><span><b>Work</b><small>{t("本地任务")}</small></span></button>
       </div>
-      <p className="mode-note">{workSelected ? '文件整理、资料汇总和成果交付' : '问答、写作和日常交流'}</p>
+      <p className="mode-note">{workSelected ? t("文件整理、资料汇总和成果交付") : t("问答、写作和日常交流")}</p>
     </div>
-    <Composer value={value} onChange={onChange} onSend={onSend} onAttach={workSelected ? onAttach : undefined} hasApiKey={hasApiKey} sending={sending} focusSignal={focusSignal} placeholder={workSelected ? '要完成什么，交给我' : '想聊什么，告诉我'} onOpenSettings={onOpenSettings}/>
+    <Composer value={value} onChange={onChange} onSend={onSend} onAttach={workSelected ? onAttach : undefined} hasApiKey={hasApiKey} sending={sending} focusSignal={focusSignal} placeholder={workSelected ? t("要完成什么，交给我") : t("想聊什么，告诉我")} onOpenSettings={onOpenSettings}/>
   </div>;
 }
 function RenameDialog({ open, anchor, conversation, busy, onClose, onRename }: { open: boolean; anchor?: AnchorRect; conversation?: ConversationSummary; busy: boolean; onClose(): void; onRename(title: string): void }) {
+  useLanguage();
   const [title, setTitle] = useState('');
   useEffect(() => { if (open) setTitle(conversation?.title ?? ''); }, [open, conversation?.id]);
   const valid = Boolean(title.trim()) && title.trim() !== conversation?.title;
-  return <AnchoredSurface open={open} anchor={anchor} onClose={onClose} titleId="rename-title" className="compact-dialog"><form onSubmit={event => { event.preventDefault(); if (valid) onRename(title.trim()); }}><div className="surface-heading"><div><h2 id="rename-title">重命名</h2><p>为这段对话取一个更容易识别的名称。</p></div><button type="button" className="icon-button" onClick={onClose} aria-label="关闭"><Icon name="close"/></button></div><label className="line-field"><span>对话名称</span><input data-autofocus value={title} maxLength={80} onChange={event => setTitle(event.target.value)}/></label><div className="surface-actions"><button type="button" className="text-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!valid || busy}>{busy ? '保存中…' : '保存'}</button></div></form></AnchoredSurface>;
+  return <AnchoredSurface open={open} anchor={anchor} onClose={onClose} titleId="rename-title" className="compact-dialog"><form onSubmit={event => { event.preventDefault(); if (valid) onRename(title.trim()); }}><div className="surface-heading"><div><h2 id="rename-title">{t("重命名")}</h2><p>{t("为这段对话取一个更容易识别的名称。")}</p></div><button type="button" className="icon-button" onClick={onClose} aria-label={t("关闭")}><Icon name="close"/></button></div><label className="line-field"><span>{t("对话名称")}</span><input data-autofocus value={title} maxLength={80} onChange={event => setTitle(event.target.value)}/></label><div className="surface-actions"><button type="button" className="text-button" onClick={onClose}>{t("取消")}</button><button className="primary-button" disabled={!valid || busy}>{busy ? t("保存中…") : t("保存")}</button></div></form></AnchoredSurface>;
 }
 function DeleteDialog({ open, anchor, conversation, busy, onClose, onConfirm }: { open: boolean; anchor?: AnchorRect; conversation?: ConversationSummary; busy: boolean; onClose(): void; onConfirm(): void }) {
-  return <AnchoredSurface open={open} anchor={anchor} onClose={onClose} titleId="delete-title" className="compact-dialog delete-dialog"><div className="surface-heading"><div><h2 id="delete-title">删除对话？</h2><p>“{conversation?.title}”及其中的消息将无法恢复。</p></div></div><div className="surface-actions"><button className="text-button" data-autofocus onClick={onClose}>取消</button><button className="danger-button" disabled={busy} onClick={onConfirm}>{busy ? '删除中…' : '删除'}</button></div></AnchoredSurface>;
+  useLanguage();
+  return <AnchoredSurface open={open} anchor={anchor} onClose={onClose} titleId="delete-title" className="compact-dialog delete-dialog"><div className="surface-heading"><div><h2 id="delete-title">{t("删除对话？")}</h2><p>{t("“{0}”及其中的消息将无法恢复。", conversation?.title)}</p></div></div><div className="surface-actions"><button className="text-button" data-autofocus onClick={onClose}>{t("取消")}</button><button className="danger-button" disabled={busy} onClick={onConfirm}>{busy ? t("删除中…") : t("删除")}</button></div></AnchoredSurface>;
+}
+
+function LanguageSelector({ value, disabled, onChange }: { value: LanguagePreference; disabled: boolean; onChange(value: LanguagePreference): void }) {
+  useLanguage();
+  const [open, setOpen] = useState(false);
+  const anchor = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  const menuId = React.useId();
+  const options: { value: LanguagePreference; label: string }[] = [
+    { value: 'system', label: t('跟随系统') },
+    { value: 'zh-CN', label: '简体中文' },
+    { value: 'en', label: 'English' }
+  ];
+  const close = (restoreFocus = false) => {
+    setOpen(false);
+    if (restoreFocus) trigger.current?.focus({ preventScroll: true });
+  };
+  useEffect(() => {
+    if (!open) return;
+    // Let Chromium apply visibility and remove inert before focusing the menu.
+    let focusFrame = 0;
+    const frame = requestAnimationFrame(() => {
+      focusFrame = requestAnimationFrame(() => {
+        menu.current?.querySelector<HTMLElement>('[aria-checked="true"]')?.focus({ preventScroll: true });
+      });
+    });
+    const outside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !anchor.current?.contains(event.target)) close();
+    };
+    document.addEventListener('pointerdown', outside);
+    return () => { cancelAnimationFrame(frame); cancelAnimationFrame(focusFrame); document.removeEventListener('pointerdown', outside); };
+  }, [open]);
+  const navigate = (event: React.KeyboardEvent) => {
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(true); return; }
+    if (event.key === 'Tab') { close(true); return; }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const items = Array.from(menu.current?.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]') ?? []);
+    const current = items.findIndex(item => item === document.activeElement);
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+      : (current + (event.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length;
+    items[next]?.focus({ preventScroll: true });
+  };
+  return <div ref={anchor} className="language-dropdown" onBlur={event => {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) close();
+  }}>
+    <button ref={trigger} type="button" className="language-select" disabled={disabled}
+      aria-label={t('界面语言')} aria-haspopup="menu" aria-expanded={open} aria-controls={menuId}
+      onClick={() => setOpen(current => !current)} onKeyDown={event => {
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setOpen(true); }
+        if (event.key === 'Escape') close();
+      }}><span>{options.find(option => option.value === value)?.label}</span><span className={`language-chevron ${open ? 'is-open' : ''}`}><Icon name="chevron" size={18}/></span></button>
+    <div ref={menu} id={menuId} className={`language-menu ${open ? 'is-open' : ''}`} role="menu"
+      aria-label={t('界面语言')} aria-hidden={!open} inert={!open} onKeyDown={navigate}>
+      {options.map(option => <button key={option.value} type="button" role="menuitemradio" tabIndex={-1}
+        aria-checked={value === option.value} className={value === option.value ? 'selected' : ''}
+        onClick={() => { close(true); if (option.value !== value) onChange(option.value); }}>
+        <span>{option.label}</span>{value === option.value ? <Icon name="check" size={18}/> : <span className="language-check-space"/>}
+      </button>)}
+    </div>
+  </div>;
 }
 
 type SettingsSection = 'service' | 'device' | 'privacy';
 function SettingsPage({ settings, onboarding, busy, onBack, onSave }: { settings: PublicSettings; onboarding: boolean; busy: boolean; onBack(): void; onSave(patch: Partial<PublicSettings> & { apiKey?: string; searchApiKey?: string }, successText: string): Promise<boolean> }) {
+  const { preference } = useLanguage();
+  const [languageError, onSaveError] = useState<string>();
+  const [languageSaving, setLanguageSaving] = useState(false);
+  const saveLanguage = async (value: LanguagePreference) => {
+    onSaveError(undefined);
+    setLanguageSaving(true);
+    try { await changeLanguage(value); }
+    catch (reason) { onSaveError(errorText(reason)); }
+    finally { setLanguageSaving(false); }
+  };
   const [requestedSection, setRequestedSection] = useState<SettingsSection>('service');
   const [displayedSection, setDisplayedSection] = useState<SettingsSection>('service');
   const [sectionPhase, setSectionPhase] = useState<'steady' | 'out' | 'in'>('steady');
@@ -943,19 +1040,23 @@ function SettingsPage({ settings, onboarding, busy, onBack, onSave }: { settings
     setSectionPhase('out');
     setTimeout(() => { if (sectionVersion.current !== current) return; setDisplayedSection(section); setSectionPhase('in'); requestAnimationFrame(() => { if (sectionVersion.current === current) setSectionPhase('steady'); }); }, 90);
   };
-  const toggleWeb = async (value: boolean) => { const previous = webSearch; setWebSearch(value); if (!await onSave({ webSearchEnabled: value }, value ? '联网搜索已开启' : '联网搜索已关闭')) setWebSearch(previous); };
-  const toggleReconnect = async (value: boolean) => { const previous = autoReconnect; setAutoReconnect(value); if (!await onSave({ autoReconnect: value }, value ? '自动重连已开启' : '自动重连已关闭')) setAutoReconnect(previous); };
-  return <section className="settings-page" aria-labelledby="settings-title"><header className="settings-page-header"><button className="icon-button" onClick={onBack} aria-label="返回对话"><Icon name="back"/></button><div><h1 id="settings-title">设置</h1>{onboarding && <p>先配置 AI 服务，即可开始对话。</p>}</div></header><div className="settings-shell"><nav className="settings-nav" aria-label="设置分类"><span className={`settings-indicator section-${requestedSection}`} aria-hidden="true"/><button className={requestedSection === 'service' ? 'active' : ''} onClick={() => chooseSection('service')}><Icon name="key"/><span>AI 服务</span></button><button className={requestedSection === 'device' ? 'active' : ''} onClick={() => chooseSection('device')}><Icon name="device"/><span>AI 卡片</span></button><button className={requestedSection === 'privacy' ? 'active' : ''} onClick={() => chooseSection('privacy')}><Icon name="shield"/><span>数据与隐私</span></button></nav><ScrollArea className="settings-scroll" viewportClassName="settings-content"><div className={`settings-section-content phase-${sectionPhase}`}>
-    {displayedSection === 'service' && <section><SettingsHeading eyebrow="AI 服务" title="模型与联网" description="凭据只保存在这台电脑上。"/><div className="settings-group"><form className="setting-row editable-row" onSubmit={async event => { event.preventDefault(); if (await onSave({ apiKey: apiKey || undefined, chatModel, workModel }, 'AI 服务设置已保存')) setApiKey(''); }}><span><b>模型与 API Key</b><small>{settings.hasApiKey ? 'Chat 与 Work 使用独立模型' : '需要配置 API Key'}</small></span><div className="inline-fields"><input value={chatModel} onChange={event => setChatModel(event.target.value)} aria-label="Chat 模型" placeholder="Chat 模型"/><input value={workModel} onChange={event => setWorkModel(event.target.value)} aria-label="Work 模型" placeholder="Work 模型"/><input type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} placeholder={settings.hasApiKey ? '留空不更改 Key' : '输入 API Key'} aria-label="API Key" autoComplete="off"/><button className="line-save" disabled={busy}>保存</button></div></form><Switch checked={webSearch} disabled={busy} onChange={value => void toggleWeb(value)} label="联网搜索" description="需要最新信息时允许模型搜索网络"/></div><div className="settings-group"><form className="setting-row editable-row" onSubmit={async event => { event.preventDefault(); if (await onSave({ searchApiKey: searchApiKey || undefined }, '联网搜索服务已保存')) setSearchApiKey(''); }}><span><b>联网搜索服务</b><small>{settings.hasSearchApiKey ? 'Work 通过独立搜索接口检索网页' : 'Work 需要填写 IQS API Key'}</small></span><div className="inline-fields compact"><input type="password" value={searchApiKey} onChange={event => setSearchApiKey(event.target.value)} placeholder={settings.hasSearchApiKey ? '留空不更改 Key' : '输入 IQS API Key'} aria-label="联网搜索 API Key" autoComplete="off"/><button className="line-save" disabled={busy}>保存</button></div></form></div></section>}
-    {displayedSection === 'device' && <section><SettingsHeading eyebrow="AI 卡片" title="语音与显示" description="卡片连接后会自动同步这些选项。"/><div className="settings-group"><form className="setting-row editable-row" onSubmit={event => { event.preventDefault(); void onSave({ asrModel, screenTimeoutSeconds: screenTimeout }, '卡片设置已保存'); }}><span><b>识别与休眠</b><small>休眠时间设为 0 时保持亮屏</small></span><div className="inline-fields compact"><input value={asrModel} onChange={event => setAsrModel(event.target.value)} aria-label="语音识别模型"/><input type="number" min="0" max="86400" value={screenTimeout} onChange={event => setScreenTimeout(Math.max(0, Math.min(86400, Number(event.target.value))))} aria-label="屏幕休眠秒数"/><button className="line-save" disabled={busy}>保存</button></div></form><Switch checked={autoReconnect} disabled={busy} onChange={value => void toggleReconnect(value)} label="自动重连" description="启动后连接已绑定的卡片"/></div></section>}
-    {displayedSection === 'privacy' && <section><SettingsHeading eyebrow="数据与隐私" title="本地保存" description="小猫助手不会自动同步你的对话。"/><div className="settings-group privacy-rows"><InfoRow icon="shield" title="API Key" detail="AI 服务与联网搜索的 API Key 使用 Windows DPAPI 加密，仅当前用户可读取。"/><InfoRow icon="chat" title="会话历史" detail="保存在本机 SQLite 数据库中。"/><InfoRow icon="device" title="AI 卡片" detail="只接收当前对话所需的文本和控制数据。"/></div></section>}
+  const toggleWeb = async (value: boolean) => { const previous = webSearch; setWebSearch(value); if (!await onSave({ webSearchEnabled: value }, value ? t("联网搜索已开启") : t("联网搜索已关闭"))) setWebSearch(previous); };
+  const toggleReconnect = async (value: boolean) => { const previous = autoReconnect; setAutoReconnect(value); if (!await onSave({ autoReconnect: value }, value ? t("自动重连已开启") : t("自动重连已关闭"))) setAutoReconnect(previous); };
+  return <section className="settings-page" aria-labelledby="settings-title"><header className="settings-page-header"><button className="icon-button" onClick={onBack} aria-label={t("返回对话")}><Icon name="back"/></button><div><h1 id="settings-title">{t("设置")}</h1>{onboarding && <p>{t("先配置 AI 服务，即可开始对话。")}</p>}</div></header><div className="settings-shell"><nav className="settings-nav" aria-label={t("设置分类")}><span className={`settings-indicator section-${requestedSection}`} aria-hidden="true"/><button className={requestedSection === 'service' ? 'active' : ''} onClick={() => chooseSection('service')}><Icon name="key"/><span>{t("AI 服务")}</span></button><button className={requestedSection === 'device' ? 'active' : ''} onClick={() => chooseSection('device')}><Icon name="device"/><span>{t("AI 卡片")}</span></button><button className={requestedSection === 'privacy' ? 'active' : ''} onClick={() => chooseSection('privacy')}><Icon name="shield"/><span>{t("数据与隐私")}</span></button></nav><ScrollArea className="settings-scroll" viewportClassName="settings-content"><div className={`settings-section-content phase-${sectionPhase}`}>
+    {displayedSection === 'service' && <section><div className="settings-group language-settings"><div className="setting-row"><span><b>{t('界面语言')}</b><small>{t('选择界面显示语言，立即生效。')}</small></span><LanguageSelector value={preference} disabled={languageSaving} onChange={value => void saveLanguage(value)}/></div>{languageError && <p className="language-error" role="alert">{languageError}</p>}</div><SettingsHeading eyebrow={t("AI 服务")} title={t("模型与联网")} description={t("凭据只保存在这台电脑上。")}/><div className="settings-group"><form className="setting-row editable-row" onSubmit={async event => { event.preventDefault(); if (await onSave({ apiKey: apiKey || undefined, chatModel, workModel }, t("AI 服务设置已保存"))) setApiKey(''); }}><span><b>{t("模型与 API Key")}</b><small>{settings.hasApiKey ? t("Chat 与 Work 使用独立模型") : t("需要配置 API Key")}</small></span><div className="inline-fields"><input value={chatModel} onChange={event => setChatModel(event.target.value)} aria-label={t("Chat 模型")} placeholder={t("Chat 模型")}/><input value={workModel} onChange={event => setWorkModel(event.target.value)} aria-label={t("Work 模型")} placeholder={t("Work 模型")}/><input type="password" value={apiKey} onChange={event => setApiKey(event.target.value)} placeholder={settings.hasApiKey ? t("留空不更改 Key") : t("输入 API Key")} aria-label="API Key" autoComplete="off"/><button className="line-save" disabled={busy}>{t("保存")}</button></div></form><Switch checked={webSearch} disabled={busy} onChange={value => void toggleWeb(value)} label={t("联网搜索")} description={t("需要最新信息时允许模型搜索网络")}/></div><div className="settings-group"><form className="setting-row editable-row" onSubmit={async event => { event.preventDefault(); if (await onSave({ searchApiKey: searchApiKey || undefined }, t("联网搜索服务已保存"))) setSearchApiKey(''); }}><span><b>{t("联网搜索服务")}</b><small>{settings.hasSearchApiKey ? t("Work 通过独立搜索接口检索网页") : t("Work 需要填写 IQS API Key")}</small></span><div className="inline-fields compact"><input type="password" value={searchApiKey} onChange={event => setSearchApiKey(event.target.value)} placeholder={settings.hasSearchApiKey ? t("留空不更改 Key") : t("输入 IQS API Key")} aria-label={t("联网搜索 API Key")} autoComplete="off"/><button className="line-save" disabled={busy}>{t("保存")}</button></div></form></div></section>}
+    {displayedSection === 'device' && <section><SettingsHeading eyebrow={t("AI 卡片")} title={t("语音与显示")} description={t("卡片连接后会自动同步这些选项。")}/><div className="settings-group"><form className="setting-row editable-row" onSubmit={event => { event.preventDefault(); void onSave({ asrModel, screenTimeoutSeconds: screenTimeout }, t("卡片设置已保存")); }}><span><b>{t("识别与休眠")}</b><small>{t("休眠时间设为 0 时保持亮屏")}</small></span><div className="inline-fields compact"><input value={asrModel} onChange={event => setAsrModel(event.target.value)} aria-label={t("语音识别模型")}/><input type="number" min="0" max="86400" value={screenTimeout} onChange={event => setScreenTimeout(Math.max(0, Math.min(86400, Number(event.target.value))))} aria-label={t("屏幕休眠秒数")}/><button className="line-save" disabled={busy}>{t("保存")}</button></div></form><Switch checked={autoReconnect} disabled={busy} onChange={value => void toggleReconnect(value)} label={t("自动重连")} description={t("启动后连接已绑定的卡片")}/></div></section>}
+    {displayedSection === 'privacy' && <section><SettingsHeading eyebrow={t("数据与隐私")} title={t("本地保存")} description={t("小猫助手不会自动同步你的对话。")}/><div className="settings-group privacy-rows"><InfoRow icon="shield" title="API Key" detail={t("AI 服务与联网搜索的 API Key 使用 Windows DPAPI 加密，仅当前用户可读取。")}/><InfoRow icon="chat" title={t("会话历史")} detail={t("保存在本机 SQLite 数据库中。")}/><InfoRow icon="device" title={t("AI 卡片")} detail={t("只接收当前对话所需的文本和控制数据。")}/></div></section>}
   </div></ScrollArea></div></section>;
 }
-function SettingsHeading({ eyebrow, title, description }: { eyebrow: string; title: string; description: string }) { return <div className="settings-heading"><span>{eyebrow}</span><h2>{title}</h2><p>{description}</p></div>; }
-function Switch({ checked, disabled, onChange, label, description }: { checked: boolean; disabled?: boolean; onChange(value: boolean): void; label: string; description: string }) { return <label className="setting-row switch-row"><span><b>{label}</b><small>{description}</small></span><input type="checkbox" checked={checked} disabled={disabled} onChange={event => onChange(event.target.checked)}/><i aria-hidden="true"><u/></i></label>; }
-function InfoRow({ icon, title, detail }: { icon: IconName; title: string; detail: string }) { return <div className="setting-row info-row"><Icon name={icon}/><span><b>{title}</b><small>{detail}</small></span></div>; }
+function SettingsHeading({ eyebrow, title, description }: { eyebrow: string; title: string; description: string }) {
+  useLanguage(); return <div className="settings-heading"><span>{eyebrow}</span><h2>{title}</h2><p>{description}</p></div>; }
+function Switch({ checked, disabled, onChange, label, description }: { checked: boolean; disabled?: boolean; onChange(value: boolean): void; label: string; description: string }) {
+  useLanguage(); return <label className="setting-row switch-row"><span><b>{label}</b><small>{description}</small></span><input type="checkbox" checked={checked} disabled={disabled} onChange={event => onChange(event.target.checked)}/><i aria-hidden="true"><u/></i></label>; }
+function InfoRow({ icon, title, detail }: { icon: IconName; title: string; detail: string }) {
+  useLanguage(); return <div className="setting-row info-row"><Icon name={icon}/><span><b>{title}</b><small>{detail}</small></span></div>; }
 
 function DevicePanel({ open, bootstrap, busy, run, onClose, onOpenConversation, onRefresh, onNotice }: { open: boolean; bootstrap: BootstrapState; busy: boolean; run<T>(name: string, action: () => Promise<T>): Promise<T | undefined>; onClose(): void; onOpenConversation(id: string): void; onRefresh(): void; onNotice(text: string, tone?: NoticeState['tone']): void }) {
+  useLanguage();
   const [rendered, setRendered] = useState(open);
   const [visible, setVisible] = useState(false);
   const [confirmForget, setConfirmForget] = useState(false);
@@ -978,26 +1079,29 @@ function DevicePanel({ open, bootstrap, busy, run, onClose, onOpenConversation, 
   }, [rendered, open]);
   useEffect(() => { if (!rendered) return; const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); }; document.addEventListener('keydown', onKey); return () => document.removeEventListener('keydown', onKey); }, [rendered]);
   if (!rendered) return null;
-  const connect = async (item: CatDevice) => { const result = await run('device', () => invoke('devices.connect', { address: item.address, name: item.name })); onRefresh(); if (result !== undefined) onNotice('正在连接 AI 卡片'); };
-  const follow = async () => { const result = await run('device', () => invoke('devices.followDesktop')); onRefresh(); if (result !== undefined) onNotice('AI 卡片将跟随当前对话'); };
-  const forget = async () => { const result = await run('device', () => invoke('devices.forget')); onRefresh(); if (result !== undefined) { setConfirmForget(false); onNotice('已忘记这张卡片'); } };
+  const connect = async (item: CatDevice) => { const result = await run('device', () => invoke('devices.connect', { address: item.address, name: item.name })); onRefresh(); if (result !== undefined) onNotice(t("正在连接 AI 卡片")); };
+  const follow = async () => { const result = await run('device', () => invoke('devices.followDesktop')); onRefresh(); if (result !== undefined) onNotice(t("AI 卡片将跟随当前对话")); };
+  const forget = async () => { const result = await run('device', () => invoke('devices.forget')); onRefresh(); if (result !== undefined) { setConfirmForget(false); onNotice(t("已忘记这张卡片")); } };
   const scan = async () => { await run('device', () => invoke('devices.scan')); onRefresh(); };
-  return <div className={`drawer-backdrop ${visible ? 'is-open' : ''}`} onPointerDown={event => { if (event.target === event.currentTarget) onClose(); }}><aside className="device-panel" role="dialog" aria-modal="true" aria-labelledby="device-panel-title"><ScrollArea className="drawer-scroll" viewportClassName="drawer-content"><div className="panel-header"><div><h2 id="device-panel-title">AI 卡片</h2><p>语音输入与随身显示</p></div></div><section className="device-status"><div className={`device-visual ${device.isConnected ? 'online' : ''}`}><Icon name="device" size={25}/><span/></div><div><span className="eyebrow">连接状态</span><h3>{device.isConnected ? device.pairedDeviceName ?? 'AI 卡片' : device.hasPairedDevice ? '正在等待已绑定卡片' : '尚未连接卡片'}</h3><p>{device.isConnected ? '已连接，可以开始对话' : device.detail}</p></div></section>{device.isConnected && <section className="panel-section"><h3>卡片当前对话</h3><div className="bound-conversation"><Icon name="chat"/><span><b>{active?.title ?? '对话'}</b><small>{device.followDesktop ? '正在跟随电脑' : '卡片独立对话'}</small></span></div><div className="panel-actions">{active && <button className="secondary-button" onClick={() => onOpenConversation(active.id)}>打开</button>}<button className="primary-button" disabled={device.followDesktop || bootstrap.activeConversation?.conversation.mode !== 'chat' || busy} onClick={() => void follow()}>跟随当前对话</button></div></section>}{!device.isConnected && <section className="panel-section"><div className="section-title"><h3>附近的设备</h3><button className="text-button" disabled={busy} onClick={() => void scan()}><Icon name="refresh" size={15}/>{busy ? '扫描中…' : '重新扫描'}</button></div><div className="device-list">{device.devices.length ? device.devices.map(item => <button key={item.address} disabled={busy} onClick={() => void connect(item)}><span><b>{item.name}</b><small>{item.addressText}</small></span><em>{item.rssi} dBm</em><Icon name="chevron" size={16}/></button>) : <div className="device-empty"><Icon name="device"/><span>{deviceDiscoveryMessage(device)}</span></div>}</div></section>}<Diagnostics device={device}/>{device.hasPairedDevice && !confirmForget && <button className="text-danger" onClick={() => setConfirmForget(true)}>忘记这张卡片</button>}{confirmForget && <div className="inline-confirm"><p>忘记后需要重新扫描和绑定。</p><div><button className="text-button" onClick={() => setConfirmForget(false)}>取消</button><button className="danger-button" disabled={busy} onClick={() => void forget()}>确认忘记</button></div></div>}</ScrollArea></aside></div>;
+  return <div className={`drawer-backdrop ${visible ? 'is-open' : ''}`} onPointerDown={event => { if (event.target === event.currentTarget) onClose(); }}><aside className="device-panel" role="dialog" aria-modal="true" aria-labelledby="device-panel-title"><ScrollArea className="drawer-scroll" viewportClassName="drawer-content"><div className="panel-header"><div><h2 id="device-panel-title">{t("AI 卡片")}</h2><p>{t("语音输入与随身显示")}</p></div></div><section className="device-status"><div className={`device-visual ${device.isConnected ? 'online' : ''}`}><Icon name="device" size={25}/><span/></div><div><span className="eyebrow">{t("连接状态")}</span><h3>{device.isConnected ? device.pairedDeviceName ?? t("AI 卡片") : device.hasPairedDevice ? t("正在等待已绑定卡片") : t("尚未连接卡片")}</h3><p>{device.isConnected ? t("已连接，可以开始对话") : t(device.detail)}</p></div></section>{device.isConnected && <section className="panel-section"><h3>{t("卡片当前对话")}</h3><div className="bound-conversation"><Icon name="chat"/><span><b>{active?.title ?? t("对话")}</b><small>{device.followDesktop ? t("正在跟随电脑") : t("卡片独立对话")}</small></span></div><div className="panel-actions">{active && <button className="secondary-button" onClick={() => onOpenConversation(active.id)}>{t("打开")}</button>}<button className="primary-button" disabled={device.followDesktop || bootstrap.activeConversation?.conversation.mode !== 'chat' || busy} onClick={() => void follow()}>{t("跟随当前对话")}</button></div></section>}{!device.isConnected && <section className="panel-section"><div className="section-title"><h3>{t("附近的设备")}</h3><button className="text-button" disabled={busy} onClick={() => void scan()}><Icon name="refresh" size={15}/>{busy ? t("扫描中…") : t("重新扫描")}</button></div><div className="device-list">{device.devices.length ? device.devices.map(item => <button key={item.address} disabled={busy} onClick={() => void connect(item)}><span><b>{item.name}</b><small>{item.addressText}</small></span><em>{item.rssi} dBm</em><Icon name="chevron" size={16}/></button>) : <div className="device-empty"><Icon name="device"/><span>{deviceDiscoveryMessage(device)}</span></div>}</div></section>}<Diagnostics device={device}/>{device.hasPairedDevice && !confirmForget && <button className="text-danger" onClick={() => setConfirmForget(true)}>{t("忘记这张卡片")}</button>}{confirmForget && <div className="inline-confirm"><p>{t("忘记后需要重新扫描和绑定。")}</p><div><button className="text-button" onClick={() => setConfirmForget(false)}>{t("取消")}</button><button className="danger-button" disabled={busy} onClick={() => void forget()}>{t("确认忘记")}</button></div></div>}</ScrollArea></aside></div>;
 }
 
 function Diagnostics({ device }: { device: BootstrapState['device'] }) {
+  useLanguage();
   const [open, setOpen] = useState(false);
   return <section className={`diagnostics ${open ? 'is-open' : ''}`}>
     <button className="diagnostics-toggle" onClick={() => setOpen(value => !value)} aria-expanded={open} aria-controls="device-diagnostics-content">
-      <span>高级诊断</span><Icon name="chevron" size={15}/>
+      <span>{t("高级诊断")}</span><Icon name="chevron" size={15}/>
     </button>
-    <div className="diagnostics-disclosure" id="device-diagnostics-content" aria-hidden={!open}><div><dl><div><dt>状态</dt><dd>{device.status}</dd></div><div><dt>详情</dt><dd>{device.detail}</dd></div><div><dt>PDU</dt><dd>{device.maxPduSize || '—'}</dd></div></dl></div></div>
+    <div className="diagnostics-disclosure" id="device-diagnostics-content" aria-hidden={!open}><div><dl><div><dt>{t("状态")}</dt><dd>{t(device.status)}</dd></div><div><dt>{t("详情")}</dt><dd>{t(device.detail)}</dd></div><div><dt>PDU</dt><dd>{device.maxPduSize || '—'}</dd></div></dl></div></div>
   </section>;
 }
 
-function GlobalAlert({ text, onClose }: { text: string; onClose(): void }) { return <div className="global-alert" role="alert"><span>{text}</span><button className="icon-button" onClick={onClose} aria-label="关闭错误提示"><Icon name="close"/></button></div>; }
-function Notice({ notice }: { notice?: NoticeState }) { return <div className={`notice ${notice ? 'visible' : ''} ${notice?.tone === 'danger' ? 'danger' : ''}`} role="status" aria-live="polite"><Icon name={notice?.tone === 'danger' ? 'info' : 'check'}/><span>{notice?.text ?? ''}</span></div>; }
-function groupConversations(items: ConversationSummary[]) { const result = new Map<string, ConversationSummary[]>(), now = new Date(), startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime(); for (const item of items) { const updated = new Date(item.updatedAt).getTime(), age = startToday - updated, label = item.isPinned ? '已置顶' : updated >= startToday ? '今天' : age < 2 * 86400000 ? '昨天' : age < 7 * 86400000 ? '最近 7 天' : '更早'; result.set(label, [...(result.get(label) ?? []), item]); } return [...result].map(([label, groupItems]) => ({ label, items: groupItems })); }
+function GlobalAlert({ text, onClose }: { text: string; onClose(): void }) {
+  useLanguage(); return <div className="global-alert" role="alert"><span>{t(text)}</span><button className="icon-button" onClick={onClose} aria-label={t("关闭错误提示")}><Icon name="close"/></button></div>; }
+function Notice({ notice }: { notice?: NoticeState }) {
+  useLanguage(); return <div className={`notice ${notice ? 'visible' : ''} ${notice?.tone === 'danger' ? 'danger' : ''}`} role="status" aria-live="polite"><Icon name={notice?.tone === 'danger' ? 'info' : 'check'}/><span>{notice?.text ?? ''}</span></div>; }
+function groupConversations(items: ConversationSummary[]) { const result = new Map<string, ConversationSummary[]>(), now = new Date(), startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime(); for (const item of items) { const updated = new Date(item.updatedAt).getTime(), age = startToday - updated, label = item.isPinned ? t("已置顶") : updated >= startToday ? t("今天") : age < 2 * 86400000 ? t("昨天") : age < 7 * 86400000 ? t("最近 7 天") : t("更早"); result.set(label, [...(result.get(label) ?? []), item]); } return [...result].map(([label, groupItems]) => ({ label, items: groupItems })); }
 function safeHttpUrl(value?: string): value is string { if (!value) return false; try { return ['http:', 'https:'].includes(new URL(value).protocol); } catch { return false; } }
 function errorText(reason: unknown) { return reason instanceof Error ? reason.message : String(reason); }
 

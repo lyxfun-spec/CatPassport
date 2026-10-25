@@ -1,7 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { BackendApi, BackendEvent } from './shared';
 
+const languageSettings = ipcRenderer.sendSync('ui:language') as BackendApi['languageSettings'];
+
 const api: BackendApi = {
+  languageSettings,
+  setLanguage: preference => ipcRenderer.invoke('ui:set-language', preference),
   invoke: (method, params) => ipcRenderer.invoke('backend:invoke', method, params),
   onEvent: listener => {
     const handler = (_event: Electron.IpcRendererEvent, value: BackendEvent) => listener(value);
@@ -35,9 +39,19 @@ if (Number.isFinite(bootStartedAt) && bootStartedAt > 0) {
 // The startup screen is inline markup, so it is on screen long before the bundled
 // renderer runs; report it as soon as it exists instead of waiting for DOMContentLoaded.
 const reportBootPainted = () => requestAnimationFrame(() => requestAnimationFrame(() => ipcRenderer.send('boot:ready')));
-if (document.getElementById('boot')) reportBootPainted();
+function localizeBoot(): void {
+  document.documentElement.lang = languageSettings.language;
+  const english = languageSettings.language === 'en';
+  document.title = english ? 'Cat Assistant' : '小猫助手';
+  const title = document.querySelector('.boot-title');
+  const status = document.getElementById('boot-text');
+  if (title) title.textContent = document.title;
+  if (status) status.textContent = english ? 'Starting up' : '正在启动';
+}
+if (document.getElementById('boot-text')) { localizeBoot(); reportBootPainted(); }
 else new MutationObserver((_, observer) => {
-  if (!document.getElementById('boot')) return;
+  if (!document.getElementById('boot-text')) return;
   observer.disconnect();
+  localizeBoot();
   reportBootPainted();
 }).observe(document, { childList: true, subtree: true });
