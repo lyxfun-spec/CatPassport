@@ -1,0 +1,5 @@
+logs/
+*.tmp
+tools/build/
+tools/esptool.spec
+

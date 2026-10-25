@@ -1,0 +1,48 @@
+{
+  "app_descriptor": {
+    "embedded_elf_sha256": "920a5ca80cc1eb8d054ef2c70b970f90d0c3fbaa047b30686fea976a197cb411",
+    "idf_version": "v5.5.3",
+    "project_name": "FoloToy-AI-Passport",
+    "version": "3b0c0a7"
+  },
+  "app_elf_sha256": "920a5ca80cc1eb8d054ef2c70b970f90d0c3fbaa047b30686fea976a197cb411",
+  "files": {
+    "FoloToy-AI-Passport-full.bin": {
+      "sha256": "e3ded7bf596f67cb0504bec78a6b63cd63199fdd94392a15b86130f1e2e412bb",
+      "size": 1858352
+    },
+    "FoloToy-AI-Passport.bin": {
+      "sha256": "80937abcf8935ade3f371de5f15046bf02f20f914bc36f17cf714004de46e9bb",
+      "size": 1792816
+    },
+    "FoloToy-AI-Passport.elf": {
+      "sha256": "920a5ca80cc1eb8d054ef2c70b970f90d0c3fbaa047b30686fea976a197cb411",
+      "size": 13501588
+    },
+    "FoloToy-AI-Passport.map": {
+      "sha256": "8f0dee3ee6d0bbabfb645b1cb31b11dab349210844e92610b0b495390cc4d419",
+      "size": 6350891
+    },
+    "bootloader/bootloader.bin": {
+      "sha256": "b751549590f75f76f3c8570002c99b03285be011023bec82d457e66fe7a97f2a",
+      "size": 21024
+    },
+    "flash_args": {
+      "sha256": "39bf7eff3cedd5c363a42fa7ff364be30193e8abe9d9e76d7a0ceab215ccd336",
+      "size": 160
+    },
+    "partition_table/partition-table.bin": {
+      "sha256": "420931e3f5af072d899b5357c043fd9f283bf165fc9df6113b6d43d82b48a06d",
+      "size": 3072
+    }
+  },
+  "flash_size_bytes": 8388608,
+  "full_bin_sha256": "e3ded7bf596f67cb0504bec78a6b63cd63199fdd94392a15b86130f1e2e412bb",
+  "image_offsets": {
+    "FoloToy-AI-Passport.bin": 65536,
+    "bootloader/bootloader.bin": 0,
+    "partition_table/partition-table.bin": 32768
+  },
+  "schema_version": 1,
+  "target": "esp32c3"
+}
