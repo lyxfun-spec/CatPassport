@@ -37,6 +37,7 @@
   --ui-font-family: system-ui, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
   --ui-font-body: 14px;
   --ui-font-meta: 12px;
+  --ui-font-input-touch: 16px;
   --ui-font-heading: 18px;
   --ui-font-page: 21px;
   --ui-font-line: 1.65;
@@ -52,4 +53,12 @@
   --ui-motion-page: 290ms;
   --ui-motion-menu: 270ms;
   --ui-motion-sheet: 320ms;
+  --ui-motion-toast-size: 220ms;
+  --ui-motion-toast-out: 100ms;
+  --ui-motion-toast-in: 180ms;
+  --ui-motion-copy-hold: 1650ms;
+  --ui-motion-toast-hold: 2600ms;
+  --ui-motion-undo-hold: 6000ms;
+  --ui-motion-settings-out: 90ms;
+  --ui-motion-settings-in: 180ms;
 }
