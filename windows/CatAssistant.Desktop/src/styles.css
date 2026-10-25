@@ -206,7 +206,9 @@ button:disabled, input:disabled { cursor: not-allowed; }
 .timeline-tool-detail { padding: 0 4px 12px 25px; }
 .timeline-tool-detail > b { display: block; margin-top: 8px; color: var(--ui-muted); font-size: 10px; font-weight: 560; text-transform: uppercase; }
 .timeline-tool-detail > code { display: block; margin-top: 4px; color: #516471; font: 11px/1.5 "Cascadia Code", Consolas, monospace; }
-.timeline-tool-detail pre { max-height: 170px; overflow: auto; margin: 5px 0 0; padding: 9px; border-radius: 7px; color: #42515d; background: #f3f5f6; font: 11px/1.5 "Cascadia Code", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tool-detail-scroll { margin-top: 5px; border-radius: 7px; background: #f3f5f6; }
+.tool-detail-viewport { max-height: 170px; border-radius: inherit; }
+.timeline-tool-detail pre { margin: 0; padding: 9px 15px 9px 9px; color: #42515d; font: 11px/1.5 "Cascadia Code", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .tool-state { font-size: 10px; font-style: normal; }
 .tool-state.state-completed { color: var(--ui-success); }
 .tool-state.state-failed, .tool-state.state-cancelled, .tool-state.state-rejected { color: var(--ui-danger); }

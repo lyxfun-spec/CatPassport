@@ -10,7 +10,7 @@ import type { BackendEvent, BootstrapState, CatDevice, Citation, ConversationDet
 import { citationOrdinal, hidePartialCitationMarker, remarkCitations, stripCitationMarkers } from './citations';
 import { hideSplash, showSplashError } from './boot-splash';
 import { deviceDiscoveryMessage, initialState, reduceBackendEvent } from './state';
-import { assistantCopyTargets, buildWorkTimeline, clampTextareaHeight, draftGreetingForHour, greetingForHour, groupWorkRequests, isAtScrollEnd, scrollThumbMetrics, shouldSubmitComposer, splitAtAnchors, summarizeWorkToolGroup, workTimelineCopyActions, type AnchoredWorkRequest } from './ui-behavior';
+import { assistantCopyTargets, buildWorkTimeline, clampTextareaHeight, draftGreetingForHour, greetingForHour, groupWorkRequests, isAtScrollEnd, scrollThumbMetrics, shouldSubmitComposer, splitAtAnchors, summarizeWorkToolGroup, toolDisplayName, workTimelineCopyActions, type AnchoredWorkRequest } from './ui-behavior';
 import { textMenuEntries, type TextMenuAction, type TextMenuScene } from './text-context-menu';
 import { AnchorRect, AnchoredSurface, rectOf, ScrollArea } from './ui-primitives';
 import brandUrl from './assets/brand.png';
@@ -489,10 +489,6 @@ function toolStateLabel(tool: WorkToolCall): string {
   return ({ pending: t("等待中"), waiting_approval: t("等待批准"), running: t("执行中"), completed: t("已完成"), failed: t("失败"), cancelled: t("已取消"), rejected: t("未执行") } as Record<string, string>)[tool.state] ?? tool.state;
 }
 
-function toolDisplayName(name: string): string {
-  return ({ execute_command: t("运行命令"), read_file: t("读取文件"), write_file: t("写入文件"), list_directory: t("查看文件夹"), web_search: t("搜索网络"), deliver_files: t("交付成果"), load_skill: t("读取技能") } as Record<string, string>)[name] ?? name;
-}
-
 function ToolGroup({ tools }: { tools: WorkToolCall[] }) {
   useLanguage();
   const summary = summarizeWorkToolGroup(tools);
@@ -500,7 +496,7 @@ function ToolGroup({ tools }: { tools: WorkToolCall[] }) {
     <summary><span className="timeline-disclosure"><Icon name="chevron" size={14}/></span><strong>{summary.label}</strong></summary>
     <div className="timeline-tool-list">{tools.map(tool => <details className="timeline-tool" key={tool.id}>
       <summary><span className="timeline-disclosure"><Icon name="chevron" size={13}/></span><span>{toolDisplayName(tool.toolName)}</span><em className={`tool-state state-${tool.errorCode === 'permission_rejected' ? 'rejected' : tool.state}`}>{toolStateLabel(tool)}</em>{tool.durationMilliseconds !== undefined && <small>{formatDuration(tool.durationMilliseconds)}</small>}</summary>
-      <div className="timeline-tool-detail"><b>{t("工具")}</b><code>{tool.toolName}</code><b>{t("参数")}</b><pre>{maskSensitiveJson(tool.argumentsJson)}</pre>{tool.resultJson && <><b>{t("结果")}</b><pre>{maskSensitiveJson(tool.resultJson)}</pre></>}{tool.errorMessage && <p className="tool-error">{tool.errorMessage}</p>}</div>
+      <div className="timeline-tool-detail"><b>{t("工具")}</b><code>{tool.toolName}</code><b>{t("参数")}</b><ScrollArea className="tool-detail-scroll" viewportClassName="tool-detail-viewport"><pre>{maskSensitiveJson(tool.argumentsJson)}</pre></ScrollArea>{tool.resultJson && <><b>{t("结果")}</b><ScrollArea className="tool-detail-scroll" viewportClassName="tool-detail-viewport"><pre>{maskSensitiveJson(tool.resultJson)}</pre></ScrollArea></>}{tool.errorMessage && <p className="tool-error">{tool.errorMessage}</p>}</div>
     </details>)}</div>
   </details>;
 }

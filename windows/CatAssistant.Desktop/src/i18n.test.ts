@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { english, isLanguagePreference, resolveLanguage, setTranslationLanguage, t } from './i18n';
 import { readLanguagePreference, saveLanguagePreference } from './language-preferences';
-import { draftGreetingForHour, summarizeWorkToolGroup } from './ui-behavior';
+import { draftGreetingForHour, summarizeWorkToolGroup, toolDisplayName } from './ui-behavior';
 import { textMenuEntries } from './text-context-menu';
 import { deviceDiscoveryMessage } from './state';
 
@@ -44,6 +44,31 @@ describe('interface language', () => {
     expect(t('“{0}”及其中的消息将无法恢复。', '中文 {1} $&')).toBe('“中文 {1} $&” and its messages cannot be recovered.');
     expect(t('raw diagnostic 0x123')).toBe('raw diagnostic 0x123');
     expect(t('raw diagnostic {0}')).toBe('raw diagnostic {0}');
+  });
+  it('names every backend tool in both languages and follows language changes', () => {
+    const directory = new URL('../../CatAssistant.Backend/Services/WorkTools/', import.meta.url);
+    const workTools = fs.readdirSync(directory).filter(file => file.endsWith('.cs')).flatMap(file =>
+      [...fs.readFileSync(new URL(file, directory), 'utf8').matchAll(/WorkToolDefinition Definition[^=]*= new\(\s*"([^"]+)"/g)].map(match => match[1]));
+    const chatProvider = fs.readFileSync(new URL('../../CatAssistant.Backend/Services/DashScopeClient.cs', import.meta.url), 'utf8');
+    const chatTools = [...chatProvider.matchAll(/name = "([^"]+)"/g)].map(match => match[1]);
+    expect(workTools).toContain('list_skills');
+    expect(chatTools).toContain('search_conversation_history');
+    for (const name of [...workTools, ...chatTools]) {
+      setTranslationLanguage('zh-CN');
+      const chinese = toolDisplayName(name);
+      expect(chinese, name).not.toBe(name);
+      expect(chinese, name).toMatch(/[\u4e00-\u9fff]/);
+      setTranslationLanguage('en');
+      expect(toolDisplayName(name), name).not.toBe(name);
+      expect(toolDisplayName(name), name).not.toBe(chinese);
+      expect(toolDisplayName(name), name).not.toMatch(/[\u4e00-\u9fff]/);
+    }
+    for (const language of ['zh-CN', 'en'] as const) {
+      setTranslationLanguage(language);
+      for (const unknown of ['future_tool', 'constructor', '__proto__']) expect(toolDisplayName(unknown)).toBe(unknown);
+    }
+    setTranslationLanguage('zh-CN');
+    expect(toolDisplayName('list_skills')).toBe('查看技能列表');
   });
   it('provides translations for all literal UI translation calls with matching placeholders', () => {
     for (const file of ['renderer.tsx', 'ui-behavior.ts', 'text-context-menu.ts', 'state.ts', 'main.ts']) {

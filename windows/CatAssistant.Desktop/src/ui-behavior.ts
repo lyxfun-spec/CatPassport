@@ -1,6 +1,22 @@
 import { t } from './i18n';
 import type { ConversationMessage, WorkArtifact, WorkRequest, WorkToolCall } from './shared';
 
+export function toolDisplayName(name: string): string {
+  const names = new Map<string, string>([
+    ['execute_command', t('运行命令')],
+    ['read_file', t('读取文件')],
+    ['write_file', t('写入文件')],
+    ['list_directory', t('查看文件夹')],
+    ['web_search', t('搜索网络')],
+    ['deliver_files', t('交付成果')],
+    ['list_skills', t('查看技能列表')],
+    ['load_skill', t('读取技能')],
+    ['search_conversation_history', t('搜索对话历史')],
+    ['request_work', t('请求 Work 任务')]
+  ]);
+  return names.get(name) ?? name;
+}
+
 export function shouldSubmitComposer(key: string, shiftKey: boolean, isComposing: boolean): boolean {
   return key === 'Enter' && !shiftKey && !isComposing;
 }
