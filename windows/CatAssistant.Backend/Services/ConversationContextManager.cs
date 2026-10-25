@@ -134,7 +134,7 @@ public sealed class ConversationContextManager(
     private ContextBudgetAssessment AssessWork(IReadOnlyList<WorkContextItem> context, IReadOnlyList<WorkToolDefinition> tools, WorkEnvironmentInfo environment, string model) =>
         provider is IWorkRequestBudgetProvider exact
             ? exact.AssessWorkRequest(context, tools, environment, model)
-            : _fallbackBudget.Assess(new { model, context, tools, environment }, ModelContextProfiles.Resolve(model));
+            : _fallbackBudget.Assess(new { model, context, tools, environment }, ModelContextProfiles.ResolveWork(model));
 
     private async Task<ContextSummaryRecord?> CompactChatAsync(
         string conversationId, IReadOnlyList<ConversationMessage> history, ContextSummaryRecord? current, string model, CancellationToken cancellationToken)

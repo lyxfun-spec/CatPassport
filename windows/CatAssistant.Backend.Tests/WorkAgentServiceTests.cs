@@ -10,6 +10,67 @@ namespace CatAssistant.Backend.Tests;
 public sealed class WorkAgentServiceTests
 {
     [Fact]
+    public async Task TruncationRetriesWithoutExecutingOrReplayingDiscardedTools()
+    {
+        await using var fixture = await WorkAgentFixture.CreateAsync();
+        var executions = 0;
+        fixture.Tools.Register(new BlockingTool("write-probe", () => executions++, Task.CompletedTask));
+        fixture.Provider.EnqueueStreamed(["截断的说明"], new WorkModelResponse("截断的说明",
+            [new WorkModelToolCall("discarded", "write-probe", "{}")], OutputTruncated: true));
+        fixture.Provider.Enqueue(new WorkModelResponse(null, [new WorkModelToolCall("valid", "write-probe", "{}") ]));
+        fixture.Provider.Enqueue(new WorkModelResponse("完成", []));
+
+        await fixture.Agent.SendAsync(fixture.ConversationId, "写入文件", "desktop");
+        await fixture.Completed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, executions);
+        var recoveryContext = fixture.Provider.Contexts[1];
+        Assert.Contains(recoveryContext, item => item.Name == "output_truncation_recovery" && item.Role == "system");
+        Assert.DoesNotContain(recoveryContext, item => item.Kind is "tool_call" or "tool_result" || JsonContent(item) == "截断的说明");
+        var messages = await fixture.Repository.LoadMessagesAsync(fixture.ConversationId);
+        Assert.Contains(messages, message => message.Content == "截断的说明" && message.Status == "interrupted");
+        Assert.DoesNotContain(fixture.Events, item => item.Type == "tool.failed");
+    }
+
+    [Fact]
+    public async Task RepeatedTruncationStopsWithAnExplicitError()
+    {
+        await using var fixture = await WorkAgentFixture.CreateAsync();
+        for (var index = 0; index < 3; index++)
+            fixture.Provider.Enqueue(new WorkModelResponse(null, [], OutputTruncated: true));
+
+        await fixture.Agent.SendAsync(fixture.ConversationId, "写入文件", "desktop");
+        var error = await fixture.Failed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Contains("模型输出连续达到长度上限", error);
+        Assert.Equal(3, fixture.Provider.Contexts.Count);
+        Assert.Null(fixture.Agent.ActiveRunId(fixture.ConversationId));
+        Assert.DoesNotContain(fixture.Events, item => item.Type == "run.completed" || item.Type == "tool.started");
+    }
+
+    [Fact]
+    public async Task SuccessfulToolRoundResetsTheTruncationRetryBudget()
+    {
+        await using var fixture = await WorkAgentFixture.CreateAsync();
+        var executions = 0;
+        fixture.Tools.Register(new BlockingTool("probe", () => executions++, Task.CompletedTask));
+        for (var batch = 0; batch < 2; batch++)
+        {
+            fixture.Provider.Enqueue(new WorkModelResponse(null, [], OutputTruncated: true));
+            fixture.Provider.Enqueue(new WorkModelResponse(null, [], OutputTruncated: true));
+            fixture.Provider.Enqueue(new WorkModelResponse(null, [new WorkModelToolCall($"valid-{batch}", "probe", "{}") ]));
+        }
+        fixture.Provider.Enqueue(new WorkModelResponse("完成", []));
+
+        await fixture.Agent.SendAsync(fixture.ConversationId, "写入多个文件", "desktop");
+        await fixture.Completed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(2, executions);
+        Assert.Equal(7, fixture.Provider.Contexts.Count);
+        Assert.DoesNotContain(fixture.Events, item => item.Type == "run.failed");
+    }
+
+    [Fact]
     public async Task ToolBatchRunsInParallelAndQueuedMessageEntersNextRoundInOrder()
     {
         await using var fixture = await WorkAgentFixture.CreateAsync();

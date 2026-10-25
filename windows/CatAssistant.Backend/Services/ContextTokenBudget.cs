@@ -66,6 +66,9 @@ public sealed class ContextTokenBudget(ITokenEstimator? estimator = null)
 
 public static class ModelContextProfiles
 {
+    // Work responses include complete file contents and tool arguments in the output budget.
+    public static ModelContextProfile ResolveWork(string model) => Resolve(model, 8_192);
+
     public static ModelContextProfile Resolve(string model, int? outputReserveTokens = null)
     {
         var normalized = model.Trim().ToLowerInvariant();

@@ -6,7 +6,7 @@ public sealed record WorkToolDefinition(string Name, string Description, string 
 
 public sealed record WorkModelToolCall(string ToolCallId, string Name, string ArgumentsJson);
 
-public sealed record WorkModelResponse(string? Content, IReadOnlyList<WorkModelToolCall> ToolCalls, ModelUsage? Usage = null);
+public sealed record WorkModelResponse(string? Content, IReadOnlyList<WorkModelToolCall> ToolCalls, ModelUsage? Usage = null, bool OutputTruncated = false);
 
 public interface IWorkRequestBudgetProvider
 {

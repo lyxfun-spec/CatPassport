@@ -155,6 +155,7 @@ public sealed class WorkAgentService : IAsyncDisposable
         var workspace = await _workspaces.EnsureAsync(run.ConversationId, run.Cancellation.Token);
         var environment = WorkEnvironmentInfo.From(workspace);
         var round = 0;
+        var consecutiveTruncations = 0;
         while (true)
         {
             run.Cancellation.Token.ThrowIfCancellationRequested();
@@ -182,7 +183,23 @@ public sealed class WorkAgentService : IAsyncDisposable
                 run.Cancellation.Token);
             run.Cancellation.Token.ThrowIfCancellationRequested();
             if (response.Usage is not null) await _repository.SetRunUsageAsync(run.Id, response.Usage);
-            await _repository.RecordRequestDiagnosticAsync(run.ConversationId, run.Id, "work", settings.WorkModel, "round_completed", prepared.Budget, response.Usage);
+            await _repository.RecordRequestDiagnosticAsync(run.ConversationId, run.Id, "work", settings.WorkModel,
+                response.OutputTruncated ? "output_truncated" : "round_completed", prepared.Budget, response.Usage);
+
+            if (response.OutputTruncated)
+            {
+                await InterruptStreamedMessageAsync(run);
+                if (++consecutiveTruncations > 2)
+                    throw new InvalidOperationException("模型输出连续达到长度上限，自动恢复未成功。截断轮次的文件操作均未执行，请缩小任务范围后继续。");
+                // Do not replay malformed arguments or execute even the complete calls in this batch.
+                await _repository.AddWorkContextItemAsync(run.ConversationId, run.Id, "message", "system",
+                    JsonSerializer.Serialize(new
+                    {
+                        content = "The previous response hit the output token limit and was discarded. No tools from that response were executed. Regenerate the next step with shorter output and fewer tool calls. For long files, use smaller complete operations or a short generation script; write_file replaces the entire file, so do not overwrite earlier chunks. Do not assume any part of the discarded response was saved."
+                    }), name: "output_truncation_recovery");
+                continue;
+            }
+            consecutiveTruncations = 0;
 
             var roundId = $"{run.Id}:{++round}";
             if (response.ToolCalls.Count == 0)

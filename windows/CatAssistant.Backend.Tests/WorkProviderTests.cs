@@ -8,6 +8,50 @@ namespace CatAssistant.Backend.Tests;
 
 public sealed class WorkProviderTests
 {
+    [Theory]
+    [InlineData("{\"choices\":[{\"finish_reason\":\"length\"}]}")]
+    [InlineData("{\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}")]
+    public void TruncatedResponseDiscardsEntireToolBatch(string terminalChunk)
+    {
+        var accumulator = new DashScopeClient.WorkStreamAccumulator();
+        using var chunk = JsonDocument.Parse("""{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"complete","function":{"name":"list_directory","arguments":"{}"}},{"index":1,"id":"partial","function":{"name":"write_file","arguments":"{\"path\":\"work/test.txt\",\"content\":\"unfinished"}}]}}]}""");
+        accumulator.Append(chunk.RootElement);
+        using var terminal = JsonDocument.Parse(terminalChunk);
+        accumulator.Append(terminal.RootElement);
+        using var usage = JsonDocument.Parse("""{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":8192,"total_tokens":8292}}""");
+        accumulator.Append(usage.RootElement);
+
+        var response = accumulator.ToResponse();
+
+        Assert.True(response.OutputTruncated);
+        Assert.Empty(response.ToolCalls);
+        Assert.Equal(8192, response.Usage!.OutputTokens);
+    }
+
+    [Fact]
+    public void TruncatedTextIsMarkedInsteadOfBeingAcceptedAsComplete()
+    {
+        var accumulator = new DashScopeClient.WorkStreamAccumulator();
+        using var chunk = JsonDocument.Parse("""{"choices":[{"delta":{"content":"未完成的回答"},"finish_reason":"length"}]}""");
+        accumulator.Append(chunk.RootElement);
+
+        Assert.True(accumulator.ToResponse().OutputTruncated);
+        Assert.Equal("未完成的回答", accumulator.ToResponse().Content);
+    }
+
+    [Fact]
+    public void WorkRequestAndInputAssessmentReserveTheSameLargerOutputBudget()
+    {
+        var environment = new WorkEnvironmentInfo("C:/workspace", "inputs", "work", "outputs", "packages", null);
+        using var client = new DashScopeClient();
+        using var payload = JsonDocument.Parse(JsonSerializer.Serialize(DashScopeClient.BuildWorkRequestPayload([], [], environment, "qwen3.8-max")));
+        var budget = client.AssessWorkRequest([], [], environment, "qwen3.8-max");
+
+        Assert.Equal(8192, payload.RootElement.GetProperty("max_tokens").GetInt32());
+        Assert.Equal(8192, budget.Profile.OutputReserveTokens);
+        Assert.Equal(4096, ModelContextProfiles.Resolve("qwen3.8-max").OutputReserveTokens);
+    }
+
     [Fact]
     public void AccumulatesStreamedToolCallFragmentsAcrossChunks()
     {

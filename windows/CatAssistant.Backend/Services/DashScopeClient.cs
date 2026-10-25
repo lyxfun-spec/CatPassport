@@ -354,7 +354,7 @@ public sealed class DashScopeClient : IChatProvider, IWorkModelProvider, IChatRe
             }).ToArray(),
             tool_choice = "auto",
             parallel_tool_calls = true,
-            max_tokens = ModelContextProfiles.Resolve(model).OutputReserveTokens,
+            max_tokens = ModelContextProfiles.ResolveWork(model).OutputReserveTokens,
             stream = true
         };
 
@@ -363,7 +363,7 @@ public sealed class DashScopeClient : IChatProvider, IWorkModelProvider, IChatRe
         IReadOnlyList<WorkToolDefinition> tools,
         WorkEnvironmentInfo environment,
         string model) =>
-        _tokenBudget.Assess(BuildWorkRequestPayload(context, tools, environment, model), ModelContextProfiles.Resolve(model));
+        _tokenBudget.Assess(BuildWorkRequestPayload(context, tools, environment, model), ModelContextProfiles.ResolveWork(model));
 
     public async Task<ContextCompactionResult> CompactAsync(
         string mode,
@@ -460,6 +460,7 @@ public sealed class DashScopeClient : IChatProvider, IWorkModelProvider, IChatRe
         private readonly StringBuilder _content = new();
         private readonly SortedDictionary<int, ToolCallFragment> _toolCalls = new();
         private bool _answered;
+        private bool _outputTruncated;
         private ModelUsage? _usage;
 
         /// <summary>Applies one SSE payload and returns the assistant text it carried, if any.</summary>
@@ -471,6 +472,8 @@ public sealed class DashScopeClient : IChatProvider, IWorkModelProvider, IChatRe
             foreach (var choice in choices.EnumerateArray())
             {
                 _answered = true;
+                // Terminal chunks may omit delta entirely. Never dispatch a partial tool batch.
+                if (ReadString(choice, "finish_reason") == "length") _outputTruncated = true;
                 if (!choice.TryGetProperty("delta", out var delta) || delta.ValueKind != JsonValueKind.Object) continue;
                 if (delta.TryGetProperty("tool_calls", out var calls) && calls.ValueKind == JsonValueKind.Array)
                 {
@@ -487,6 +490,7 @@ public sealed class DashScopeClient : IChatProvider, IWorkModelProvider, IChatRe
 
         public WorkModelResponse ToResponse()
         {
+            if (_outputTruncated) return new WorkModelResponse(_content.Length > 0 ? _content.ToString() : null, [], _usage, OutputTruncated: true);
             if (!_answered && _content.Length == 0 && _toolCalls.Count == 0)
                 throw new CloudException(CloudError.Service, "DashScope 未返回有效的 Work 响应。");
             var calls = _toolCalls.Values
