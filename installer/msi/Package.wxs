@@ -1,0 +1,43 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="小猫助手"
+           Manufacturer="FoloToy"
+           Version="$(ProductVersion)"
+           UpgradeCode="7F1998F1-D743-45B3-BFF9-6B37A0A51A2F"
+           Language="2052"
+           Scope="perMachine"
+           InstallerVersion="500"
+           Compressed="yes">
+    <SummaryInformation Description="小猫助手 Windows 桌面客户端" Manufacturer="FoloToy" />
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="已安装更新版本的小猫助手，无法降级。" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <Icon Id="CatAssistantIcon" SourceFile="$(AppIcon)" />
+    <Property Id="ARPPRODUCTICON" Value="CatAssistantIcon" />
+    <Property Id="ARPHELPLINK" Value="https://folotoy.com/" />
+    <Property Id="CREATE_DESKTOP_SHORTCUT" Value="1" Secure="yes" />
+    <Property Id="CREATE_STARTMENU_SHORTCUT" Value="1" Secure="yes" />
+
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="FoloToyFolder" Name="FoloToy">
+        <Directory Id="INSTALLFOLDER" Name="CatAssistant" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="小猫助手" />
+    </StandardDirectory>
+    <StandardDirectory Id="DesktopFolder" />
+
+    <Files Include="$(PayloadDir)\**" Directory="INSTALLFOLDER" />
+
+    <Component Id="StartMenuShortcutComponent" Directory="ApplicationProgramsFolder" Guid="A24B5680-7B59-4F62-92A6-F9C386818F38" Condition="CREATE_STARTMENU_SHORTCUT = 1">
+      <Shortcut Id="StartMenuShortcut" Name="小猫助手" Description="启动小猫助手" Target="[INSTALLFOLDER]CatAssistant.exe" WorkingDirectory="INSTALLFOLDER" Icon="CatAssistantIcon" />
+      <RemoveFolder Id="RemoveApplicationProgramsFolder" Directory="ApplicationProgramsFolder" On="uninstall" />
+      <RegistryValue Root="HKCU" Key="Software\FoloToy\CatAssistant" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <Component Id="DesktopShortcutComponent" Directory="DesktopFolder" Guid="46573728-8E74-4236-B6A0-E870D7D9D39F" Condition="CREATE_DESKTOP_SHORTCUT = 1">
+      <Shortcut Id="DesktopShortcut" Name="小猫助手" Description="启动小猫助手" Target="[INSTALLFOLDER]CatAssistant.exe" WorkingDirectory="INSTALLFOLDER" Icon="CatAssistantIcon" />
+      <RegistryValue Root="HKCU" Key="Software\FoloToy\CatAssistant" Name="DesktopShortcut" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+  </Package>
+</Wix>

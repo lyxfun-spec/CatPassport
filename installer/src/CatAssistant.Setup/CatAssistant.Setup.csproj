@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\..\..\assets\branding\cat-assistant-icon.ico</ApplicationIcon>
+    <AssemblyName>CatAssistantSetup</AssemblyName>
+    <RootNamespace>CatAssistant.Setup</RootNamespace>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <DebugType>embedded</DebugType>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <CatAssistantAppVersion Condition="'$(CatAssistantAppVersion)' == ''">1.0.0</CatAssistantAppVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="..\..\..\assets\branding\cat-assistant-icon-transparent.png" Link="Assets\brand.png" />
+    <EmbeddedResource Include="$(InstallerMsi)" Condition="'$(InstallerMsi)' != ''">
+      <LogicalName>CatAssistant.Setup.Payload.CatAssistant.msi</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyMetadata Include="CatAssistantAppVersion" Value="$(CatAssistantAppVersion)" />
+  </ItemGroup>
+</Project>
+

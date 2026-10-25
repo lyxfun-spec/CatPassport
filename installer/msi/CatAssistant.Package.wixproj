@@ -1,0 +1,14 @@
+<Project Sdk="WixToolset.Sdk/6.0.2">
+  <PropertyGroup>
+    <OutputType>Package</OutputType>
+    <Platform>x64</Platform>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <Cultures>zh-CN</Cultures>
+    <OutputName>CatAssistant</OutputName>
+    <!-- Electron ships several unversioned binary resources, so ICE60 is not actionable.
+         ICE61 is intentionally suppressed because same-version development builds are
+         treated as major upgrades; versions are restricted to three numeric fields. -->
+    <SuppressIces>ICE60;ICE61</SuppressIces>
+    <DefineConstants>PayloadDir=$(PayloadDir);ProductVersion=$(ProductVersion);AppIcon=$(AppIcon)</DefineConstants>
+  </PropertyGroup>
+</Project>

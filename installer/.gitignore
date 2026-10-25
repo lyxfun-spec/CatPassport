@@ -1,0 +1,6 @@
+artifacts/
+src/**/bin/
+src/**/obj/
+msi/bin/
+msi/obj/
+

@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>小猫助手 · 安装程序视觉原型</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+
+    <main class="prototype-shell">
+      <section class="window" aria-label="小猫助手安装程序原型">
+        <div class="window-glow"></div>
+        <header class="titlebar">
+          <div class="title-brand">
+            <span class="title-logo"><img src="../../assets/branding/cat-assistant-icon-transparent.png" alt="" /></span>
+            <span>小猫助手安装程序</span>
+          </div>
+          <div class="window-controls" aria-label="窗口控件预览">
+            <button type="button" aria-label="最小化"><i></i></button>
+            <button type="button" aria-label="关闭"><b>×</b></button>
+          </div>
+        </header>
+
+        <div class="window-body">
+          <section class="stage">
+            <div id="pageViewport" class="page-viewport">
+              <article class="page welcome-page is-active" data-page="welcome">
+                <div class="welcome-copy">
+                  <span class="section-kicker"><i></i> 准备就绪</span>
+                  <h1>让小猫助手，<br />住进你的电脑。</h1>
+                  <p class="lead">桌面 AI 对话、Work 工作空间与 AI Passport 连接能力，将在几分钟内准备完成。</p>
+                </div>
+                <div class="mascot-scene" aria-hidden="true">
+                  <div class="orbit orbit-large"></div>
+                  <div class="orbit orbit-small"></div>
+                  <span class="spark spark-a">✦</span>
+                  <span class="spark spark-b">✦</span>
+                  <div class="mascot-halo"></div>
+                  <div class="mascot-card">
+                    <img src="../../assets/branding/cat-assistant-icon-transparent.png" alt="" />
+                  </div>
+                </div>
+              </article>
+
+              <article class="page version-page" data-page="version">
+                <div class="version-visual"><img src="../../assets/branding/cat-assistant-icon-transparent.png" alt="" /></div>
+                <div class="version-copy">
+                  <span class="section-kicker"><i></i> 即将安装</span>
+                  <h1>小猫助手</h1>
+                  <div class="app-version"><span>应用版本</span><strong>1.0.0</strong></div>
+                </div>
+              </article>
+
+              <article class="page check-page" data-page="check">
+                <div class="page-heading compact">
+                  <span class="section-kicker"><i></i> 安装检查</span>
+                  <h1>先确认一切顺利。</h1>
+                </div>
+                <div id="checkList" class="check-list">
+                  <div class="check-item" data-delay="0"><span class="check-status"><i></i></span><div><strong>Windows 版本</strong><small>Windows 11 · 64 位</small></div></div>
+                  <div class="check-item" data-delay="1"><span class="check-status"><i></i></span><div><strong>应用状态</strong><small>小猫助手当前未运行</small></div></div>
+                  <div class="check-item" data-delay="2"><span class="check-status"><i></i></span><div><strong>安装资源</strong><small>签名和文件校验已通过</small></div></div>
+                </div>
+                <div class="check-summary"><strong>所有检查均已通过</strong></div>
+              </article>
+
+              <article class="page options-page" data-page="options">
+                <div class="page-heading compact">
+                  <span class="section-kicker"><i></i> 安装选项</span>
+                  <h1>按你的习惯准备。</h1>
+                </div>
+                <div class="path-block">
+                  <label for="installPath">安装位置</label>
+                  <div class="path-field"><input id="installPath" value="C:\Program Files\CatAssistant" /><button id="browseButton" type="button">浏览</button></div>
+                  <small id="locationStatus" class="location-status">位置可用 · 磁盘剩余 128.6 GB，需要至少 0.9 GB</small>
+                </div>
+                <div class="option-list">
+                  <label><span class="option-symbol">↗</span><span><strong>创建桌面快捷方式</strong><small>从桌面快速打开小猫助手</small></span><input type="checkbox" checked /><i class="switch"></i></label>
+                  <label><span class="option-symbol">⊞</span><span><strong>添加到开始菜单</strong><small>在 Windows 搜索中找到小猫助手</small></span><input type="checkbox" checked /><i class="switch"></i></label>
+                  <label><span class="option-symbol">▶</span><span><strong>安装完成后启动</strong><small>继续完成首次使用配置</small></span><input type="checkbox" checked /><i class="switch"></i></label>
+                </div>
+              </article>
+
+              <article class="page installing-page" data-page="installing">
+                <div class="install-main">
+                  <div class="install-visual" aria-hidden="true">
+                    <div class="install-icon"><img src="../../assets/branding/cat-assistant-icon-transparent.png" alt="" /></div>
+                  </div>
+                  <div class="install-copy">
+                    <span id="progressValue" class="progress-value">0%</span>
+                    <h1>正在安装小猫助手</h1>
+                    <p id="installStatus">正在验证安装资源…</p>
+                  </div>
+                </div>
+                <div class="install-progress">
+                  <div class="progress-track"><i id="progressBar"></i><b aria-hidden="true"></b></div>
+                </div>
+              </article>
+
+              <article class="page complete-page" data-page="complete">
+                <div class="complete-burst" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+                <span class="section-kicker"><i></i> 安装完成</span>
+                <h1>欢迎回来，<br />小猫助手。</h1>
+                <p>程序已安装完成。接下来只需选择模型服务，也可以连接你的 AI Passport。</p>
+                <div class="next-card"><span>下一步</span><strong>首次启动配置</strong><small>约 2 分钟 · 可随时跳过</small><i>→</i></div>
+              </article>
+            </div>
+          </section>
+        </div>
+
+        <footer class="window-footer">
+          <div class="footer-actions">
+            <button id="backButton" class="button secondary" type="button">上一步</button>
+            <button id="nextButton" class="button primary" type="button"><span>继续</span><i>→</i></button>
+          </div>
+        </footer>
+      </section>
+
+      <dialog id="folderDialog" class="folder-dialog">
+        <form method="dialog">
+          <span class="section-kicker"><i></i> 选择安装位置</span>
+          <h2>选择基础目录</h2>
+          <p>小猫助手文件夹会自动添加到所选目录下。</p>
+          <label for="folderBasePath">目录</label>
+          <input id="folderBasePath" value="C:\Program Files" />
+          <div class="dialog-example"><span>最终位置</span><strong id="folderResultPreview">C:\Program Files\CatAssistant</strong></div>
+          <div class="dialog-actions">
+            <button value="cancel" class="button secondary">取消</button>
+            <button id="confirmFolderButton" value="default" class="button primary">选择此目录</button>
+          </div>
+        </form>
+      </dialog>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
