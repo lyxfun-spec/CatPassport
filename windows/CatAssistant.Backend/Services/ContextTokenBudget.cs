@@ -74,6 +74,7 @@ public static class ModelContextProfiles
         var normalized = model.Trim().ToLowerInvariant();
         var window = normalized switch
         {
+            var value when value.Contains("deepseek", StringComparison.Ordinal) => 1_000_000,
             var value when value.Contains("qwen3.8", StringComparison.Ordinal) => 131_072,
             var value when value.Contains("qwen-plus", StringComparison.Ordinal) => 131_072,
             var value when value.Contains("qwen-max", StringComparison.Ordinal) => 32_768,

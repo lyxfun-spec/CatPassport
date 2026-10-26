@@ -2,6 +2,11 @@ using CatAssistant.Backend.Models;
 
 namespace CatAssistant.Backend.Services;
 
+public interface ITranscriptionProvider
+{
+    Task<string> TranscribeAsync(byte[] wav, string model, string apiKey, CancellationToken cancellationToken);
+}
+
 public sealed record ChatToolCall(string ToolCallId, string Name, string ArgumentsJson);
 public sealed record ChatModelMessage(
     string Role,
