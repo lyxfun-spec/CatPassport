@@ -42,7 +42,7 @@ button:disabled, input:disabled { cursor: not-allowed; }
 .conversation-item.active::before { height: 20px; }
 .conversation-item.active .icon { color: var(--ui-accent); }
 .no-results { padding: 28px 10px; color: var(--ui-muted); font-size: 12px; text-align: center; }
-.sidebar-footer { flex: 0 0 auto; padding-top: 7px; border-top: 1px solid #e3e6e9; }
+.sidebar-footer { flex: 0 0 auto; display: grid; gap: 8px; padding-top: 7px; border-top: 1px solid #e3e6e9; }
 .footer-entry { position: relative; width: 100%; min-height: 46px; display: flex; align-items: center; gap: 10px; padding: 5px 9px; border: 0; border-radius: 8px; color: #606b76; background: transparent; cursor: pointer; text-align: left; transition: color 150ms, background 150ms; }
 .footer-entry:hover, .footer-entry.active { color: #34495b; background: #eceff1; }
 .footer-copy { min-width: 0; }
@@ -372,6 +372,7 @@ button:disabled, input:disabled { cursor: not-allowed; }
 .settings-actions { display: flex; justify-content: flex-end; margin-top: -8px; }
 .settings-actions .primary-button { min-width: 94px; }
 .settings-actions .primary-button:disabled { opacity: .46; cursor: default; }
+.diagnostic-value { max-width: 310px; overflow-wrap: anywhere; color: #52616d; font: 11px/1.55 "Cascadia Mono", Consolas, monospace; text-align: right; }
 .setting-control-with-action { width: min(370px, 100%); display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; }
 .setting-control-with-action .settings-input { width: 100%; }
 .quiet-save { min-height: 40px; padding: 0 12px; border: 0; border-radius: var(--ui-radius-control); color: var(--ui-accent); background: transparent; }

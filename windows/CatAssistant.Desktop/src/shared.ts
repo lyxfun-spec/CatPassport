@@ -16,11 +16,13 @@ export interface PublicSettings {
   asrModel: string;
   chatModel: string;
   workModel: string;
+  modelApiUrl: string;
   screenTimeoutSeconds: number;
   autoReconnect: boolean;
   webSearchEnabled: boolean;
   hasApiKey: boolean;
   hasSearchApiKey: boolean;
+  hasAsrApiKey: boolean;
 }
 
 export interface ConversationSummary {
@@ -96,6 +98,12 @@ export interface DeviceState {
   followDesktop: boolean;
 }
 
+export interface BackendInfo {
+  version: string;
+  processId: number;
+  databasePath: string;
+}
+
 export interface BootstrapState {
   conversations: ConversationSummary[];
   activeConversationId?: string;
@@ -105,6 +113,7 @@ export interface BootstrapState {
   pendingApprovals?: WorkApproval[];
   workToolCalls?: WorkToolCall[];
   workArtifacts?: WorkArtifact[];
+  backend?: BackendInfo;
 }
 
 export interface WorkApproval {
