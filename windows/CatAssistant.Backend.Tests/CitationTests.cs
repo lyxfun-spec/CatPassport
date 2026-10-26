@@ -48,6 +48,20 @@ public sealed class CitationTests
     }
 
     [Fact]
+    public void CompatibleStreamYieldsTextToolCallsAndUsage()
+    {
+        const string data = """
+            {"choices":[{"delta":{"content":"结果","tool_calls":[{"index":0,"id":"call-search","function":{"name":"web_search","arguments":"{\"query\":\"天气\"}"}}]},"finish_reason":null}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}
+            """;
+
+        var chunks = DashScopeClient.ParseStreamData(data);
+
+        Assert.Equal("结果", Assert.Single(chunks, item => item.Delta is not null).Delta);
+        Assert.Equal("web_search", Assert.Single(chunks, item => item.ToolCall is not null).ToolCall!.Name);
+        Assert.Equal(12, Assert.Single(chunks, item => item.Usage is not null).Usage!.TotalTokens);
+    }
+
+    [Fact]
     public void NativeStreamAssemblesFunctionCallArgumentsFromFragments()
     {
         var accumulator = new DashScopeClient.ChatToolCallAccumulator();

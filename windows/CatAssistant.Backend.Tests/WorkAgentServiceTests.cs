@@ -99,7 +99,7 @@ public sealed class WorkAgentServiceTests
         var queued = Assert.Single(secondContext, item => item.Kind == "message" && item.Role == "user" && JsonContent(item) == "改用浅色");
         Assert.True(queued.Ordinal > results.Max(item => item.Ordinal));
         Assert.Null(fixture.Agent.ActiveRunId(fixture.ConversationId));
-        Assert.All(fixture.Provider.Models, model => Assert.Equal("qwen3.8-max", model));
+        Assert.All(fixture.Provider.Models, model => Assert.Equal("deepseek-v4-pro", model));
         Assert.All(fixture.Provider.Environments, environment =>
         {
             Assert.Equal(fixture.ConversationId, Path.GetFileName(Path.GetDirectoryName(environment.InputsDirectory)));

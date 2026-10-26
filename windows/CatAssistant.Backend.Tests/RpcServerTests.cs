@@ -12,7 +12,7 @@ public class RpcServerTests
     {
         var input = new StringReader("{\"version\":1,\"id\":4,\"method\":\"state.get\"}\n");
         var output = new StringWriter();
-        var snapshot = new PublicSettings("asr", "chat", "work", 60, true, true, true, true);
+        var snapshot = new PublicSettings("asr", "chat", "work", "https://example.com/v1/chat/completions", 60, true, true, true, true, true);
         await using var server = new RpcServer(input, output, _ => Task.FromResult<object?>(snapshot));
 
         await server.RunAsync();

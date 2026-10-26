@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using CatAssistant.Backend.Models;
@@ -25,6 +26,8 @@ public sealed class ConversationService : IAsyncDisposable
         public StringBuilder Content { get; } = new();
         public object ContentLock { get; } = new();
         public DateTimeOffset? LastContentPersistedAt { get; set; }
+        public bool NeedsParagraphBreak { get; set; }
+        public bool HasChatToolCalls { get; set; }
         public HashSet<string> WorkRequestToolCalls { get; } = new(StringComparer.Ordinal);
     }
 
@@ -36,6 +39,7 @@ public sealed class ConversationService : IAsyncDisposable
     private readonly WorkWorkspaceService _workspaces;
     private readonly WorkAgentService? _workAgent;
     private readonly WorkApprovalService? _workApprovals;
+    private readonly WebSearchToolExecutor? _webSearch;
     private readonly ConversationContextManager _contextManager;
     private readonly HistorySearchService _historySearch;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new();
@@ -56,7 +60,8 @@ public sealed class ConversationService : IAsyncDisposable
         CancellationToken lifetime,
         WorkWorkspaceService? workspaces = null,
         WorkAgentService? workAgent = null,
-        WorkApprovalService? workApprovals = null)
+        WorkApprovalService? workApprovals = null,
+        WebSearchToolExecutor? webSearch = null)
     {
         _repository = repository;
         _provider = provider;
@@ -66,6 +71,7 @@ public sealed class ConversationService : IAsyncDisposable
         _workspaces = workspaces ?? new WorkWorkspaceService();
         _workAgent = workAgent;
         _workApprovals = workApprovals;
+        _webSearch = webSearch;
         _contextManager = new ConversationContextManager(repository, provider, apiKey);
         _historySearch = new HistorySearchService(repository);
         if (_workAgent is not null) _workAgent.Changed += OnWorkChanged;
@@ -416,7 +422,8 @@ public sealed class ConversationService : IAsyncDisposable
         ModelUsage? usage = null;
         if (_provider is IChatToolLoopProvider toolLoop)
         {
-            usage = await ExecuteChatToolLoopAsync(run, toolLoop, context, settings, citations);
+            var originalQuestion = context.FirstOrDefault(item => item.Id == run.TriggerMessageId)?.Content;
+            usage = await ExecuteChatToolLoopAsync(run, toolLoop, context, settings, citations, originalQuestion);
         }
         else await foreach (var chunk in _provider.StreamAsync(context, settings.ChatModel, _apiKey(), settings.WebSearchEnabled, run.Cancellation.Token))
         {
@@ -435,7 +442,7 @@ public sealed class ConversationService : IAsyncDisposable
             _runs.TryRemove(run.ConversationId, out _);
             string content;
             lock (run.ContentLock) content = run.Content.ToString();
-            if (content.Length == 0 && run.WorkRequestToolCalls.Count > 0) await _repository.RemoveMessageIfEmptyAsync(run.AssistantMessageId);
+            if (content.Length == 0 && run.WorkRequestToolCalls.Count > 0 && !run.HasChatToolCalls) await _repository.RemoveMessageIfEmptyAsync(run.AssistantMessageId);
             else await _repository.UpdateMessageAsync(run.AssistantMessageId, content, "complete");
             if (citations.Count > 0)
             {
@@ -461,9 +468,17 @@ public sealed class ConversationService : IAsyncDisposable
         IChatToolLoopProvider provider,
         IReadOnlyList<ConversationMessage> context,
         AppSettings settings,
-        Dictionary<int, CitationRecord> citations)
+        Dictionary<int, CitationRecord> citations,
+        string? originalQuestion)
     {
         var messages = context.Select(item => new ChatModelMessage(item.Role, item.Content)).ToList();
+        var ordinalFloor = await _repository.GetMaxCitationOrdinalAsync(run.ConversationId);
+        var registry = new ChatSourceRegistry(
+            run.ConversationId,
+            await _repository.ListConversationSourcesAsync(run.ConversationId),
+            _repository,
+            ordinalFloor);
+        var searchSession = new ChatSearchSession(registry, originalQuestion);
         ModelUsage? usage = null;
         for (var turn = 0; turn < 4; turn++)
         {
@@ -487,20 +502,193 @@ public sealed class ConversationService : IAsyncDisposable
             messages.Add(new ChatModelMessage("assistant", turnContent.Length == 0 ? null : turnContent.ToString(), calls));
             foreach (var call in calls)
             {
-                string output;
-                if (call.Name == "search_conversation_history") output = await ExecuteHistorySearchToolAsync(run.ConversationId, call.ArgumentsJson, run.Cancellation.Token);
-                else if (call.Name == "request_work")
+                var query = ExtractToolQuery(call.Name, call.ArgumentsJson);
+                var record = await StartChatToolAsync(run, call, query);
+                var stopwatch = Stopwatch.StartNew();
+                var output = "";
+                var queryCount = 0;
+                var rawResultCount = 0;
+                var uniqueResultCount = 0;
+                long? elapsedMilliseconds = null;
+                string? errorCode = null;
+                string? errorMessage = null;
+                IReadOnlyList<ConversationSourceRecord> newSources = [];
+                try
                 {
-                    var proposed = await ProposeWorkRequestAsync(run, call);
-                    output = JsonSerializer.Serialize(proposed
-                        ? new { proposed = true, requiresUserApproval = true, error = (string?)null }
-                        : new { proposed = false, requiresUserApproval = true, error = (string?)"invalid_or_duplicate_proposal" });
+                    if (call.Name == "search_conversation_history")
+                    {
+                        output = await ExecuteHistorySearchToolAsync(run.ConversationId, call.ArgumentsJson, run.Cancellation.Token);
+                        var inspected = InspectToolOutput(output);
+                        rawResultCount = inspected.Count;
+                        uniqueResultCount = inspected.Count;
+                        errorCode = inspected.ErrorCode;
+                        errorMessage = inspected.ErrorMessage;
+                    }
+                    else if (call.Name == "web_search")
+                    {
+                        if (_webSearch is null)
+                        {
+                            output = JsonSerializer.Serialize(new { error = "search_not_configured", message = "联网搜索服务未配置。" });
+                            errorCode = "search_not_configured";
+                            errorMessage = "联网搜索服务未配置。";
+                        }
+                        else
+                        {
+                            var result = await _webSearch.ExecuteAsync(
+                                call.ArgumentsJson, searchSession, run.Cancellation.Token,
+                                operationId: record?.Id, toolCallId: call.ToolCallId);
+                            foreach (var citation in result.Citations) citations[citation.Ordinal] = citation;
+                            newSources = result.NewSources;
+                            output = result.OutputJson;
+                            queryCount = result.QueryCount;
+                            rawResultCount = result.RawResultCount;
+                            uniqueResultCount = result.UniqueResultCount;
+                            elapsedMilliseconds = result.ElapsedMilliseconds;
+                            errorCode = result.ErrorCode;
+                            errorMessage = result.ErrorMessage;
+                        }
+                    }
+                    else if (call.Name == "request_work")
+                    {
+                        var proposed = await ProposeWorkRequestAsync(run, call);
+                        output = JsonSerializer.Serialize(proposed
+                            ? new { proposed = true, requiresUserApproval = true, error = (string?)null }
+                            : new { proposed = false, requiresUserApproval = true, error = (string?)"invalid_or_duplicate_proposal" });
+                        if (!proposed)
+                        {
+                            errorCode = "request_work_not_created";
+                            errorMessage = "Work 提议未能创建。";
+                        }
+                    }
+                    else
+                    {
+                        output = JsonSerializer.Serialize(new { error = "unknown_tool" });
+                        errorCode = "unknown_tool";
+                        errorMessage = $"未知工具：{call.Name}";
+                    }
                 }
-                else output = JsonSerializer.Serialize(new { error = "unknown_tool" });
+                catch (OperationCanceledException)
+                {
+                    await FinishChatToolAsync(run, record, "cancelled", query, queryCount, rawResultCount, uniqueResultCount,
+                        stopwatch.ElapsedMilliseconds, "cancelled", "工具调用已取消。", null, newSources, trackNewSources: call.Name == "web_search");
+                    throw;
+                }
+                catch (Exception error)
+                {
+                    // A tool failure must never abort the answer: the model gets an error result and continues.
+                    output = JsonSerializer.Serialize(new { error = "tool_failed", message = error.Message });
+                    errorCode = "tool_failed";
+                    errorMessage = error.Message;
+                }
+
+                elapsedMilliseconds ??= stopwatch.ElapsedMilliseconds;
+                await FinishChatToolAsync(
+                    run, record, errorCode is null ? "completed" : "failed", query, queryCount, rawResultCount,
+                    uniqueResultCount, elapsedMilliseconds, errorCode, errorMessage, output, newSources,
+                    trackNewSources: call.Name == "web_search");
                 messages.Add(new ChatModelMessage("tool", output, ToolCallId: call.ToolCallId));
             }
+
+            if (RunContentLength(run) > 0)
+                lock (run.ContentLock) run.NeedsParagraphBreak = true;
         }
         throw new InvalidOperationException("Chat 工具调用轮次过多，已停止以避免循环。");
+    }
+
+    private async Task<ChatToolCallRecord?> StartChatToolAsync(ActiveRun run, ChatToolCall call, string? query)
+    {
+        try
+        {
+            var record = await _repository.CreateChatToolCallAsync(
+                run.ConversationId, run.Id, call.ToolCallId, call.Name, call.ArgumentsJson, query, RunContentLength(run));
+            run.HasChatToolCalls = true;
+            Publish(new ConversationEvent("chat.tool.started", run.ConversationId, run.AssistantMessageId, run.Id, ChatTool: record));
+            return record;
+        }
+        catch (Exception error)
+        {
+            Console.Error.WriteLine($"[chat-tool] failed to record {call.Name}: {error.Message}");
+            return null;
+        }
+    }
+
+    private async Task FinishChatToolAsync(
+        ActiveRun run,
+        ChatToolCallRecord? record,
+        string state,
+        string? query,
+        int queryCount,
+        int rawResultCount,
+        int uniqueResultCount,
+        long? elapsedMilliseconds,
+        string? errorCode,
+        string? errorMessage,
+        string? resultJson,
+        IReadOnlyList<ConversationSourceRecord>? newSources = null,
+        bool trackNewSources = false)
+    {
+        if (record is null) return;
+        var newSourceIds = trackNewSources
+            ? (newSources ?? []).Select(source => source.Id).ToArray()
+            : null;
+        try
+        {
+            await _repository.UpdateChatToolCallAsync(
+                record.Id, state, query, queryCount, rawResultCount, uniqueResultCount,
+                resultJson, errorCode, errorMessage, elapsedMilliseconds, newSourceIds);
+            var updated = record with
+            {
+                State = state,
+                Query = query ?? record.Query,
+                QueryCount = queryCount,
+                RawResultCount = rawResultCount,
+                UniqueResultCount = uniqueResultCount,
+                ResultJson = resultJson,
+                ErrorCode = errorCode,
+                ErrorMessage = errorMessage,
+                ElapsedMilliseconds = elapsedMilliseconds,
+                CompletedAt = DateTimeOffset.UtcNow,
+                NewSourceIds = newSourceIds
+            };
+            Publish(new ConversationEvent(
+                "chat.tool.completed", run.ConversationId, run.AssistantMessageId, run.Id,
+                ChatTool: updated, ChatSources: newSources));
+        }
+        catch (Exception error)
+        {
+            Console.Error.WriteLine($"[chat-tool] failed to finish {record.ToolName}: {error.Message}");
+        }
+    }
+
+    private static string? ExtractToolQuery(string toolName, string argumentsJson)
+    {
+        if (toolName is not ("web_search" or "search_conversation_history")) return null;
+        try
+        {
+            using var arguments = JsonDocument.Parse(argumentsJson);
+            return arguments.RootElement.TryGetProperty("query", out var query) && query.ValueKind == JsonValueKind.String
+                ? query.GetString()?.Trim()
+                : null;
+        }
+        catch (JsonException) { return null; }
+    }
+
+    private static (int Count, string? ErrorCode, string? ErrorMessage) InspectToolOutput(string output)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(output);
+            var root = document.RootElement;
+            var count = root.TryGetProperty("count", out var value) && value.TryGetInt32(out var parsed) ? parsed : 0;
+            var error = root.TryGetProperty("error", out var errorValue) && errorValue.ValueKind == JsonValueKind.String
+                ? errorValue.GetString()
+                : null;
+            var message = root.TryGetProperty("message", out var messageValue) && messageValue.ValueKind == JsonValueKind.String
+                ? messageValue.GetString()
+                : null;
+            return (count, error, message);
+        }
+        catch (JsonException) { return (0, null, null); }
     }
 
     private async Task<string> ExecuteHistorySearchToolAsync(string conversationId, string argumentsJson, CancellationToken cancellationToken)
@@ -557,8 +745,24 @@ public sealed class ConversationService : IAsyncDisposable
     private async Task AppendChatDeltaAsync(ActiveRun run, string delta)
     {
         string? checkpoint = null;
+        var published = delta;
         lock (run.ContentLock)
         {
+            if (run.NeedsParagraphBreak)
+            {
+                run.NeedsParagraphBreak = false;
+                if (run.Content.Length > 0)
+                {
+                    var separator = run.Content.Length >= 2 && run.Content[run.Content.Length - 1] == '\n' && run.Content[run.Content.Length - 2] == '\n'
+                        ? ""
+                        : run.Content[run.Content.Length - 1] == '\n' ? "\n" : "\n\n";
+                    if (separator.Length > 0)
+                    {
+                        run.Content.Append(separator);
+                        published = separator + delta;
+                    }
+                }
+            }
             run.Content.Append(delta);
             if (run.LastContentPersistedAt is null || DateTimeOffset.UtcNow - run.LastContentPersistedAt >= StreamPersistInterval)
             {
@@ -567,7 +771,7 @@ public sealed class ConversationService : IAsyncDisposable
             }
         }
         if (checkpoint is not null) await _repository.UpdateMessageAsync(run.AssistantMessageId, checkpoint, "streaming");
-        Publish(new ConversationEvent("message.delta", run.ConversationId, run.AssistantMessageId, run.Id, delta));
+        Publish(new ConversationEvent("message.delta", run.ConversationId, run.AssistantMessageId, run.Id, published));
     }
 
     private async Task FailRunAsync(ActiveRun run, Exception error)
@@ -581,6 +785,7 @@ public sealed class ConversationService : IAsyncDisposable
             string content;
             lock (run.ContentLock) content = run.Content.ToString();
             await _repository.UpdateMessageAsync(run.AssistantMessageId, content, "failed");
+            await _repository.CancelRunningChatToolCallsAsync(run.Id, "failed", "本轮生成失败，工具调用未完成。");
             await _repository.FinishRunAsync(run.Id, "failed", "error", ErrorCode(error));
             Publish(new ConversationEvent("run.failed", run.ConversationId, run.AssistantMessageId, run.Id, Status: "failed", Error: error.Message));
             ScheduleTitleGeneration(run.ConversationId);
@@ -651,6 +856,7 @@ public sealed class ConversationService : IAsyncDisposable
         lock (previous.ContentLock) content = previous.Content.ToString();
         if (content.Length == 0) await _repository.RemoveMessageIfEmptyAsync(previous.AssistantMessageId);
         else await _repository.UpdateMessageAsync(previous.AssistantMessageId, content, "interrupted");
+        await _repository.CancelRunningChatToolCallsAsync(previous.Id, "cancelled", "本轮已被中断。");
         await _repository.FinishRunAsync(previous.Id, "interrupted", "interrupted");
         Publish(new ConversationEvent("message.interrupted", conversationId, previous.AssistantMessageId, previous.Id, Status: "interrupted"));
         // A stopped first answer is still answer enough to name the conversation; without this the title
@@ -776,6 +982,7 @@ public sealed class ConversationService : IAsyncDisposable
             lock (run.ContentLock) content = run.Content.ToString();
             if (content.Length == 0) await _repository.RemoveMessageIfEmptyAsync(run.AssistantMessageId);
             else await _repository.UpdateMessageAsync(run.AssistantMessageId, content, "interrupted");
+            await _repository.CancelRunningChatToolCallsAsync(run.Id, "cancelled", "应用退出时工具调用仍未完成。");
             await _repository.FinishRunAsync(run.Id, "interrupted", "interrupted");
         }));
         _runs.Clear();

@@ -2,7 +2,7 @@ using CatAssistant.Backend.Services.Work;
 
 namespace CatAssistant.Backend.Services.WorkTools;
 
-public sealed class WebSearchTool(IqsWebSearchClient client, Func<string> apiKey, Func<bool> enabled) : IWorkTool
+public sealed class WebSearchTool(IWebSearchProvider provider, Func<string> apiKey, Func<bool> enabled) : IWorkTool
 {
     private static readonly string[] TimeRanges = ["OneDay", "OneWeek", "OneMonth", "OneYear", "NoLimit"];
 
@@ -24,28 +24,42 @@ public sealed class WebSearchTool(IqsWebSearchClient client, Func<string> apiKey
         WebSearchOutcome outcome;
         try
         {
-            outcome = await client.SearchAsync(arguments.Query.Trim(), count, timeRange, key, cancellationToken);
+            outcome = await provider.SearchAsync(new WebSearchRequest(arguments.Query.Trim(), count, timeRange), key, cancellationToken);
         }
         catch (WebSearchException error)
         {
             return WorkToolResult.Error(error.Code, error.Message);
         }
 
+        var safeResults = outcome.Results
+            .Where(item => WebSearchSafety.IsSafeUrl(item.Url))
+            .DistinctBy(item => item.Url, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var ranked = WebSearchRanker.Rank(safeResults, arguments.Query.Trim());
+        var weather = WebSearchRanker.IsWeatherQuery(arguments.Query.Trim());
         return WorkToolResult.Ok(new
         {
             query = arguments.Query.Trim(),
             engine = outcome.EngineType,
-            count = outcome.Results.Count,
+            count = ranked.Count,
             elapsedMs = outcome.ElapsedMilliseconds,
-            results = outcome.Results.Select(item => new
+            results = ranked.Select(item => new
             {
-                title = item.Title,
-                url = item.Url,
-                snippet = item.Snippet,
-                publishedTime = item.PublishedTime,
-                site = item.SiteName
+                title = item.Result.Title,
+                url = item.Result.Url,
+                snippet = item.Result.Snippet,
+                date = item.Result.PublishedTime,
+                publishedTime = item.Result.PublishedTime,
+                site = item.Result.SiteName,
+                authority = item.Result.Authority,
+                rerankScore = item.Result.RerankScore,
+                official = item.IsOfficial,
+                weatherKind = item.WeatherKind,
+                locationMatch = item.LocationMatch
             }).ToArray(),
-            note = outcome.Results.Count == 0 ? "没有找到结果；可以更换关键词或放宽时间范围后重试。" : null
+            note = ranked.Count == 0
+                ? "没有找到结果；可以更换关键词或放宽时间范围后重试。"
+                : weather ? "天气问题优先采用官方来源的实况，明确区分实况与预报；不要用多条自媒体结果投票覆盖官方来源。" : null
         });
     }
 

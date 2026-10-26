@@ -16,15 +16,18 @@ public sealed class WorkFoundationTests
             var repository = new SqliteRepository(databasePath);
             await repository.InitializeAsync();
             var defaults = await repository.LoadSettingsAsync();
-            Assert.Equal("qwen-plus", defaults.ChatModel);
-            Assert.Equal("qwen3.8-max", defaults.WorkModel);
+            Assert.Equal("deepseek-flash", defaults.ChatModel);
+            Assert.Equal("deepseek-v4-pro", defaults.WorkModel);
+            Assert.Equal("https://api.deepseek.com/chat/completions", defaults.ModelApiUrl);
 
             defaults.ChatModel = "chat-model";
             defaults.WorkModel = "work-model";
+            defaults.ModelApiUrl = "https://example.com/v1/chat/completions";
             await repository.SaveSettingsAsync(defaults);
             var saved = await repository.LoadSettingsAsync();
             Assert.Equal("chat-model", saved.ChatModel);
             Assert.Equal("work-model", saved.WorkModel);
+            Assert.Equal("https://example.com/v1/chat/completions", saved.ModelApiUrl);
         }
         finally { DeleteDatabase(databasePath); }
     }

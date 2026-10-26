@@ -12,7 +12,9 @@
 - 完整的桌面 Chat 模式：会话创建、切换、重命名、删除、历史持久化和流式回复。
 - 界面支持简体中文和 English，首次启动跟随 Windows 系统区域语言（中文使用简体中文，其余使用 English）。可在“设置 → AI 服务 → 界面语言”中切换，立即生效并保存在本机；选择“跟随系统”可恢复自动选择。
 - 同一会话收到新消息时立即打断旧生成；已产生的部分回复保存为 `interrupted`，并参与后续上下文。
-- DashScope/Qwen 文本对话，可在设置中开启或关闭阿里云联网搜索。
+- Chat 与 Work 通过可配置的 OpenAI Chat Completions 兼容地址调用模型；默认使用 DeepSeek API，Chat 为 `deepseek-flash`，Work 为 `deepseek-v4-pro`。
+- 联网搜索由应用自己的 `web_search` 工具编排，通过 `IWebSearchProvider` 选择搜索适配器；默认调用 DeepSeek Search API，不使用模型厂商的隐式内置搜索开关。
+- DeepSeek Search 默认复用模型 API Key；也可以在设置中为搜索单独保存一把 DeepSeek Key。
 - AI 回复支持 Markdown 展示、复制和搜索来源链接。
 - Chat / Work 使用统一会话列表和界面；Work 已接入独立 Agent 后端、Windows 沙箱、审批、并行工具与成果交付。
 - AI Passport 卡片只接入 Chat：默认跟随电脑当前 Chat，也可在卡片上创建独立对话，再由电脑继续。
@@ -31,7 +33,9 @@ Electron main（窗口、托盘、外链与后台生命周期）
     ↕ stdin/stdout：版本化 NDJSON RPC
 CatAssistant.Backend
     ├─ ConversationService（会话、运行、打断、上下文）
-    ├─ DashScopeClient（Qwen、联网搜索、ASR）
+    ├─ IChatProvider / IWorkModelProvider（模型无关边界）
+    │   └─ DashScopeClient（历史类名；OpenAI-compatible 模型适配器、DashScope ASR）
+    ├─ IWebSearchProvider（搜索无关边界，默认 DeepSeek Search）
     ├─ SqliteRepository（V2 数据与迁移）
     └─ AssistantCoordinator（卡片链路和会话绑定）
         ↕
@@ -60,7 +64,8 @@ CatAssistant.Core（设备协议、分片与音频）
 ## 数据与迁移
 
 - SQLite：`%LOCALAPPDATA%\FoloToy\CatAssistant\cat-assistant.db`
-- DashScope Key：`%LOCALAPPDATA%\FoloToy\CatAssistant\dashscope.key`
+- 模型 Key（兼容旧文件名）：`%LOCALAPPDATA%\FoloToy\CatAssistant\dashscope.key`
+- 独立的 DashScope ASR Key：`%LOCALAPPDATA%\FoloToy\CatAssistant\dashscope-asr.key`；仍使用默认 DashScope 模型地址时会兼容回退到旧 Key。
 - 新数据写入 `conversations_v2`、`messages_v2`、`runs`、`citations`、`app_state`、Work 运行表及上下文摘要/诊断/检索索引表。
 - 原 `conversations`、`messages` 和设置表不会被删除，也不会自动混入新版会话列表。
 - 异常退出后启动恢复会把悬空 run 和有内容的生成消息标为 `interrupted`，移除空占位。

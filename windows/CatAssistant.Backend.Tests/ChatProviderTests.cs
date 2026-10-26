@@ -17,8 +17,8 @@ public sealed class ChatProviderTests
         Assert.Contains("ask whether they want it", withoutSearch);
         Assert.Contains("calling the tool does not mean work has started", withoutSearch);
         Assert.DoesNotContain("web search", withoutSearch, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("Use web search", withSearch);
-        Assert.Contains("cite the sources", withSearch);
+        Assert.Contains("Use the web_search tool", withSearch);
+        Assert.Contains("cite only the exact [ref_n] markers", withSearch);
     }
 
     [Fact]
@@ -26,7 +26,7 @@ public sealed class ChatProviderTests
     {
         var payload = DashScopeClient.BuildChatTurnPayload([], "test-model", false);
         using var json = JsonDocument.Parse(JsonSerializer.Serialize(payload));
-        var tools = json.RootElement.GetProperty("parameters").GetProperty("tools");
+        var tools = json.RootElement.GetProperty("tools");
         var requestWork = tools[0].GetProperty("function");
         var history = tools[1].GetProperty("function");
 
@@ -39,5 +39,32 @@ public sealed class ChatProviderTests
         var historyProperties = history.GetProperty("parameters").GetProperty("properties");
         Assert.Contains("messageId", historyProperties.GetProperty("query").GetProperty("description").GetString());
         Assert.Contains("Character offset", historyProperties.GetProperty("offset").GetProperty("description").GetString());
+    }
+
+    [Fact]
+    public void ChatSearchIsAnApplicationToolAndNeverEnablesVendorSearch()
+    {
+        var payload = DashScopeClient.BuildChatTurnPayload([], "test-model", true);
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(payload));
+        var root = json.RootElement;
+
+        Assert.False(root.TryGetProperty("enable_search", out _));
+        Assert.DoesNotContain(root.GetProperty("tools").EnumerateArray(), item =>
+            item.GetProperty("function").GetProperty("name").GetString() == "vendor_web_search");
+        Assert.Contains(root.GetProperty("tools").EnumerateArray(), item =>
+            item.GetProperty("function").GetProperty("name").GetString() == "web_search");
+        Assert.False(root.TryGetProperty("search_options", out _));
+        Assert.True(root.GetProperty("stream").GetBoolean());
+        Assert.True(root.GetProperty("stream_options").GetProperty("include_usage").GetBoolean());
+    }
+
+    [Fact]
+    public void DisabledChatSearchDoesNotExposeWebSearchTool()
+    {
+        var payload = DashScopeClient.BuildChatTurnPayload([], "test-model", false);
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(payload));
+
+        Assert.DoesNotContain(json.RootElement.GetProperty("tools").EnumerateArray(), item =>
+            item.GetProperty("function").GetProperty("name").GetString() == "web_search");
     }
 }

@@ -76,6 +76,6 @@ public sealed class AssistantCoordinatorTests
         var error = DashScopeClient.ErrorForStatus(HttpStatusCode.BadRequest, isAsrRequest: false);
 
         Assert.Equal(CloudError.Service, error.Kind);
-        Assert.Equal("DashScope 服务返回 HTTP 400。", error.Message);
+        Assert.Equal("模型服务返回 HTTP 400。", error.Message);
     }
 }

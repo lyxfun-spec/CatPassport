@@ -6,16 +6,40 @@ using System.Text.Json.Serialization;
 
 namespace CatAssistant.Backend.Services;
 
-public sealed record WebSearchResult(string Title, string Url, string Snippet, string? PublishedTime, string? SiteName);
+public sealed record WebSearchResult(
+    string Title,
+    string Url,
+    string Snippet,
+    string? PublishedTime,
+    string? SiteName,
+    double? Authority = null,
+    double? RerankScore = null);
 
 public sealed record WebSearchOutcome(IReadOnlyList<WebSearchResult> Results, string EngineType, long? ElapsedMilliseconds);
+
+public sealed record WebSearchRequest(string Query, int Count = 6, string? TimeRange = null, string? OriginalQuestion = null);
+
+/// <summary>
+/// Provider-neutral boundary for public web search. Credentials stay outside the
+/// request so a key can be bound to the selected provider instead of model output.
+/// </summary>
+public interface IWebSearchProvider
+{
+    Task<WebSearchOutcome> SearchAsync(WebSearchRequest request, string apiKey, CancellationToken cancellationToken);
+}
+
+public static class WebSearchSafety
+{
+    public static bool IsSafeUrl(string? value) =>
+        Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.Scheme is "https" or "http";
+}
 
 public sealed class WebSearchException(string code, string message, Exception? inner = null) : Exception(message, inner)
 {
     public string Code { get; } = code;
 }
 
-public sealed class IqsWebSearchClient : IDisposable
+public sealed class IqsWebSearchClient : IWebSearchProvider, IDisposable
 {
     private const string Endpoint = "https://cloud-iqs.aliyuncs.com/search/unified";
     private const string EngineType = "CNAuto";
@@ -62,6 +86,9 @@ public sealed class IqsWebSearchClient : IDisposable
         }
     }
 
+    public Task<WebSearchOutcome> SearchAsync(WebSearchRequest request, string apiKey, CancellationToken cancellationToken) =>
+        SearchAsync(request.Query, request.Count, request.TimeRange, apiKey, cancellationToken);
+
     private static WebSearchOutcome Parse(string body)
     {
         JsonDocument document;
@@ -79,7 +106,7 @@ public sealed class IqsWebSearchClient : IDisposable
             {
                 if (item.ValueKind != JsonValueKind.Object) continue;
                 var url = ReadString(item, "link");
-                if (!IsSafeWebUrl(url) || !seen.Add(url!)) continue;
+                if (!WebSearchSafety.IsSafeUrl(url) || !seen.Add(url!)) continue;
                 var title = ReadString(item, "title") is { Length: > 0 } text ? text : new Uri(url!).Host;
                 results.Add(new WebSearchResult(title, url!, ReadString(item, "snippet") ?? "", ReadString(item, "publishedTime"), ReadString(item, "hostname")));
             }
@@ -104,9 +131,6 @@ public sealed class IqsWebSearchClient : IDisposable
         };
         return new WebSearchException("search_failed", message);
     }
-
-    internal static bool IsSafeWebUrl(string? value) =>
-        Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.Scheme is "https" or "http";
 
     private static bool TryGet(JsonElement element, string name, out JsonElement value)
     {

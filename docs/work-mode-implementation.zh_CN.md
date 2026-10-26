@@ -5,10 +5,10 @@
 ## 1. 现有架构分析与复用
 
 - `ConversationService`、`SqliteRepository` 和现有会话模型继续负责 Chat/Work 对话、消息、激活状态和持久化。Chat 的流式生成、搜索引用和设备绑定路径保持原样，Work 通过独立 `WorkAgentService` 接入。
-- `DashScopeClient` 继续作为模型 API 客户端。Chat 仍走原有流式接口；Work 新增兼容 Chat Completions 的原生 function tool calling，保存 `tool_call_id` 并回传对应 tool result。
+- Chat 与 Work 通过独立的 `IChatProvider` / `IWorkModelProvider` 边界接入模型。内置客户端统一使用可配置的 OpenAI Chat Completions 兼容地址和原生 function tool calling；DeepSeek 是默认模型配置，DashScope 仅继续提供卡片 ASR。
 - Electron 主进程、受限 preload RPC、React 会话界面和托盘生命周期全部复用。Work 只新增模式入口、附件、停止、进度、审批和成果胶囊。
 - SQLite 继续作为唯一状态存储；新增 Work context、tool call、approval 和 artifact 表，没有替换或迁移 Chat 表。
-- 联网搜索拆成独立能力：Chat 继续使用模型自带的 `enable_search`；Work 的 `web_search` 工具改为调用阿里云 IQS 独立搜索 API（`POST /search/unified`），模型只负责决策与综合，不另建浏览器自动化或抓取平台。
+- 联网搜索拆成独立能力：Chat 与 Work 都调用应用拥有的 `web_search` 工具，经 `IWebSearchProvider` 访问搜索服务；默认适配 DeepSeek Search API（`POST /v1/tools/search`）。模型只负责决定何时搜索与综合结果，不启用隐式内置搜索。
 
 ## 2. 已确定需求与工程决策
 
@@ -23,7 +23,7 @@ Work 是文件中心的自主 Agent；支持原生工具调用、同批独立工
 - 外部授权：不动态放宽 AppContainer ACL。可信后端在用户批准后代理执行明确文件操作或明确命令；文件目录 grant 与外部命令权限分离。task-directory grant 仅存在于当前 run 的可信内存状态，结束即撤销。
 - 链接防绕过：工作区 ACL 不授予普通外部目录；外部文件代理拒绝目标现有路径链上的 reparse point，交付与定位也只接受 `outputs` 下的普通非 reparse 文件。
 - 运行时：打包 Python 3.13 x64 与固定版本办公依赖，发行资源只读共享；额外依赖安装到当前对话 `work/python-packages`。
-- 模型：Chat 与 Work 使用独立配置；Work 默认使用 `qwen3.8-max`，不会因调整普通聊天模型而降级。
+- 模型：Chat 与 Work 使用独立配置；Chat 默认使用 `deepseek-flash`，Work 默认使用 `deepseek-v4-pro`，不会因调整普通聊天模型而降级。
 - 长输出恢复：Work 每轮预留 8192 输出 tokens，并使用同一额度计算输入预算。若模型返回 `finish_reason=length`，丢弃该轮全部工具调用，不执行或回放残缺参数；已显示的正文标记为中断。Agent 自动提示模型使用更短的完整操作或生成脚本，最多连续恢复两次，仍截断则明确失败。诊断记录保存 `output_truncated`，成功的完整轮次会重置恢复计数。
 - 自主规划：不增加强制计划器或面向 Python/PPT 等场景的专用工具。系统提示只要求长任务在开始及重要节点简短报告当前进度和下一步；简单任务直接执行，不要求先输出计划。
 - 环境适配：每轮 Work 开始前只向模型说明 Windows 工作区绝对路径、`inputs/work/outputs` 的用途和 Python 是否可用，不在系统提示中展开办公依赖或目录权限。命令执行环境仍预置 `PATH`、`PYTHONPATH`、`PIP_TARGET` 等通用约定，使 PowerShell 和 CMD 中的标准 `python`/`pip` 命令自然落入当前对话工作区。PowerShell 会为当前工作目录建立会话内文件系统驱动器，以确保 AppContainer 中的直接原生调用和 `Start-Process` 都获得有效的 PowerShell 工作位置；模型可按任务需要自主选择 PowerShell 或 CMD。

@@ -16,8 +16,11 @@ internal static class Program
         try
         {
             var repository = new SqliteRepository();
+            Console.Error.WriteLine($"[backend] pid={Environment.ProcessId} version={typeof(Program).Assembly.GetName().Version} database={repository.DatabasePath}");
             await repository.InitializeAsync();
-            coordinator = new AssistantCoordinator(new BleGateway(), new DashScopeClient(), repository, new SecureApiKeyStore(), await repository.LoadSettingsAsync());
+            var settings = await repository.LoadSettingsAsync();
+            var model = new DashScopeClient(() => settings.ModelApiUrl);
+            coordinator = new AssistantCoordinator(new BleGateway(), model, model, model, repository, new SecureApiKeyStore(), settings, model);
             var rpcServer = new RpcServer(Console.In, Console.Out, request => HandleAsync(coordinator, request));
             server = rpcServer;
             coordinator.StateChanged += (_, state) => _ = rpcServer.PublishAsync("device.changed", state);
@@ -104,9 +107,11 @@ internal static class Program
                 await coordinator.SaveSettingsAsync(
                     Optional<string>(request.Params, "apiKey"),
                     Optional<string>(request.Params, "searchApiKey"),
+                    Optional<string>(request.Params, "asrApiKey"),
                     Required<string>(request.Params, "asrModel"),
                     Required<string>(request.Params, "chatModel"),
                     Required<string>(request.Params, "workModel"),
+                    Required<string>(request.Params, "modelApiUrl"),
                     Required<uint>(request.Params, "screenTimeoutSeconds"),
                     Required<bool>(request.Params, "autoReconnect"),
                     Required<bool>(request.Params, "webSearchEnabled"));
@@ -125,7 +130,7 @@ internal static class Program
         var approvals = isWork ? await coordinator.Conversations.ListPendingWorkApprovalsAsync(activeId!) : [];
         var toolCalls = isWork ? await coordinator.Conversations.ListWorkToolCallsAsync(activeId!) : [];
         var artifacts = isWork ? await coordinator.Conversations.ListWorkArtifactsAsync(activeId!) : [];
-        return new BootstrapState(conversations, activeId, active, coordinator.Snapshot(), coordinator.PublicSettings(), approvals, toolCalls, artifacts);
+        return new BootstrapState(conversations, activeId, active, coordinator.Snapshot(), coordinator.PublicSettings(), approvals, toolCalls, artifacts, coordinator.BackendInfo());
     }
 
     private static T Required<T>(JsonElement? parameters, string name)

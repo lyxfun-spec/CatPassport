@@ -7,6 +7,7 @@ namespace CatAssistant.Backend.Services;
 public sealed partial class SqliteRepository
 {
     private const string WorkRequestSelect = "SELECT id,source_conversation_id,source_message_id,source_run_id,tool_call_id,title,prompt,context_summary,state,target_conversation_id,error_message,created_utc,updated_utc,anchor_offset FROM work_requests";
+    private const string ConversationSourceSelect = "SELECT id,conversation_id,ordinal,title,url,normalized_url,snippet,site_name,domain,first_tool_call_id,first_operation_id,first_seen_utc,updated_utc,published_time,authority,rerank_score,is_official,weather_kind FROM conversation_sources";
     // A conversation keeps this title and title_source='fallback' until a model-generated title lands, so
     // 'fallback' is the only durable marker for "still needs a title".
     internal const string UntitledTitle = "新对话";
@@ -21,8 +22,11 @@ public sealed partial class SqliteRepository
             Directory.CreateDirectory(directory);
             databasePath = Path.Combine(directory, "cat-assistant.db");
         }
-        _connectionString = new SqliteConnectionStringBuilder { DataSource = databasePath, Pooling = false }.ToString();
+        DatabasePath = Path.GetFullPath(databasePath);
+        _connectionString = new SqliteConnectionStringBuilder { DataSource = DatabasePath, Pooling = false }.ToString();
     }
+
+    public string DatabasePath { get; }
 
     public async Task InitializeAsync()
     {
@@ -171,6 +175,53 @@ public sealed partial class SqliteRepository
                 FOREIGN KEY(conversation_id) REFERENCES conversations_v2(id) ON DELETE CASCADE,
                 FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE SET NULL
             );
+            CREATE TABLE IF NOT EXISTS chat_tool_calls (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                tool_call_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                arguments_json TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('running','completed','failed','cancelled')),
+                query TEXT NULL,
+                query_count INTEGER NOT NULL DEFAULT 0,
+                raw_result_count INTEGER NOT NULL DEFAULT 0,
+                unique_result_count INTEGER NOT NULL DEFAULT 0,
+                result_json TEXT NULL,
+                error_code TEXT NULL,
+                error_message TEXT NULL,
+                elapsed_ms INTEGER NULL,
+                anchor_offset INTEGER NULL,
+                new_source_ids_json TEXT NULL,
+                created_utc TEXT NOT NULL,
+                completed_utc TEXT NULL,
+                UNIQUE(run_id, tool_call_id),
+                FOREIGN KEY(conversation_id) REFERENCES conversations_v2(id) ON DELETE CASCADE,
+                FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS conversation_sources (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                url TEXT NOT NULL,
+                normalized_url TEXT NOT NULL,
+                snippet TEXT NULL,
+                site_name TEXT NULL,
+                domain TEXT NOT NULL,
+                first_tool_call_id TEXT NOT NULL,
+                first_operation_id TEXT NOT NULL,
+                first_seen_utc TEXT NOT NULL,
+                updated_utc TEXT NOT NULL,
+                published_time TEXT NULL,
+                authority REAL NULL,
+                rerank_score REAL NULL,
+                is_official INTEGER NOT NULL DEFAULT 0,
+                weather_kind TEXT NULL,
+                UNIQUE(conversation_id, ordinal),
+                UNIQUE(conversation_id, normalized_url),
+                FOREIGN KEY(conversation_id) REFERENCES conversations_v2(id) ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS context_summaries (
                 id TEXT PRIMARY KEY,
                 conversation_id TEXT NOT NULL,
@@ -232,6 +283,9 @@ public sealed partial class SqliteRepository
             CREATE INDEX IF NOT EXISTS idx_work_tool_calls_run ON work_tool_calls(run_id, ordinal);
             CREATE INDEX IF NOT EXISTS idx_work_approvals_conversation ON work_approvals(conversation_id, state, requested_utc);
             CREATE INDEX IF NOT EXISTS idx_work_artifacts_conversation ON work_artifacts(conversation_id, created_utc);
+            CREATE INDEX IF NOT EXISTS idx_chat_tool_calls_conversation ON chat_tool_calls(conversation_id, created_utc);
+            CREATE INDEX IF NOT EXISTS idx_chat_tool_calls_run ON chat_tool_calls(run_id, created_utc);
+            CREATE INDEX IF NOT EXISTS idx_conversation_sources_conversation ON conversation_sources(conversation_id, ordinal);
             CREATE INDEX IF NOT EXISTS idx_context_summaries_conversation ON context_summaries(conversation_id, version DESC);
             CREATE INDEX IF NOT EXISTS idx_request_diagnostics_conversation ON request_diagnostics(conversation_id, created_utc DESC);
             CREATE INDEX IF NOT EXISTS idx_message_embeddings_conversation ON message_embeddings(conversation_id);
@@ -239,11 +293,14 @@ public sealed partial class SqliteRepository
             INSERT OR IGNORE INTO schema_migrations(version, applied_utc) VALUES(3, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
             INSERT OR IGNORE INTO schema_migrations(version, applied_utc) VALUES(4, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
             INSERT OR IGNORE INTO schema_migrations(version, applied_utc) VALUES(5, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+            INSERT OR IGNORE INTO schema_migrations(version, applied_utc) VALUES(6, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+            INSERT OR IGNORE INTO schema_migrations(version, applied_utc) VALUES(7, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
             """;
         await command.ExecuteNonQueryAsync();
         await transaction.CommitAsync();
         await EnsureConversationPinColumnAsync(db);
         await EnsureWorkRequestColumnsAsync(db);
+        await EnsureChatToolCallColumnsAsync(db);
         await InitializeSearchIndexAsync(db);
         await RecoverInterruptedRunsAsync(db);
     }
@@ -335,11 +392,13 @@ public sealed partial class SqliteRepository
         command.CommandText = "SELECT key, value FROM settings";
         await using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync()) values[reader.GetString(0)] = reader.GetString(1);
+        var hasModelEndpoint = values.TryGetValue("model_api_url", out var modelEndpoint);
         return new AppSettings
         {
             AsrModel = values.GetValueOrDefault("asr_model", "qwen-audio-3.1-asr-flash"),
-            ChatModel = values.GetValueOrDefault("chat_model", "qwen-plus"),
-            WorkModel = values.GetValueOrDefault("work_model", "qwen3.8-max"),
+            ChatModel = hasModelEndpoint ? values.GetValueOrDefault("chat_model", "deepseek-flash") : "deepseek-flash",
+            WorkModel = hasModelEndpoint ? values.GetValueOrDefault("work_model", "deepseek-v4-pro") : "deepseek-v4-pro",
+            ModelApiUrl = hasModelEndpoint ? modelEndpoint! : "https://api.deepseek.com/chat/completions",
             LastBluetoothAddress = ulong.TryParse(values.GetValueOrDefault("last_address"), out var address) ? address : null,
             LastDeviceName = values.GetValueOrDefault("last_name"),
             ScreenTimeoutSeconds = uint.TryParse(values.GetValueOrDefault("screen_timeout"), out var timeout) ? timeout : 60,
@@ -355,6 +414,7 @@ public sealed partial class SqliteRepository
             ["asr_model"] = settings.AsrModel,
             ["chat_model"] = settings.ChatModel,
             ["work_model"] = settings.WorkModel,
+            ["model_api_url"] = settings.ModelApiUrl,
             ["screen_timeout"] = settings.ScreenTimeoutSeconds.ToString(),
             ["auto_reconnect"] = settings.AutoReconnect ? "1" : "0",
             ["web_search"] = settings.WebSearchEnabled ? "1" : "0",
@@ -431,7 +491,9 @@ public sealed partial class SqliteRepository
         var messages = await LoadMessagesAsync(id);
         var citations = await LoadCitationsAsync(messages.Select(message => message.Id).ToArray());
         var workRequests = await ListWorkRequestsForConversationAsync(id);
-        return new ConversationDetail(conversation, messages, citations, activeRunId, workRequests);
+        var chatToolCalls = await ListChatToolCallsAsync(id);
+        var conversationSources = await ListConversationSourcesAsync(id);
+        return new ConversationDetail(conversation, messages, citations, activeRunId, workRequests, chatToolCalls, conversationSources);
     }
 
     public Task<WorkRequestRecord> CreateWorkRequestAsync(
@@ -1015,6 +1077,259 @@ public sealed partial class SqliteRepository
         return result;
     }
 
+    public async Task<ChatToolCallRecord> CreateChatToolCallAsync(
+        string conversationId,
+        string runId,
+        string toolCallId,
+        string toolName,
+        string argumentsJson,
+        string? query,
+        int? anchorOffset)
+    {
+        if (string.IsNullOrWhiteSpace(toolName)) throw new ArgumentException("工具名不能为空。", nameof(toolName));
+        EnsureJson(argumentsJson, nameof(argumentsJson));
+        var now = DateTimeOffset.UtcNow;
+        var record = new ChatToolCallRecord(
+            Guid.NewGuid().ToString("N"), conversationId, runId, toolCallId, toolName, argumentsJson,
+            "running", query, 0, 0, 0, null, null, null, null, now, null, anchorOffset);
+        await using var db = await OpenAsync();
+        var command = db.CreateCommand();
+        command.CommandText = """
+            INSERT INTO chat_tool_calls(
+                id,conversation_id,run_id,tool_call_id,tool_name,arguments_json,state,query,query_count,
+                raw_result_count,unique_result_count,result_json,error_code,error_message,elapsed_ms,anchor_offset,created_utc)
+            VALUES($id,$conversation,$run,$tool,$name,$arguments,'running',$query,0,0,0,NULL,NULL,NULL,NULL,$offset,$created)
+            """;
+        command.Parameters.AddWithValue("$id", record.Id);
+        command.Parameters.AddWithValue("$conversation", conversationId);
+        command.Parameters.AddWithValue("$run", runId);
+        command.Parameters.AddWithValue("$tool", toolCallId);
+        command.Parameters.AddWithValue("$name", toolName);
+        command.Parameters.AddWithValue("$arguments", argumentsJson);
+        command.Parameters.AddWithValue("$query", (object?)query ?? DBNull.Value);
+        command.Parameters.AddWithValue("$offset", (object?)anchorOffset ?? DBNull.Value);
+        command.Parameters.AddWithValue("$created", Format(now));
+        await command.ExecuteNonQueryAsync();
+        return record;
+    }
+
+    public async Task UpdateChatToolCallAsync(
+        string id,
+        string state,
+        string? query = null,
+        int queryCount = 0,
+        int rawResultCount = 0,
+        int uniqueResultCount = 0,
+        string? resultJson = null,
+        string? errorCode = null,
+        string? errorMessage = null,
+        long? elapsedMilliseconds = null,
+        IReadOnlyList<string>? newSourceIds = null)
+    {
+        if (state is not ("running" or "completed" or "failed" or "cancelled"))
+            throw new ArgumentOutOfRangeException(nameof(state));
+        if (resultJson is not null) EnsureJson(resultJson, nameof(resultJson));
+        var now = Format(DateTimeOffset.UtcNow);
+        await using var db = await OpenAsync();
+        var command = db.CreateCommand();
+        command.CommandText = """
+            UPDATE chat_tool_calls
+            SET state=$state,
+                query=COALESCE($query,query),
+                query_count=$queryCount,
+                raw_result_count=$rawCount,
+                unique_result_count=$uniqueCount,
+                result_json=$result,
+                error_code=$errorCode,
+                error_message=$errorMessage,
+                elapsed_ms=$elapsed,
+                new_source_ids_json=$newSources,
+                completed_utc=CASE WHEN $state IN ('completed','failed','cancelled') THEN $now ELSE completed_utc END
+            WHERE id=$id
+            """;
+        command.Parameters.AddWithValue("$state", state);
+        command.Parameters.AddWithValue("$query", (object?)query ?? DBNull.Value);
+        command.Parameters.AddWithValue("$queryCount", queryCount);
+        command.Parameters.AddWithValue("$rawCount", rawResultCount);
+        command.Parameters.AddWithValue("$uniqueCount", uniqueResultCount);
+        command.Parameters.AddWithValue("$result", (object?)resultJson ?? DBNull.Value);
+        command.Parameters.AddWithValue("$errorCode", (object?)errorCode ?? DBNull.Value);
+        command.Parameters.AddWithValue("$errorMessage", (object?)errorMessage ?? DBNull.Value);
+        command.Parameters.AddWithValue("$elapsed", (object?)elapsedMilliseconds ?? DBNull.Value);
+        command.Parameters.AddWithValue("$newSources", newSourceIds is null ? DBNull.Value : JsonSerializer.Serialize(newSourceIds));
+        command.Parameters.AddWithValue("$now", now);
+        command.Parameters.AddWithValue("$id", id);
+        if (await command.ExecuteNonQueryAsync() == 0) throw new KeyNotFoundException("Chat 工具调用不存在。");
+    }
+
+    public async Task CancelRunningChatToolCallsAsync(string runId, string state, string message)
+    {
+        if (state is not ("failed" or "cancelled")) throw new ArgumentOutOfRangeException(nameof(state));
+        await using var db = await OpenAsync();
+        var command = db.CreateCommand();
+        command.CommandText = """
+            UPDATE chat_tool_calls
+            SET state=$state,error_code='interrupted',error_message=$message,completed_utc=$now
+            WHERE run_id=$run AND state='running'
+            """;
+        command.Parameters.AddWithValue("$state", state);
+        command.Parameters.AddWithValue("$message", message);
+        command.Parameters.AddWithValue("$now", Format(DateTimeOffset.UtcNow));
+        command.Parameters.AddWithValue("$run", runId);
+        await command.ExecuteNonQueryAsync();
+    }
+
+    public async Task<IReadOnlyList<ChatToolCallRecord>> ListChatToolCallsAsync(string conversationId)
+    {
+        var result = new List<ChatToolCallRecord>();
+        await using var db = await OpenAsync();
+        var command = db.CreateCommand();
+        command.CommandText = """
+            SELECT id,conversation_id,run_id,tool_call_id,tool_name,arguments_json,state,query,query_count,
+                   raw_result_count,unique_result_count,result_json,error_code,error_message,elapsed_ms,
+                   created_utc,completed_utc,anchor_offset,new_source_ids_json
+            FROM chat_tool_calls WHERE conversation_id=$conversation ORDER BY created_utc,id
+            """;
+        command.Parameters.AddWithValue("$conversation", conversationId);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+            result.Add(new ChatToolCallRecord(
+                reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4),
+                reader.GetString(5), reader.GetString(6), reader.IsDBNull(7) ? null : reader.GetString(7),
+                reader.GetInt32(8), reader.GetInt32(9), reader.GetInt32(10), reader.IsDBNull(11) ? null : reader.GetString(11),
+                reader.IsDBNull(12) ? null : reader.GetString(12), reader.IsDBNull(13) ? null : reader.GetString(13),
+                reader.IsDBNull(14) ? null : reader.GetInt64(14), Parse(reader.GetString(15)),
+                reader.IsDBNull(16) ? null : Parse(reader.GetString(16)), reader.IsDBNull(17) ? null : reader.GetInt32(17),
+                reader.IsDBNull(18) ? null : JsonSerializer.Deserialize<string[]>(reader.GetString(18))));
+        return result;
+    }
+
+    public async Task<ConversationSourceRecord> AddConversationSourceAsync(
+        ConversationSourceRecord source,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(source.NormalizedUrl)) throw new ArgumentException("规范化 URL 不能为空。", nameof(source));
+        await using var db = await OpenAsync();
+        await using var transaction = await db.BeginTransactionAsync(cancellationToken);
+        var existing = await GetConversationSourceByUrlAsync(db, (SqliteTransaction)transaction, source.ConversationId, source.NormalizedUrl);
+        if (existing is not null)
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return existing;
+        }
+
+        var ordinalCommand = db.CreateCommand();
+        ordinalCommand.Transaction = (SqliteTransaction)transaction;
+        ordinalCommand.CommandText = "SELECT COALESCE(MAX(ordinal),0)+1 FROM conversation_sources WHERE conversation_id=$conversation";
+        ordinalCommand.Parameters.AddWithValue("$conversation", source.ConversationId);
+        var ordinal = Math.Max(source.Ordinal, Convert.ToInt32(await ordinalCommand.ExecuteScalarAsync(cancellationToken)));
+
+        var insert = db.CreateCommand();
+        insert.Transaction = (SqliteTransaction)transaction;
+        insert.CommandText = """
+            INSERT INTO conversation_sources(
+                id,conversation_id,ordinal,title,url,normalized_url,snippet,site_name,domain,
+                first_tool_call_id,first_operation_id,first_seen_utc,updated_utc,
+                published_time,authority,rerank_score,is_official,weather_kind)
+            VALUES($id,$conversation,$ordinal,$title,$url,$normalized,$snippet,$site,$domain,
+                $toolCall,$operation,$firstSeen,$updated,$published,$authority,$rerank,$official,$weather)
+            """;
+        insert.Parameters.AddWithValue("$id", source.Id);
+        insert.Parameters.AddWithValue("$conversation", source.ConversationId);
+        insert.Parameters.AddWithValue("$ordinal", ordinal);
+        insert.Parameters.AddWithValue("$title", source.Title);
+        insert.Parameters.AddWithValue("$url", source.Url);
+        insert.Parameters.AddWithValue("$normalized", source.NormalizedUrl);
+        insert.Parameters.AddWithValue("$snippet", (object?)source.Snippet ?? DBNull.Value);
+        insert.Parameters.AddWithValue("$site", (object?)source.SiteName ?? DBNull.Value);
+        insert.Parameters.AddWithValue("$domain", source.Domain);
+        insert.Parameters.AddWithValue("$toolCall", source.FirstToolCallId);
+        insert.Parameters.AddWithValue("$operation", source.FirstOperationId);
+        insert.Parameters.AddWithValue("$firstSeen", Format(source.FirstSeenAt));
+        insert.Parameters.AddWithValue("$updated", Format(source.UpdatedAt));
+        insert.Parameters.AddWithValue("$published", (object?)source.PublishedTime ?? DBNull.Value);
+        insert.Parameters.AddWithValue("$authority", (object?)source.Authority ?? DBNull.Value);
+        insert.Parameters.AddWithValue("$rerank", (object?)source.RerankScore ?? DBNull.Value);
+        insert.Parameters.AddWithValue("$official", source.IsOfficial ? 1 : 0);
+        insert.Parameters.AddWithValue("$weather", (object?)source.WeatherKind ?? DBNull.Value);
+        await insert.ExecuteNonQueryAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return source with { Ordinal = ordinal };
+    }
+
+    public async Task UpdateConversationSourceDetailsAsync(ConversationSourceRecord source, CancellationToken cancellationToken = default)
+    {
+        await using var db = await OpenAsync();
+        var command = db.CreateCommand();
+        command.CommandText = """
+            UPDATE conversation_sources
+            SET title=$title,snippet=$snippet,site_name=$site,domain=$domain,updated_utc=$updated,
+                published_time=$published,authority=$authority,rerank_score=$rerank,
+                is_official=$official,weather_kind=$weather
+            WHERE id=$id AND conversation_id=$conversation
+            """;
+        command.Parameters.AddWithValue("$title", source.Title);
+        command.Parameters.AddWithValue("$snippet", (object?)source.Snippet ?? DBNull.Value);
+        command.Parameters.AddWithValue("$site", (object?)source.SiteName ?? DBNull.Value);
+        command.Parameters.AddWithValue("$domain", source.Domain);
+        command.Parameters.AddWithValue("$updated", Format(source.UpdatedAt));
+        command.Parameters.AddWithValue("$published", (object?)source.PublishedTime ?? DBNull.Value);
+        command.Parameters.AddWithValue("$authority", (object?)source.Authority ?? DBNull.Value);
+        command.Parameters.AddWithValue("$rerank", (object?)source.RerankScore ?? DBNull.Value);
+        command.Parameters.AddWithValue("$official", source.IsOfficial ? 1 : 0);
+        command.Parameters.AddWithValue("$weather", (object?)source.WeatherKind ?? DBNull.Value);
+        command.Parameters.AddWithValue("$id", source.Id);
+        command.Parameters.AddWithValue("$conversation", source.ConversationId);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<ConversationSourceRecord>> ListConversationSourcesAsync(string conversationId)
+    {
+        var result = new List<ConversationSourceRecord>();
+        await using var db = await OpenAsync();
+        var command = db.CreateCommand();
+        command.CommandText = ConversationSourceSelect + " WHERE conversation_id=$conversation ORDER BY ordinal";
+        command.Parameters.AddWithValue("$conversation", conversationId);
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync()) result.Add(ReadConversationSource(reader));
+        return result;
+    }
+
+    public async Task<int> GetMaxCitationOrdinalAsync(string conversationId)
+    {
+        await using var db = await OpenAsync();
+        var command = db.CreateCommand();
+        command.CommandText = """
+            SELECT COALESCE(MAX(c.ordinal),0)
+            FROM citations c JOIN messages_v2 m ON m.id=c.message_id
+            WHERE m.conversation_id=$conversation
+            """;
+        command.Parameters.AddWithValue("$conversation", conversationId);
+        return Convert.ToInt32(await command.ExecuteScalarAsync() ?? 0);
+    }
+
+    private static async Task<ConversationSourceRecord?> GetConversationSourceByUrlAsync(
+        SqliteConnection db,
+        SqliteTransaction transaction,
+        string conversationId,
+        string normalizedUrl)
+    {
+        var command = db.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = ConversationSourceSelect + " WHERE conversation_id=$conversation AND normalized_url=$url";
+        command.Parameters.AddWithValue("$conversation", conversationId);
+        command.Parameters.AddWithValue("$url", normalizedUrl);
+        await using var reader = await command.ExecuteReaderAsync();
+        return await reader.ReadAsync() ? ReadConversationSource(reader) : null;
+    }
+
+    private static ConversationSourceRecord ReadConversationSource(SqliteDataReader reader) => new(
+        reader.GetString(0), reader.GetString(1), reader.GetInt32(2), reader.GetString(3), reader.GetString(4),
+        reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6), reader.IsDBNull(7) ? null : reader.GetString(7),
+        reader.GetString(8), reader.GetString(9), reader.GetString(10), Parse(reader.GetString(11)), Parse(reader.GetString(12)),
+        reader.IsDBNull(13) ? null : reader.GetString(13), reader.IsDBNull(14) ? null : reader.GetDouble(14),
+        reader.IsDBNull(15) ? null : reader.GetDouble(15), reader.GetInt64(16) != 0, reader.IsDBNull(17) ? null : reader.GetString(17));
+
     public async Task<WorkApprovalRecord> CreateWorkApprovalAsync(
         string conversationId,
         string runId,
@@ -1190,6 +1505,17 @@ public sealed partial class SqliteRepository
             FROM missing m LEFT JOIN base b ON b.conversation_id=m.conversation_id;
             """;
         await unfinishedTools.ExecuteNonQueryAsync();
+        var unfinishedChatTools = db.CreateCommand();
+        unfinishedChatTools.Transaction = (SqliteTransaction)transaction;
+        unfinishedChatTools.CommandText = """
+            UPDATE chat_tool_calls
+            SET state='failed',
+                error_code=COALESCE(error_code,'interrupted'),
+                error_message=COALESCE(error_message,'应用退出时工具仍未完成。'),
+                completed_utc=COALESCE(completed_utc,strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            WHERE state='running';
+            """;
+        await unfinishedChatTools.ExecuteNonQueryAsync();
         var runs = db.CreateCommand();
         runs.Transaction = (SqliteTransaction)transaction;
         runs.CommandText = """
@@ -1330,5 +1656,21 @@ public sealed partial class SqliteRepository
         var index = db.CreateCommand();
         index.CommandText = "CREATE UNIQUE INDEX IF NOT EXISTS idx_work_requests_tool_call ON work_requests(source_conversation_id,tool_call_id) WHERE tool_call_id<>''";
         await index.ExecuteNonQueryAsync();
+    }
+
+    private static async Task EnsureChatToolCallColumnsAsync(SqliteConnection db)
+    {
+        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var inspect = db.CreateCommand();
+        inspect.CommandText = "PRAGMA table_info(chat_tool_calls)";
+        await using (var reader = await inspect.ExecuteReaderAsync())
+            while (await reader.ReadAsync()) columns.Add(reader.GetString(1));
+        if (columns.Count == 0) return;
+        if (!columns.Contains("new_source_ids_json"))
+        {
+            var alter = db.CreateCommand();
+            alter.CommandText = "ALTER TABLE chat_tool_calls ADD COLUMN new_source_ids_json TEXT NULL";
+            await alter.ExecuteNonQueryAsync();
+        }
     }
 }

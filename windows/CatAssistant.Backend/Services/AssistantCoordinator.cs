@@ -18,11 +18,13 @@ namespace CatAssistant.Backend.Services;
 public sealed class AssistantCoordinator : IAsyncDisposable
 {
     private readonly BleGateway _ble;
-    private readonly DashScopeClient _cloud;
+    private readonly ITranscriptionProvider _transcription;
+    private readonly IDisposable? _modelLifetime;
     private readonly SqliteRepository _repository;
     private readonly SecureApiKeyStore _secureStore;
-    private readonly SecureApiKeyStore _searchStore = new("iqs.key");
-    private readonly IqsWebSearchClient _webSearch = new();
+    private readonly SecureApiKeyStore _asrStore = new("dashscope-asr.key");
+    private readonly SecureApiKeyStore _searchStore = new("deepseek-search.key");
+    private readonly DeepSeekWebSearchClient _webSearch = new();
     private readonly ConversationService _conversations;
     private readonly WindowsSandboxController _workSandbox;
     private readonly PeriodicTimer _reconnectTimer = new(TimeSpan.FromSeconds(1));
@@ -60,9 +62,17 @@ public sealed class AssistantCoordinator : IAsyncDisposable
     private static readonly TimeSpan PingInterval = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan PongTimeout = TimeSpan.FromSeconds(6);
 
-    public AssistantCoordinator(BleGateway ble, DashScopeClient cloud, SqliteRepository repository, SecureApiKeyStore secureStore, AppSettings settings)
+    public AssistantCoordinator(
+        BleGateway ble,
+        ITranscriptionProvider transcription,
+        IChatProvider chatProvider,
+        IWorkModelProvider workProvider,
+        SqliteRepository repository,
+        SecureApiKeyStore secureStore,
+        AppSettings settings,
+        IDisposable? modelLifetime = null)
     {
-        _ble = ble; _cloud = cloud; _repository = repository; _secureStore = secureStore; Settings = settings;
+        _ble = ble; _transcription = transcription; _modelLifetime = modelLifetime; _repository = repository; _secureStore = secureStore; Settings = settings;
         var workPython = WorkRuntimeLocator.FindPython();
         if (workPython is not null) Environment.SetEnvironmentVariable("CATASSISTANT_PYTHON", workPython);
         _workSandbox = new WindowsSandboxController(workPython is null ? null : [Path.GetDirectoryName(workPython)!]);
@@ -75,14 +85,15 @@ public sealed class AssistantCoordinator : IAsyncDisposable
         workTools.Register(new WriteFileTool(_workSandbox, workApprovals));
         workTools.Register(new ListDirectoryTool(_workSandbox, workApprovals));
         workTools.Register(new DeliverFilesTool(repository));
-        workTools.Register(new WebSearchTool(_webSearch, () => _searchStore.Load() ?? "", () => Settings.WebSearchEnabled));
+        workTools.Register(new WebSearchTool(_webSearch, LoadSearchApiKey, () => Settings.WebSearchEnabled));
         var skills = new BuiltInSkillCatalog();
         workTools.Register(new ListSkillsTool(skills));
         workTools.Register(new LoadSkillTool(skills));
         var workAgent = new WorkAgentService(
-            repository, workspaces, cloud, workTools, () => Settings, () => _secureStore.Load() ?? "", _lifetime.Token, approvals: workApprovals);
+            repository, workspaces, workProvider, workTools, () => Settings, () => _secureStore.Load() ?? "", _lifetime.Token, approvals: workApprovals);
+        var chatWebSearch = new WebSearchToolExecutor(_webSearch, LoadSearchApiKey, () => Settings.WebSearchEnabled);
         _conversations = new ConversationService(
-            repository, cloud, () => Settings, () => _secureStore.Load() ?? "", _lifetime.Token, workspaces, workAgent, workApprovals);
+            repository, chatProvider, () => Settings, () => _secureStore.Load() ?? "", _lifetime.Token, workspaces, workAgent, workApprovals, chatWebSearch);
         _turns = new InteractionTurns(_lifetime.Token);
         _ble.DeviceFound += OnDeviceFound; _ble.ControlMessageReceived += OnControlMessage; _ble.AudioFrameReceived += OnAudioFrame;
         _ble.LinkStateChanged += OnLinkStateChanged;
@@ -96,6 +107,10 @@ public sealed class AssistantCoordinator : IAsyncDisposable
 
     public AppSettings Settings { get; }
     public ConversationService Conversations => _conversations;
+    public BackendInfo BackendInfo() => new(
+        typeof(AssistantCoordinator).Assembly.GetName().Version?.ToString() ?? "unknown",
+        Environment.ProcessId,
+        _repository.DatabasePath);
     public event EventHandler<DeviceState>? StateChanged;
 
     public async Task StartAsync()
@@ -125,11 +140,13 @@ public sealed class AssistantCoordinator : IAsyncDisposable
         Settings.AsrModel,
         Settings.ChatModel,
         Settings.WorkModel,
+        Settings.ModelApiUrl,
         Settings.ScreenTimeoutSeconds,
         Settings.AutoReconnect,
         Settings.WebSearchEnabled,
         !string.IsNullOrWhiteSpace(_secureStore.Load()),
-        !string.IsNullOrWhiteSpace(_searchStore.Load()));
+        !string.IsNullOrWhiteSpace(_searchStore.Load()) || UsesDeepSeekEndpoint(),
+        !string.IsNullOrWhiteSpace(_asrStore.Load()) || UsesDefaultDashScopeEndpoint());
 
     public async Task ScanAsync()
     {
@@ -246,19 +263,42 @@ public sealed class AssistantCoordinator : IAsyncDisposable
         catch (Exception error) { ShowError(error); }
     }
 
-    public async Task SaveSettingsAsync(string? apiKey, string? searchApiKey, string asrModel, string chatModel, string workModel, uint screenTimeout, bool autoReconnect, bool webSearchEnabled)
+    public async Task SaveSettingsAsync(string? apiKey, string? searchApiKey, string? asrApiKey, string asrModel, string chatModel, string workModel, string modelApiUrl, uint screenTimeout, bool autoReconnect, bool webSearchEnabled)
     {
         try
         {
             if (!string.IsNullOrWhiteSpace(apiKey)) _secureStore.Save(apiKey);
             if (!string.IsNullOrWhiteSpace(searchApiKey)) _searchStore.Save(searchApiKey);
-            Settings.AsrModel = asrModel.Trim(); Settings.ChatModel = chatModel.Trim(); Settings.WorkModel = workModel.Trim(); Settings.ScreenTimeoutSeconds = screenTimeout; Settings.AutoReconnect = autoReconnect; Settings.WebSearchEnabled = webSearchEnabled;
+            if (!string.IsNullOrWhiteSpace(asrApiKey)) _asrStore.Save(asrApiKey);
+            Settings.AsrModel = asrModel.Trim(); Settings.ChatModel = chatModel.Trim(); Settings.WorkModel = workModel.Trim(); Settings.ModelApiUrl = ValidateHttpEndpoint(modelApiUrl); Settings.ScreenTimeoutSeconds = screenTimeout; Settings.AutoReconnect = autoReconnect; Settings.WebSearchEnabled = webSearchEnabled;
             await _repository.SaveSettingsAsync(Settings);
             if (IsLinkReady()) { await SendUInt32Async(MessageType.ScreenTimeout, screenTimeout); await SendAppStatusAsync(); }
             SetDetail("设置已保存");
         }
         catch (Exception error) { ShowError(error); throw; }
     }
+
+    private static string ValidateHttpEndpoint(string value)
+    {
+        value = value.Trim();
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || uri.Scheme is not ("https" or "http"))
+            throw new ArgumentException("模型 API 地址必须是完整的 HTTP(S) URL。");
+        return uri.AbsoluteUri;
+    }
+
+    private bool UsesDefaultDashScopeEndpoint() =>
+        Uri.TryCreate(Settings.ModelApiUrl, UriKind.Absolute, out var uri) &&
+        string.Equals(uri.Host, "dashscope.aliyuncs.com", StringComparison.OrdinalIgnoreCase) &&
+        !string.IsNullOrWhiteSpace(_secureStore.Load());
+
+    private string LoadAsrApiKey() => _asrStore.Load() ?? (UsesDefaultDashScopeEndpoint() ? _secureStore.Load() ?? "" : "");
+
+    private bool UsesDeepSeekEndpoint() =>
+        Uri.TryCreate(Settings.ModelApiUrl, UriKind.Absolute, out var uri) &&
+        string.Equals(uri.Host, "api.deepseek.com", StringComparison.OrdinalIgnoreCase) &&
+        !string.IsNullOrWhiteSpace(_secureStore.Load());
+
+    private string LoadSearchApiKey() => _searchStore.Load() ?? (UsesDeepSeekEndpoint() ? _secureStore.Load() ?? "" : "");
 
     public async Task SendDesktopMessageAsync(string text)
     {
@@ -563,7 +603,7 @@ public sealed class AssistantCoordinator : IAsyncDisposable
         }
         await _ble.SendAsync(MessageType.AsrStarted, IdPayload(id), token);
         SetStatus("正在识别", "正在向 DashScope 提交音频…");
-        _transcript = DisplayText.Filter(await _cloud.TranscribeAsync(recording!.ToWav(), Settings.AsrModel, _secureStore.Load() ?? "", token));
+        _transcript = DisplayText.Filter(await _transcription.TranscribeAsync(recording!.ToWav(), Settings.AsrModel, LoadAsrApiKey(), token));
         if (string.IsNullOrWhiteSpace(_transcript)) throw new CloudException(CloudError.NoSpeech, "语音识别结果不包含卡片可显示的文字。");
         await _ble.SendAsync(MessageType.AsrResult, CatProtocol.Utf8(_transcript, CatProtocol.TranscriptMaxBytes), token);
         SetStatus("等待卡片确认", _transcript);
@@ -780,6 +820,6 @@ public sealed class AssistantCoordinator : IAsyncDisposable
         _lifetime.Cancel(); _controlMessages.Writer.TryComplete(); _turns.CancelAll(); _reconnectTimer.Dispose();
         try { await Task.WhenAll(_controlPump, _linkHealthPump); } catch (OperationCanceledException) { }
         await _conversations.DisposeAsync();
-        await _ble.DisposeAsync(); _cloud.Dispose(); _workSandbox.Dispose(); _webSearch.Dispose(); _turns.Dispose(); _lifetime.Dispose(); _audioArrived.Dispose(); _connectionGate.Dispose();
+        await _ble.DisposeAsync(); _modelLifetime?.Dispose(); _workSandbox.Dispose(); _webSearch.Dispose(); _turns.Dispose(); _lifetime.Dispose(); _audioArrived.Dispose(); _connectionGate.Dispose();
     }
 }
