@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { BootstrapState, ConversationMessage, WorkRequest } from './shared';
+import type { BootstrapState, ChatToolCall, ConversationMessage, ConversationSource, WorkRequest } from './shared';
 import { deviceDiscoveryMessage, initialState, reduceBackendEvent } from './state';
 
 const bootstrap: BootstrapState = {
@@ -12,7 +12,7 @@ const bootstrap: BootstrapState = {
     activeRunId: 'run-1'
   },
   device: { status: '未连接', detail: '', isConnected: false, hasPairedDevice: false, maxPduSize: 0, devices: [], followDesktop: true },
-  settings: { asrModel: 'asr', chatModel: 'chat', workModel: 'work', screenTimeoutSeconds: 60, autoReconnect: true, webSearchEnabled: true, hasApiKey: true, hasSearchApiKey: true }
+  settings: { asrModel: 'asr', chatModel: 'chat', workModel: 'work', modelApiUrl: 'https://example.com/v1/chat/completions', screenTimeoutSeconds: 60, autoReconnect: true, webSearchEnabled: true, hasApiKey: true, hasSearchApiKey: true, hasAsrApiKey: true }
 };
 
 describe('conversation stream state', () => {
@@ -116,6 +116,68 @@ describe('conversation stream state', () => {
 
     const ignored = reduceBackendEvent(state, { event: 'run.failed', data: { type: 'run.failed', conversationId: 'chat-1', runId: 'run-1' } });
     expect(ignored.runError).toBeUndefined();
+  });
+});
+
+describe('Chat tool status events', () => {
+  const tool: ChatToolCall = {
+    id: 'tool-1', conversationId: 'chat-1', runId: 'run-1', toolCallId: 'call-1', toolName: 'web_search',
+    argumentsJson: '{"query":"杭州天气"}', state: 'running', query: '杭州天气', queryCount: 1,
+    rawResultCount: 0, uniqueResultCount: 0, createdAt: '2026-01-01T00:00:02Z', anchorOffset: 0
+  };
+
+  it('tracks tool status separately from assistant content', () => {
+    let state = reduceBackendEvent(initialState, { event: 'ui.bootstrap', data: bootstrap });
+    state = reduceBackendEvent(state, { event: 'chat.tool.started', data: { type: 'chat.tool.started', conversationId: 'chat-1', chatTool: tool } });
+
+    expect(state.bootstrap?.activeConversation?.messages[0].content).toBe('');
+    expect(state.bootstrap?.activeConversation?.chatToolCalls).toEqual([tool]);
+
+    state = reduceBackendEvent(state, {
+      event: 'chat.tool.completed',
+      data: { type: 'chat.tool.completed', conversationId: 'chat-1', chatTool: { ...tool, state: 'completed', uniqueResultCount: 1 } }
+    });
+
+    expect(state.bootstrap?.activeConversation?.chatToolCalls?.[0].state).toBe('completed');
+    expect(state.bootstrap?.activeConversation?.messages[0].content).toBe('');
+  });
+
+  it('keeps a completed tool record from a stale snapshot', () => {
+    let state = reduceBackendEvent(initialState, { event: 'ui.bootstrap', data: bootstrap });
+    state = reduceBackendEvent(state, { event: 'chat.tool.started', data: { type: 'chat.tool.started', conversationId: 'chat-1', chatTool: tool } });
+    state = reduceBackendEvent(state, {
+      event: 'chat.tool.completed',
+      data: { type: 'chat.tool.completed', conversationId: 'chat-1', chatTool: { ...tool, state: 'completed' } }
+    });
+
+    state = reduceBackendEvent(state, { event: 'ui.bootstrap', data: bootstrap });
+
+    expect(state.bootstrap?.activeConversation?.chatToolCalls?.[0].state).toBe('completed');
+  });
+
+  it('adds newly discovered sources to the conversation registry', () => {
+    const source: ConversationSource = {
+      id: 'source-1', conversationId: 'chat-1', ordinal: 1, title: '资料一', url: 'https://example.com/1',
+      normalizedUrl: 'https://example.com/1', snippet: '摘要', domain: 'example.com',
+      firstToolCallId: 'call-1', firstOperationId: 'tool-1',
+      firstSeenAt: '2026-01-01T00:00:02Z', updatedAt: '2026-01-01T00:00:02Z', isOfficial: false
+    };
+    let state = reduceBackendEvent(initialState, { event: 'ui.bootstrap', data: bootstrap });
+    state = reduceBackendEvent(state, {
+      event: 'chat.tool.completed',
+      data: {
+        type: 'chat.tool.completed', conversationId: 'chat-1',
+        chatTool: { ...tool, state: 'completed', newSourceIds: [source.id] },
+        chatSources: [source]
+      }
+    });
+
+    expect(state.bootstrap?.activeConversation?.conversationSources).toEqual([source]);
+    expect(state.bootstrap?.activeConversation?.chatToolCalls?.[0].newSourceIds).toEqual([source.id]);
+    expect(state.bootstrap?.activeConversation?.messages[0].content).toBe('');
+
+    state = reduceBackendEvent(state, { event: 'ui.bootstrap', data: bootstrap });
+    expect(state.bootstrap?.activeConversation?.conversationSources).toEqual([source]);
   });
 });
 

@@ -10,7 +10,7 @@ import type { BackendEvent, BackendInfo, BootstrapState, CatDevice, ChatToolCall
 import { citationOrdinal, hidePartialCitationMarker, remarkCitations, stripCitationMarkers } from './citations';
 import { hideSplash, showSplashError } from './boot-splash';
 import { deviceDiscoveryMessage, initialState, reduceBackendEvent } from './state';
-import { assistantCopyTargets, buildWorkTimeline, clampTextareaHeight, draftGreetingForHour, greetingForHour, groupWorkRequests, isAtScrollEnd, scrollThumbMetrics, shouldSubmitComposer, splitAtAnchors, summarizeWorkToolGroup, toolDisplayName, workTimelineCopyActions, type AnchoredWorkRequest } from './ui-behavior';
+import { assistantCopyTargets, buildChatReplyParts, buildWorkTimeline, chatToolStatusLabel, clampTextareaHeight, draftGreetingForHour, greetingForHour, groupChatToolCalls, groupWorkRequests, isAtScrollEnd, planCitationJump, scrollThumbMetrics, searchOperationEmptyText, searchOperationStatus, shouldSubmitComposer, sourcesForOperation, summarizeWorkToolGroup, toolDisplayName, workTimelineCopyActions, type AnchoredChatTool, type AnchoredWorkRequest } from './ui-behavior';
 import { textMenuEntries, type TextMenuAction, type TextMenuScene } from './text-context-menu';
 import { AnchorRect, AnchoredSurface, rectOf, ScrollArea } from './ui-primitives';
 import brandUrl from './assets/brand.png';
@@ -316,7 +316,7 @@ function App() {
             ? <DraftConversation mode={draftMode} onMode={setDraftMode} value={draft} onChange={setDraft} onSend={() => void send()} onAttach={() => void attachFiles()} hasApiKey={bootstrap.settings.hasApiKey} sending={isBusy('send')} focusSignal={composerFocusSignal} onOpenSettings={() => setRequestedView('settings')}/>
             : <>
               <ConversationHeader conversation={active.conversation} origin={active.conversation.originConversationId ? bootstrap.conversations.find(item => item.id === active.conversation.originConversationId) : undefined} onOpenConversation={id => void selectConversation(id)} onAction={(kind, anchor) => setActionSurface({ kind, anchor, conversation: active.conversation })}/>
-              <MessageList detail={active} runError={state.runError} busy={busy} tools={active.conversation.mode === 'work' ? bootstrap.workToolCalls ?? noWorkToolCalls : noWorkToolCalls} artifacts={active.conversation.mode === 'work' ? bootstrap.workArtifacts ?? noWorkArtifacts : noWorkArtifacts} onReveal={artifactId => void window.catAssistant.revealArtifact(active.conversation.id, artifactId)} onResolveWorkRequest={(request, approved) => void resolveWorkRequest(request, approved)} onOpenConversation={id => void selectConversation(id)}/>
+              <MessageList detail={active} runError={state.runError} busy={busy} tools={active.conversation.mode === 'work' ? bootstrap.workToolCalls ?? noWorkToolCalls : noWorkToolCalls} artifacts={active.conversation.mode === 'work' ? bootstrap.workArtifacts ?? noWorkArtifacts : noWorkArtifacts} onReveal={artifactId => void window.catAssistant.revealArtifact(active.conversation.id, artifactId)} onResolveWorkRequest={(request, approved) => void resolveWorkRequest(request, approved)} onOpenConversation={id => void selectConversation(id)} onNotice={showNotice}/>
               {active.conversation.mode === 'work' && (bootstrap.pendingApprovals?.length ?? 0) > 0
                 ? <ApprovalComposer approvals={bootstrap.pendingApprovals!} busy={busy} onResolve={(approval, approved) => void resolveApproval(approval, approved)} onStop={active.activeRunId ? () => void stopWork() : undefined}/>
                 : <Composer value={draft} onChange={setDraft} onSend={() => void send()} onAttach={active.conversation.mode === 'work' ? () => void attachFiles() : undefined} onStop={active.conversation.mode === 'work' && active.activeRunId ? () => void stopWork() : undefined} hasApiKey={bootstrap.settings.hasApiKey} sending={isBusy('send')} focusSignal={composerFocusSignal} onOpenSettings={() => setRequestedView('settings')}/>}
@@ -533,6 +533,26 @@ const noCitations: Citation[] = [];
 const noWorkToolCalls: WorkToolCall[] = [];
 const noWorkArtifacts: WorkArtifact[] = [];
 const noAnchoredRequests: AnchoredWorkRequest[] = [];
+const noAnchoredChatTools: AnchoredChatTool[] = [];
+const noConversationSources: ConversationSource[] = [];
+
+interface SearchSourceTarget { operationId: string; sourceId: string; nonce: number }
+interface ChatSourceContextValue {
+  sourcesByOrdinal: Map<number, ConversationSource>;
+  openOperations: ReadonlySet<string>;
+  setOperationOpen(id: string, open: boolean): void;
+  target?: SearchSourceTarget;
+  sourcesFor(tool: ChatToolCall): ConversationSource[];
+  onCite(ordinal: number): void;
+}
+
+const ChatSourceContext = createContext<ChatSourceContextValue>({
+  sourcesByOrdinal: new Map(),
+  openOperations: new Set(),
+  setOperationOpen: () => {},
+  sourcesFor: () => [],
+  onCite: () => {}
+});
 
 const WorkRequestCardContext = createContext<{
   busy: Set<string>;
@@ -540,10 +560,11 @@ const WorkRequestCardContext = createContext<{
   openConversation(id: string): void;
 }>({ busy: new Set(), resolve: () => {}, openConversation: () => {} });
 
-function MessageList({ detail, runError, busy, tools, artifacts, onReveal, onResolveWorkRequest, onOpenConversation }: {
+function MessageList({ detail, runError, busy, tools, artifacts, onReveal, onResolveWorkRequest, onOpenConversation, onNotice }: {
   detail: ConversationDetail; runError?: string; busy: Set<string>;
   tools: WorkToolCall[]; artifacts: WorkArtifact[]; onReveal(id: string): void;
   onResolveWorkRequest(request: WorkRequest, approved: boolean): void; onOpenConversation(id: string): void;
+  onNotice(text: string, tone?: 'default' | 'danger'): void;
 }) {
   useLanguage();
   const scroller = useRef<HTMLDivElement>(null);
@@ -557,6 +578,39 @@ function MessageList({ detail, runError, busy, tools, artifacts, onReveal, onRes
     return grouped;
   }, [detail.citations]);
   const requestsByMessage = useMemo(() => groupWorkRequests(detail.messages, detail.workRequests ?? [], detail.conversation.id), [detail.conversation.id, detail.messages, detail.workRequests]);
+  const chatToolsByMessage = useMemo(() => groupChatToolCalls(detail.messages, detail.chatToolCalls ?? []), [detail.messages, detail.chatToolCalls]);
+  const anchoredOperations = useMemo(() => [...chatToolsByMessage.values()].flatMap(items => items.map(item => item.tool)), [chatToolsByMessage]);
+  const chatToolCount = detail.chatToolCalls?.length ?? 0;
+  const conversationSources = detail.conversationSources ?? noConversationSources;
+  const sourcesByOrdinal = useMemo(() => new Map(conversationSources.map(source => [source.ordinal, source])), [conversationSources]);
+  const sourcesByOperation = useMemo(() => {
+    const grouped = new Map<string, ConversationSource[]>();
+    for (const tool of detail.chatToolCalls ?? [])
+      if (tool.toolName === 'web_search') grouped.set(tool.id, sourcesForOperation(conversationSources, tool));
+    return grouped;
+  }, [conversationSources, detail.chatToolCalls]);
+  const [openOperations, setOpenOperations] = useState<Set<string>>(() => new Set());
+  const [sourceTarget, setSourceTarget] = useState<SearchSourceTarget>();
+  useEffect(() => { setOpenOperations(new Set()); setSourceTarget(undefined); }, [detail.conversation.id]);
+  const setOperationOpen = useCallback((id: string, open: boolean) => setOpenOperations(current => {
+    const next = new Set(current);
+    if (open) next.add(id); else next.delete(id);
+    return next;
+  }), []);
+  const handleCitation = useCallback((ordinal: number) => {
+    const jump = planCitationJump(conversationSources, anchoredOperations, ordinal);
+    if (!jump) { onNotice(t("未找到对应搜索资料")); return; }
+    setOpenOperations(current => new Set(current).add(jump.operationId));
+    setSourceTarget({ operationId: jump.operationId, sourceId: jump.sourceId, nonce: Date.now() });
+  }, [conversationSources, anchoredOperations, onNotice]);
+  const sourceContext = useMemo<ChatSourceContextValue>(() => ({
+    sourcesByOrdinal,
+    openOperations,
+    setOperationOpen,
+    target: sourceTarget,
+    sourcesFor: tool => sourcesByOperation.get(tool.id) ?? [],
+    onCite: handleCitation
+  }), [sourcesByOrdinal, openOperations, setOperationOpen, sourceTarget, sourcesByOperation, handleCitation]);
   const timeline = useMemo(() => detail.conversation.mode === 'work' ? buildWorkTimeline(detail.messages, tools, artifacts) : undefined, [detail.conversation.mode, detail.messages, tools, artifacts]);
   const copyTargets = useMemo(() => assistantCopyTargets(detail.messages, detail.activeRunId), [detail.messages, detail.activeRunId]);
   const timelineCopyActions = useMemo(() => timeline ? workTimelineCopyActions(timeline, detail.messages, detail.activeRunId) : new Map<string, string>(), [timeline, detail.messages, detail.activeRunId]);
@@ -584,14 +638,14 @@ function MessageList({ detail, runError, busy, tools, artifacts, onReveal, onRes
     if (element && isAtScrollEnd(element.scrollHeight, element.scrollTop, element.clientHeight)) followLatest();
   };
   useEffect(() => { pinned.current = true; lastIntent.current = 'up'; cancelPendingScroll(); scrollToLatest(); }, [detail.conversation.id]);
-  useEffect(() => { if (pinned.current) scrollToLatest(); }, [detail.messages.length, tools.length, artifacts.length, lastContent, showRunning, runError]);
+  useEffect(() => { if (pinned.current) scrollToLatest(); }, [detail.messages.length, tools.length, artifacts.length, chatToolCount, lastContent, showRunning, runError]);
   const onScroll = () => {
     const element = scroller.current;
     if (!element || pinned.current || lastIntent.current !== 'down') return;
     if (isAtScrollEnd(element.scrollHeight, element.scrollTop, element.clientHeight)) followLatest();
   };
-  const renderMessage = (message: ConversationMessage, showCopy = true) => <React.Fragment key={message.id}><MessageItem message={message} citations={citationsByMessage.get(message.id) ?? noCitations} copyContent={showCopy ? copyTargets.get(message.id) : undefined} workRequests={requestsByMessage.anchored.get(message.id) ?? noAnchoredRequests}/>{(requestsByMessage.trailing.get(message.id) ?? []).map(request => <WorkRequestCard key={request.id} request={request}/>)}</React.Fragment>;
-  return <WorkRequestCardContext.Provider value={{ busy, resolve: onResolveWorkRequest, openConversation: onOpenConversation }}><ScrollArea ref={scroller} className="message-scroll" viewportClassName={`messages ${detail.messages.length ? '' : 'empty-chat'}`} onScroll={onScroll} onScrollIntent={direction => direction === 'up' ? releaseScroll() : requestFollow()}>
+  const renderMessage = (message: ConversationMessage, showCopy = true) => <React.Fragment key={message.id}><MessageItem message={message} citations={citationsByMessage.get(message.id) ?? noCitations} chatTools={chatToolsByMessage.get(message.id) ?? noAnchoredChatTools} copyContent={showCopy ? copyTargets.get(message.id) : undefined} workRequests={requestsByMessage.anchored.get(message.id) ?? noAnchoredRequests}/>{(requestsByMessage.trailing.get(message.id) ?? []).map(request => <WorkRequestCard key={request.id} request={request}/>)}</React.Fragment>;
+  return <ChatSourceContext.Provider value={sourceContext}><WorkRequestCardContext.Provider value={{ busy, resolve: onResolveWorkRequest, openConversation: onOpenConversation }}><ScrollArea ref={scroller} className="message-scroll" viewportClassName={`messages ${detail.messages.length ? '' : 'empty-chat'}`} onScroll={onScroll} onScrollIntent={direction => direction === 'up' ? releaseScroll() : requestFollow()}>
     {detail.messages.length === 0
       ? <div className="empty-greeting"><BrandMark large/><h2>{greetingForHour(new Date().getHours())}</h2></div>
       : <div className="message-column">
@@ -603,7 +657,7 @@ function MessageList({ detail, runError, busy, tools, artifacts, onReveal, onRes
         {showRunning && <ThinkingBubble/>}
         {!timeline && runError && <div className="run-error" role="alert"><Icon name="info"/><span>{runError}</span></div>}
       </div>}
-  </ScrollArea></WorkRequestCardContext.Provider>;
+  </ScrollArea></WorkRequestCardContext.Provider></ChatSourceContext.Provider>;
 }
 
 function WorkRequestCard({ request }: { request: WorkRequest }) {
@@ -645,41 +699,192 @@ function TimelineCopyAction({ content }: { content: string }) {
   return <div className="timeline-actions"><button onClick={() => void copy()} aria-label={t("复制本轮回复")}><Icon name={copyState === 'copied' ? 'check' : 'copy'} size={15}/>{copyState === 'copied' ? t("已复制") : copyState === 'failed' ? t("复制失败") : t("复制")}</button></div>;
 }
 
-const MessageItem = memo(function MessageItem({ message, citations, copyContent, workRequests }: {
-  message: ConversationMessage; citations: ConversationDetail['citations']; copyContent?: string; workRequests?: AnchoredWorkRequest[];
+const MessageItem = memo(function MessageItem({ message, citations, chatTools, copyContent, workRequests }: {
+  message: ConversationMessage; citations: ConversationDetail['citations']; chatTools: AnchoredChatTool[];
+  copyContent?: string; workRequests?: AnchoredWorkRequest[];
 }) {
   useLanguage();
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(copyTimer.current), []);
-  const [sourcesOpen, setSourcesOpen] = useState(false);
-  const [sourceTarget, setSourceTarget] = useState<SourceTarget>();
-  const sourcesOpenRef = useRef(sourcesOpen);
-  sourcesOpenRef.current = sourcesOpen;
-  const revealSource = useCallback((ordinal: number) => {
-    setSourceTarget({ ordinal, nonce: Date.now(), delay: sourcesOpenRef.current ? 0 : 300 });
-    setSourcesOpen(true);
-  }, []);
   const copy = async () => { clearTimeout(copyTimer.current); try { await navigator.clipboard.writeText(stripCitationMarkers(copyContent ?? message.content)); setCopyState('copied'); } catch { setCopyState('failed'); } copyTimer.current = setTimeout(() => setCopyState('idle'), 1650); };
   const cards = workRequests ?? noAnchoredRequests;
-  if (message.role === 'assistant' && message.status === 'streaming' && !message.content && cards.length === 0) return null;
+  if (message.role === 'assistant' && message.status === 'streaming' && !message.content && cards.length === 0 && chatTools.length === 0) return null;
   const safeCitations = citations.filter(citation => safeHttpUrl(citation.url));
   const showStatus = message.status === 'interrupted' || message.status === 'failed';
-  return <article className={`message ${message.role} ${message.status}`}><div className="message-body">{message.role === 'assistant' ? <AssistantContent content={message.content} streaming={message.status === 'streaming'} citations={safeCitations} onCite={revealSource} cards={cards}/> : <p>{message.content}</p>}</div>{safeCitations.length > 0 && <SourceList messageId={message.id} citations={safeCitations} open={sourcesOpen} onToggle={() => setSourcesOpen(value => !value)} target={sourceTarget}/>}{message.role === 'assistant' && message.content && (copyContent || showStatus) && <div className="message-actions">{message.status === 'interrupted' && <span>{t("已中断")}</span>}{message.status === 'failed' && <span className="failed-label">{t("生成失败")}</span>}{copyContent && <button onClick={() => void copy()} aria-label={t("复制本轮回复")}><Icon name={copyState === 'copied' ? 'check' : 'copy'} size={15}/>{copyState === 'copied' ? t("已复制") : copyState === 'failed' ? t("复制失败") : t("复制")}</button>}</div>}</article>;
+  return <article className={`message ${message.role} ${message.status}`}><div className="message-body">{message.role === 'assistant' ? <AssistantContent content={message.content} streaming={message.status === 'streaming'} citations={safeCitations} cards={cards} chatTools={chatTools}/> : <p>{message.content}</p>}</div>{message.role === 'assistant' && message.content && (copyContent || showStatus) && <div className="message-actions">{message.status === 'interrupted' && <span>{t("已中断")}</span>}{message.status === 'failed' && <span className="failed-label">{t("生成失败")}</span>}{copyContent && <button onClick={() => void copy()} aria-label={t("复制本轮回复")}><Icon name={copyState === 'copied' ? 'check' : 'copy'} size={15}/>{copyState === 'copied' ? t("已复制") : copyState === 'failed' ? t("复制失败") : t("复制")}</button>}</div>}</article>;
 });
 
-// Cards are split into the reply at the exact offsets where the model called `request_work`,
-// so text emitted before the call stays above the card and text emitted after stays below it.
-function AssistantContent({ content, streaming, citations, onCite, cards }: {
-  content: string; streaming: boolean; citations: Citation[]; onCite(ordinal: number): void; cards: AnchoredWorkRequest[];
+// Cards and search operations are split into the reply at the exact offsets where the model acted,
+// so text emitted before a tool call stays above it and text emitted after stays below it.
+function AssistantContent({ content, streaming, citations, cards, chatTools }: {
+  content: string; streaming: boolean; citations: Citation[];
+  cards: AnchoredWorkRequest[]; chatTools: AnchoredChatTool[];
 }) {
   useLanguage();
-  const segments = useMemo(() => splitAtAnchors(content, cards.map(card => card.offset)), [content, cards]);
-  if (cards.length === 0) return <AssistantMarkdown content={content} streaming={streaming} citations={citations} onCite={onCite}/>;
-  return <>{segments.map((segment, index) => <React.Fragment key={index}>
-    {segment.trim().length > 0 && <AssistantMarkdown content={segment} streaming={streaming} citations={citations} onCite={onCite}/>}
-    {cards[index] && <WorkRequestCard key={cards[index].request.id} request={cards[index].request}/>}
-  </React.Fragment>)}</>;
+  const parts = useMemo(() => buildChatReplyParts(content, cards, chatTools), [content, cards, chatTools]);
+  if (cards.length === 0 && chatTools.length === 0)
+    return <AssistantMarkdown content={content} streaming={streaming} citations={citations}/>;
+  return <>{parts.map((part, index) => part.kind === 'text'
+    ? <AssistantMarkdown key={`text-${index}`} content={part.text} streaming={streaming} citations={citations}/>
+    : <React.Fragment key={`anchor-${index}`}>
+      {part.anchor.tools.filter(tool => tool.toolName === 'web_search').map(tool => <SearchOperation key={tool.id} tool={tool}/>)}
+      {part.anchor.tools.some(tool => tool.toolName !== 'web_search') && <ChatToolStatus tools={part.anchor.tools.filter(tool => tool.toolName !== 'web_search')}/>}
+      {part.anchor.cards.map(request => <WorkRequestCard key={request.id} request={request}/>)}
+    </React.Fragment>)}</>;
+}
+
+function ChatToolStatus({ tools }: { tools: ChatToolCall[] }) {
+  useLanguage();
+  return <div className="chat-tool-status" role="status" aria-live="polite">
+    {tools.map(tool => {
+      const status = chatToolStatusLabel(tool);
+      return <div className={`chat-tool-row tone-${status.tone}`} key={tool.id}>
+        {status.tone === 'running'
+          ? <span className="chat-tool-spinner" aria-hidden="true"/>
+          : <Icon name={status.tone === 'success' ? 'check' : status.tone === 'failed' ? 'info' : 'search'} size={14}/>}
+        <span>{status.label}</span>
+      </div>;
+    })}
+  </div>;
+}
+
+interface SearchSourceMenuState { source: ConversationSource; anchor: AnchorRect; trigger: HTMLButtonElement; keyboard: boolean }
+
+function SearchOperation({ tool }: { tool: ChatToolCall }) {
+  useLanguage();
+  const { openOperations, setOperationOpen, target, sourcesFor } = useContext(ChatSourceContext);
+  const sources = sourcesFor(tool);
+  const open = openOperations.has(tool.id);
+  const status = searchOperationStatus(tool);
+  const stateClass = status.tone === 'success' ? 'completed' : status.tone === 'failed' ? 'failed' : status.tone === 'muted' ? 'cancelled' : 'running';
+  const activeTarget = target?.operationId === tool.id ? target : undefined;
+  const details = useRef<HTMLDetailsElement>(null);
+  const items = useRef(new Map<string, HTMLButtonElement>());
+  const [highlighted, setHighlighted] = useState<string>();
+  const [menu, setMenu] = useState<SearchSourceMenuState>();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuCloseTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const menuOpenFrames = useRef<{ first?: number; second?: number }>({});
+  const cancelMenuOpen = () => {
+    if (menuOpenFrames.current.first !== undefined) cancelAnimationFrame(menuOpenFrames.current.first);
+    if (menuOpenFrames.current.second !== undefined) cancelAnimationFrame(menuOpenFrames.current.second);
+    menuOpenFrames.current = {};
+  };
+  const closeMenu = (restoreFocus = false) => {
+    cancelMenuOpen();
+    clearTimeout(menuCloseTimer.current);
+    setMenuOpen(false);
+    menuCloseTimer.current = setTimeout(() => setMenu(undefined), 260);
+    if (restoreFocus) menu?.trigger.focus({ preventScroll: true });
+  };
+  const chooseSource = (event: React.MouseEvent<HTMLButtonElement>, source: ConversationSource) => {
+    if (menuOpen && menu?.source.id === source.id) { closeMenu(); return; }
+    cancelMenuOpen();
+    clearTimeout(menuCloseTimer.current);
+    setMenuOpen(false);
+    setMenu({ source, anchor: rectOf(event.currentTarget), trigger: event.currentTarget, keyboard: event.detail === 0 });
+    menuOpenFrames.current.first = requestAnimationFrame(() => {
+      menuOpenFrames.current.second = requestAnimationFrame(() => {
+        menuOpenFrames.current = {};
+        setMenuOpen(true);
+      });
+    });
+  };
+  const openSource = () => {
+    if (!menu) return;
+    window.open(menu.source.url, '_blank', 'noopener,noreferrer');
+    closeMenu(true);
+  };
+  useEffect(() => () => { cancelMenuOpen(); clearTimeout(menuCloseTimer.current); }, []);
+  useEffect(() => {
+    if (details.current && details.current.open !== open) details.current.open = open;
+  }, [open]);
+  useEffect(() => {
+    if (!open || !activeTarget) return;
+    setHighlighted(activeTarget.sourceId);
+    const reveal = setTimeout(() => {
+      const item = items.current.get(activeTarget.sourceId);
+      item?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      item?.focus({ preventScroll: true });
+    }, 40);
+    const fade = setTimeout(() => setHighlighted(undefined), 1600);
+    return () => { clearTimeout(reveal); clearTimeout(fade); setHighlighted(undefined); };
+  }, [open, activeTarget?.sourceId, activeTarget?.nonce]);
+  return <details ref={details}
+    className={`timeline-tool-group search-operation ${tool.state === 'running' ? 'is-running' : ''}`}
+    onToggle={event => { const next = event.currentTarget.open; setOperationOpen(tool.id, next); if (!next) closeMenu(); }}>
+    <summary>
+      <span className="timeline-disclosure"><Icon name="chevron" size={14}/></span>
+      <strong>{t("搜索资料")}</strong>
+      {status.tone !== 'success' && <em className={`tool-state state-${stateClass}`}>{status.label}</em>}
+    </summary>
+    <div className="search-operation-body">
+      {status.tone === 'failed' && tool.errorMessage && <p className="search-operation-error">{tool.errorMessage}</p>}
+      {sources.length > 0
+        ? <div className="sources-list">{sources.map(source => <button type="button" key={source.id}
+          ref={element => { if (element) items.current.set(source.id, element); else items.current.delete(source.id); }}
+          className={`source-item ${highlighted === source.id ? 'is-targeted' : ''} ${menuOpen && menu?.source.id === source.id ? 'is-active' : ''}`}
+          onClick={event => chooseSource(event, source)} title={source.url}
+          aria-haspopup="menu" aria-expanded={menuOpen && menu?.source.id === source.id}
+          aria-label={t("查看资料 {0}：{1}", source.ordinal, source.title)}>
+          <b>{source.ordinal}</b><span>{source.title}</span>{source.domain && <small>{source.domain}</small>}
+        </button>)}</div>
+        : <p className="search-operation-empty">{searchOperationEmptyText(tool)}</p>}
+    </div>
+    {menu && <SearchSourceMenu state={menu} open={menuOpen} onClose={closeMenu} onOpen={openSource}/>}
+  </details>;
+}
+
+function SearchSourceMenu({ state, open, onClose, onOpen }: {
+  state: SearchSourceMenuState; open: boolean; onClose(restoreFocus?: boolean): void; onOpen(): void;
+}) {
+  useLanguage();
+  const menu = useRef<HTMLDivElement>(null);
+  const firstItem = useRef<HTMLButtonElement>(null);
+  const host = state.source.domain;
+  useLayoutEffect(() => {
+    const element = menu.current;
+    if (!element) return;
+    const { anchor } = state;
+    const gap = 6;
+    const width = element.offsetWidth;
+    const height = element.offsetHeight;
+    const left = Math.max(8, Math.min(anchor.left, window.innerWidth - width - 8));
+    const below = anchor.top + anchor.height + gap;
+    const above = below + height > window.innerHeight - 8 && anchor.top - gap - height >= 8;
+    const top = above ? anchor.top - gap - height : Math.min(below, window.innerHeight - height - 8);
+    const originX = anchor.left + Math.min(anchor.width / 2, 20) - left;
+    const originY = above ? height + gap + anchor.height / 2 : -(gap + anchor.height / 2);
+    element.style.left = `${left}px`;
+    element.style.top = `${top}px`;
+    element.style.transformOrigin = `${originX}px ${originY}px`;
+  }, [state]);
+  useEffect(() => {
+    if (!open) return;
+    if (state.keyboard) requestAnimationFrame(() => firstItem.current?.focus({ preventScroll: true }));
+    const onPointer = (event: PointerEvent) => {
+      const node = event.target as Node;
+      if (!menu.current?.contains(node) && !state.trigger.contains(node)) onClose();
+    };
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(true); };
+    const onViewportChange = () => onClose();
+    document.addEventListener('pointerdown', onPointer);
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('scroll', onViewportChange, true);
+    window.addEventListener('resize', onViewportChange);
+    return () => {
+      document.removeEventListener('pointerdown', onPointer);
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('scroll', onViewportChange, true);
+      window.removeEventListener('resize', onViewportChange);
+    };
+  }, [open, state]);
+  return createPortal(<div ref={menu} className={`popover-menu source-menu ${open ? 'is-open' : 'is-closing'}`} role="menu"
+    aria-label={t("来源 {0}：{1}", state.source.ordinal, state.source.title)} aria-hidden={!open} inert={!open}>
+    <div className="source-menu-info" aria-hidden="true"><b>{state.source.title}</b><small>{host}</small></div>
+    <button ref={firstItem} role="menuitem" onClick={onOpen}><Icon name="external"/>{t("打开网页")}</button>
+  </div>, document.body);
 }
 
 const markdownPlugins = [remarkGfm, remarkCitations];
@@ -734,8 +939,9 @@ function CodeBlock({ language, children }: { language?: string; children: React.
   </div>;
 }
 
-function AssistantMarkdown({ content, streaming, citations, onCite }: { content: string; streaming: boolean; citations: Citation[]; onCite(ordinal: number): void }) {
+function AssistantMarkdown({ content, streaming, citations }: { content: string; streaming: boolean; citations: Citation[] }) {
   useLanguage();
+  const { sourcesByOrdinal, onCite } = useContext(ChatSourceContext);
   const components = useMemo<Components>(() => {
     const byOrdinal = new Map(citations.map(citation => [citation.ordinal, citation]));
     return {
@@ -748,131 +954,20 @@ function AssistantMarkdown({ content, streaming, citations, onCite }: { content:
       a: ({ href, children }) => {
         const ordinal = citationOrdinal(href);
         if (ordinal === undefined) return safeHttpUrl(href) ? <a href={href} target="_blank" rel="noreferrer">{children}</a> : <span>{children}</span>;
+        const source = sourcesByOrdinal.get(ordinal);
         const citation = byOrdinal.get(ordinal);
-        if (citation) return <span className="citation-ref"><button type="button" onClick={() => onCite(ordinal)} title={citation.sourceName ? `${citation.title} · ${citation.sourceName}` : citation.title} aria-label={t("查看来源 {0}：{1}", ordinal, citation.title)}>{ordinal}</button></span>;
-        return streaming ? <span className="citation-ref pending" aria-hidden="true"><span>{ordinal}</span></span> : null;
+        const title = source?.title ?? citation?.title;
+        const site = source?.domain ?? source?.siteName ?? citation?.sourceName;
+        if (!title && streaming) return <span className="citation-ref pending" aria-hidden="true"><span>{ordinal}</span></span>;
+        return <span className={`citation-ref ${title ? '' : 'is-missing'}`}>
+          <button type="button" onClick={() => onCite(ordinal)}
+            title={title ? site ? `${title} · ${site}` : title : undefined}
+            aria-label={title ? t("查看资料 {0}：{1}", ordinal, title) : t("查看引用 {0}", ordinal)}>{ordinal}</button>
+        </span>;
       }
     };
-  }, [citations, streaming, onCite]);
+  }, [citations, streaming, sourcesByOrdinal, onCite]);
   return <ReactMarkdown remarkPlugins={markdownPlugins} components={components}>{streaming ? hidePartialCitationMarker(content) : content}</ReactMarkdown>;
-}
-
-interface SourceTarget { ordinal: number; nonce: number; delay: number }
-interface SourceMenuState { citation: Citation; anchor: AnchorRect; trigger: HTMLButtonElement; keyboard: boolean }
-
-function SourceList({ messageId, citations, open, onToggle, target }: { messageId: string; citations: Citation[]; open: boolean; onToggle(): void; target?: SourceTarget }) {
-  useLanguage();
-  const items = useRef(new Map<number, HTMLButtonElement>());
-  const [highlighted, setHighlighted] = useState<number>();
-  const [menu, setMenu] = useState<SourceMenuState>();
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuCloseTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const menuOpenFrames = useRef<{ first?: number; second?: number }>({});
-  const contentId = `sources-${messageId}`;
-  const cancelMenuOpen = () => {
-    if (menuOpenFrames.current.first !== undefined) cancelAnimationFrame(menuOpenFrames.current.first);
-    if (menuOpenFrames.current.second !== undefined) cancelAnimationFrame(menuOpenFrames.current.second);
-    menuOpenFrames.current = {};
-  };
-  const closeMenu = (restoreFocus = false) => {
-    cancelMenuOpen();
-    clearTimeout(menuCloseTimer.current);
-    setMenuOpen(false);
-    menuCloseTimer.current = setTimeout(() => setMenu(undefined), 260);
-    if (restoreFocus) menu?.trigger.focus({ preventScroll: true });
-  };
-  const chooseSource = (event: React.MouseEvent<HTMLButtonElement>, citation: Citation) => {
-    if (menuOpen && menu?.citation.id === citation.id) { closeMenu(); return; }
-    cancelMenuOpen();
-    clearTimeout(menuCloseTimer.current);
-    setMenuOpen(false);
-    setMenu({ citation, anchor: rectOf(event.currentTarget), trigger: event.currentTarget, keyboard: event.detail === 0 });
-    menuOpenFrames.current.first = requestAnimationFrame(() => {
-      menuOpenFrames.current.second = requestAnimationFrame(() => {
-        menuOpenFrames.current = {};
-        setMenuOpen(true);
-      });
-    });
-  };
-  const openSource = () => {
-    if (!menu) return;
-    window.open(menu.citation.url, '_blank', 'noopener,noreferrer');
-    closeMenu(true);
-  };
-  useEffect(() => () => { cancelMenuOpen(); clearTimeout(menuCloseTimer.current); }, []);
-  useEffect(() => {
-    if (!target) return;
-    setHighlighted(target.ordinal);
-    const reveal = setTimeout(() => {
-      const item = items.current.get(target.ordinal);
-      item?.focus({ preventScroll: true });
-      item?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    }, target.delay);
-    const fade = setTimeout(() => setHighlighted(undefined), target.delay + 1400);
-    return () => { clearTimeout(reveal); clearTimeout(fade); };
-  }, [target]);
-  return <section className={`sources ${open ? 'is-open' : ''}`}>
-    <button type="button" className="sources-toggle" onClick={onToggle} aria-expanded={open} aria-controls={contentId}>
-      <span>{t("参考来源")}</span><Icon name="chevron" size={13}/>
-    </button>
-    <div className="sources-disclosure" id={contentId} inert={!open}><div><div className="sources-list">{citations.map(citation => <button type="button" key={citation.id}
-      ref={element => { if (element) items.current.set(citation.ordinal, element); else items.current.delete(citation.ordinal); }}
-      className={`source-item ${highlighted === citation.ordinal ? 'is-targeted' : ''} ${menuOpen && menu?.citation.id === citation.id ? 'is-active' : ''}`}
-      onClick={event => chooseSource(event, citation)} title={citation.url} aria-haspopup="menu" aria-expanded={menuOpen && menu?.citation.id === citation.id}>
-      <b>{citation.ordinal}</b><span>{citation.title}</span>{citation.sourceName && <small>{citation.sourceName}</small>}
-    </button>)}</div></div></div>
-    {menu && <SourceMenu state={menu} open={menuOpen} onClose={closeMenu} onOpen={openSource}/>}
-  </section>;
-}
-
-function SourceMenu({ state, open, onClose, onOpen }: { state: SourceMenuState; open: boolean; onClose(restoreFocus?: boolean): void; onOpen(): void }) {
-  useLanguage();
-  const menu = useRef<HTMLDivElement>(null);
-  const firstItem = useRef<HTMLButtonElement>(null);
-  const host = new URL(state.citation.url).hostname;
-  useLayoutEffect(() => {
-    const element = menu.current;
-    if (!element) return;
-    const { anchor } = state;
-    const gap = 6;
-    const width = element.offsetWidth;
-    const height = element.offsetHeight;
-    const left = Math.max(8, Math.min(anchor.left, window.innerWidth - width - 8));
-    const below = anchor.top + anchor.height + gap;
-    const above = below + height > window.innerHeight - 8 && anchor.top - gap - height >= 8;
-    const top = above ? anchor.top - gap - height : Math.min(below, window.innerHeight - height - 8);
-    const originX = anchor.left + Math.min(anchor.width / 2, 20) - left;
-    const originY = above ? height + gap + anchor.height / 2 : -(gap + anchor.height / 2);
-    element.style.left = `${left}px`;
-    element.style.top = `${top}px`;
-    element.style.transformOrigin = `${originX}px ${originY}px`;
-  }, [state]);
-  useEffect(() => {
-    if (!open) return;
-    if (state.keyboard) requestAnimationFrame(() => firstItem.current?.focus({ preventScroll: true }));
-    const onPointer = (event: PointerEvent) => {
-      const node = event.target as Node;
-      if (!menu.current?.contains(node) && !state.trigger.contains(node)) onClose();
-    };
-    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(true); };
-    const onViewportChange = () => onClose();
-    document.addEventListener('pointerdown', onPointer);
-    document.addEventListener('keydown', onKey);
-    document.addEventListener('scroll', onViewportChange, true);
-    window.addEventListener('resize', onViewportChange);
-    return () => {
-      document.removeEventListener('pointerdown', onPointer);
-      document.removeEventListener('keydown', onKey);
-      document.removeEventListener('scroll', onViewportChange, true);
-      window.removeEventListener('resize', onViewportChange);
-    };
-  }, [open, state]);
-  return createPortal(<div ref={menu} className={`popover-menu source-menu ${open ? 'is-open' : 'is-closing'}`} role="menu"
-    aria-label={t("来源 {0}：{1}", state.citation.ordinal, state.citation.title)} aria-hidden={!open} inert={!open}>
-    <div className="source-menu-info" aria-hidden="true"><b>{state.citation.title}</b><small>{state.citation.sourceName ? `${state.citation.sourceName} · ${host}` : host}</small></div>
-    <button ref={firstItem} role="menuitem" onClick={onOpen}><Icon name="external"/>{t("打开网页")}</button>
-    <button role="menuitem" onClick={() => onClose(true)}><Icon name="close"/>{t("取消")}</button>
-  </div>, document.body);
 }
 
 function Composer({ value, onChange, onSend, onAttach, onStop, hasApiKey, sending, disabled = false, focusSignal, placeholder = t("输入消息"), onOpenSettings }: { value: string; onChange(value: string): void; onSend(): void; onAttach?: () => void; onStop?: () => void; hasApiKey: boolean; sending: boolean; disabled?: boolean; focusSignal: number; placeholder?: string; onOpenSettings(): void }) {

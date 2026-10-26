@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { ConversationMessage, WorkArtifact, WorkRequest, WorkToolCall } from './shared';
-import { assistantCopyTargets, buildWorkTimeline, clampTextareaHeight, draftGreetingForHour, greetingForHour, groupWorkRequests, isAtScrollEnd, scrollThumbMetrics, shouldSubmitComposer, splitAtAnchors, summarizeWorkToolGroup, workTimelineCopyActions } from './ui-behavior';
+import type { ChatToolCall, ConversationMessage, ConversationSource, WorkArtifact, WorkRequest, WorkToolCall } from './shared';
+import { assistantCopyTargets, buildChatReplyParts, buildWorkTimeline, chatToolStatusLabel, clampTextareaHeight, draftGreetingForHour, greetingForHour, groupChatToolCalls, groupWorkRequests, isAtScrollEnd, planCitationJump, scrollThumbMetrics, searchOperationEmptyText, searchOperationStatus, shouldSubmitComposer, sourcesForOperation, splitAtAnchors, summarizeWorkToolGroup, workTimelineCopyActions } from './ui-behavior';
 
 describe('composer keyboard behavior', () => {
   it('submits on plain Enter', () => {
@@ -184,6 +184,95 @@ describe('inline proposal card anchors', () => {
     );
     expect(groups.anchored.size).toBe(0);
     expect(groups.trailing.size).toBe(0);
+  });
+});
+
+describe('Chat tool status layout', () => {
+  const message: ConversationMessage = {
+    id: 'assistant-1', conversationId: 'chat-1', role: 'assistant', source: 'runtime', status: 'complete',
+    sequence: 2, content: '我来搜索一下。后续回答文字。', createdAt: '2026-01-01T00:00:01Z', runId: 'run-1'
+  };
+  const tool = (state: ChatToolCall['state'], anchorOffset = 7): ChatToolCall => ({
+    id: `tool-${state}`, conversationId: 'chat-1', runId: 'run-1', toolCallId: `call-${state}`,
+    toolName: 'web_search', argumentsJson: '{"query":"天气"}', state, query: '天气', queryCount: 1,
+    rawResultCount: 2, uniqueResultCount: 1, createdAt: '2026-01-01T00:00:02Z', anchorOffset
+  });
+
+  it('keeps text before and after a tool call in separate blocks', () => {
+    const byMessage = groupChatToolCalls([message], [tool('completed')]);
+    const parts = buildChatReplyParts(message.content, [], byMessage.get(message.id)!);
+
+    expect(parts.map(part => part.kind === 'text' ? part.text : '[status]')).toEqual([
+      '我来搜索一下。', '[status]', '后续回答文字。'
+    ]);
+    expect(parts.some(part => part.kind === 'text' && part.text.includes('正在搜索资料'))).toBe(false);
+  });
+
+  it('never writes the UI status into the copy target', () => {
+    const copy = assistantCopyTargets([message], undefined).get(message.id);
+
+    expect(copy).toBe('我来搜索一下。后续回答文字。');
+    expect(copy).not.toContain('正在搜索资料');
+    expect(copy).not.toContain('已搜索资料');
+  });
+
+  it('labels running, completed and failed states', () => {
+    expect(chatToolStatusLabel(tool('running'))).toEqual({ label: '正在搜索资料…', tone: 'running' });
+    expect(chatToolStatusLabel(tool('completed'))).toEqual({ label: '已搜索资料', tone: 'success' });
+    expect(chatToolStatusLabel(tool('failed'))).toEqual({ label: '搜索失败', tone: 'failed' });
+    expect(chatToolStatusLabel(tool('cancelled'))).toEqual({ label: '已取消搜索', tone: 'muted' });
+  });
+
+  it('shows a status block even when the tool produced no reply text', () => {
+    const empty = { ...message, content: '' };
+    const byMessage = groupChatToolCalls([empty], [tool('running', 0)]);
+    const parts = buildChatReplyParts(empty.content, [], byMessage.get(empty.id)!);
+
+    expect(parts).toHaveLength(1);
+    expect(parts[0].kind).toBe('anchor');
+  });
+});
+
+describe('search operation and citation navigation', () => {
+  const operation = (id: string, toolCallId: string, state: ChatToolCall['state'] = 'completed'): ChatToolCall => ({
+    id, conversationId: 'chat-1', runId: `run-${id}`, toolCallId, toolName: 'web_search',
+    argumentsJson: '{}', query: '杭州天气', state, queryCount: 1, rawResultCount: 2, uniqueResultCount: 1,
+    createdAt: '2026-01-01T00:00:00Z', newSourceIds: id === 'op-old' ? ['source-1'] : []
+  });
+  const source = (id: string, ordinal: number, operationId: string, toolCallId: string): ConversationSource => ({
+    id, conversationId: 'chat-1', ordinal, title: `资料 ${ordinal}`, url: `https://example.com/${ordinal}`,
+    normalizedUrl: `https://example.com/${ordinal}`, snippet: '摘要', domain: 'example.com',
+    firstToolCallId: toolCallId, firstOperationId: operationId,
+    firstSeenAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', isOfficial: false
+  });
+
+  it('shows only newly discovered sources for a search operation', () => {
+    const sources = [source('source-1', 1, 'op-old', 'call-old'), source('source-2', 2, 'op-new', 'call-new')];
+
+    expect(sourcesForOperation(sources, operation('op-old', 'call-old')).map(item => item.ordinal)).toEqual([1]);
+    expect(sourcesForOperation(sources, operation('op-new', 'call-new')).map(item => item.ordinal)).toEqual([2]);
+  });
+
+  it('jumps a citation from an earlier turn to its first search operation', () => {
+    const operations = [operation('op-old', 'call-old'), operation('op-new', 'call-new')];
+    const sources = [source('source-1', 1, 'op-old', 'call-old'), source('source-2', 2, 'op-new', 'call-new')];
+
+    expect(planCitationJump(sources, operations, 1)).toEqual({
+      operationId: 'op-old', sourceId: 'source-1', ordinal: 1,
+      expand: true, scroll: true, focus: true, highlight: true
+    });
+  });
+
+  it('returns no jump plan when the source cannot be resolved', () => {
+    expect(planCitationJump([], [operation('op-old', 'call-old')], 9)).toBeUndefined();
+  });
+
+  it('labels searching, success and failure, and explains duplicate-only searches', () => {
+    expect(searchOperationStatus(operation('op-running', 'call', 'running'))).toEqual({ label: '搜索中…', tone: 'running' });
+    expect(searchOperationStatus(operation('op-done', 'call', 'completed'))).toEqual({ label: '已搜索', tone: 'success' });
+    expect(searchOperationStatus(operation('op-failed', 'call', 'failed'))).toEqual({ label: '搜索失败', tone: 'failed' });
+    expect(searchOperationEmptyText(operation('op-done', 'call', 'completed'))).toBe('未发现新增资料');
+    expect(searchOperationEmptyText({ ...operation('op-failed', 'call', 'failed'), errorMessage: '服务不可用' })).toBe('服务不可用');
   });
 });
 

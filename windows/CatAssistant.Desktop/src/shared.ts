@@ -59,12 +59,57 @@ export interface Citation {
   sourceName?: string;
 }
 
+export interface ChatToolCall {
+  id: string;
+  conversationId: string;
+  runId: string;
+  toolCallId: string;
+  toolName: string;
+  argumentsJson: string;
+  state: 'running' | 'completed' | 'failed' | 'cancelled';
+  query?: string;
+  queryCount: number;
+  rawResultCount: number;
+  uniqueResultCount: number;
+  resultJson?: string;
+  errorCode?: string;
+  errorMessage?: string;
+  elapsedMilliseconds?: number;
+  createdAt: string;
+  completedAt?: string;
+  anchorOffset?: number;
+  newSourceIds?: string[];
+}
+
+export interface ConversationSource {
+  id: string;
+  conversationId: string;
+  ordinal: number;
+  title: string;
+  url: string;
+  normalizedUrl: string;
+  snippet?: string;
+  siteName?: string;
+  domain: string;
+  firstToolCallId: string;
+  firstOperationId: string;
+  firstSeenAt: string;
+  updatedAt: string;
+  publishedTime?: string;
+  authority?: number;
+  rerankScore?: number;
+  isOfficial: boolean;
+  weatherKind?: string;
+}
+
 export interface ConversationDetail {
   conversation: ConversationSummary;
   messages: ConversationMessage[];
   citations: Citation[];
   activeRunId?: string;
   workRequests?: WorkRequest[];
+  chatToolCalls?: ChatToolCall[];
+  conversationSources?: ConversationSource[];
 }
 
 export interface WorkRequest {
@@ -141,6 +186,8 @@ export interface ConversationEvent {
   status?: string;
   error?: string;
   workRequest?: WorkRequest;
+  chatTool?: ChatToolCall;
+  chatSources?: ConversationSource[];
 }
 
 export type ConversationEventName =
@@ -165,7 +212,9 @@ export type ConversationEventName =
   | 'approval.requested'
   | 'approval.resolved'
   | 'work.request.proposed'
-  | 'work.request.resolved';
+  | 'work.request.resolved'
+  | 'chat.tool.started'
+  | 'chat.tool.completed';
 
 export type BackendEvent =
   | { event: 'backend.ready'; data: { version: number; state: BootstrapState } }

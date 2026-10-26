@@ -1,5 +1,5 @@
 import { t } from './i18n';
-import type { ConversationMessage, WorkArtifact, WorkRequest, WorkToolCall } from './shared';
+import type { ChatToolCall, ConversationMessage, ConversationSource, WorkArtifact, WorkRequest, WorkToolCall } from './shared';
 
 export function toolDisplayName(name: string): string {
   const names = new Map<string, string>([
@@ -198,6 +198,130 @@ export function splitAtAnchors(content: string, offsets: number[]): string[] {
   }
   segments.push(content.slice(start));
   return segments;
+}
+
+export interface AnchoredChatTool { tool: ChatToolCall; offset: number }
+
+/** Binds chat tool status rows to the assistant message of their run at the offset where they started. */
+export function groupChatToolCalls(messages: ConversationMessage[], toolCalls: ChatToolCall[]): Map<string, AnchoredChatTool[]> {
+  const assistantByRun = new Map<string, ConversationMessage>();
+  for (const message of messages)
+    if (message.role === 'assistant' && message.runId) assistantByRun.set(message.runId, message);
+
+  const grouped = new Map<string, AnchoredChatTool[]>();
+  for (const tool of toolCalls) {
+    if (tool.toolName === 'request_work') continue;
+    const message = assistantByRun.get(tool.runId);
+    if (!message) continue;
+    const offset = Math.max(0, Math.min(tool.anchorOffset ?? message.content.length, message.content.length));
+    grouped.set(message.id, [...(grouped.get(message.id) ?? []), { tool, offset }]);
+  }
+  for (const tools of grouped.values()) tools.sort((left, right) => left.offset - right.offset);
+  return grouped;
+}
+
+export interface ReplyAnchorGroup {
+  offset: number;
+  tools: ChatToolCall[];
+  cards: WorkRequest[];
+}
+
+export function buildReplyAnchorGroups(cards: AnchoredWorkRequest[], tools: AnchoredChatTool[]): ReplyAnchorGroup[] {
+  const groups = new Map<number, ReplyAnchorGroup>();
+  const groupAt = (offset: number) => {
+    let group = groups.get(offset);
+    if (!group) groups.set(offset, group = { offset, tools: [], cards: [] });
+    return group;
+  };
+  for (const card of cards) groupAt(card.offset).cards.push(card.request);
+  for (const tool of tools) groupAt(tool.offset).tools.push(tool.tool);
+  return [...groups.values()].sort((left, right) => left.offset - right.offset);
+}
+
+export type ChatReplyPart =
+  | { kind: 'text'; text: string }
+  | { kind: 'anchor'; anchor: ReplyAnchorGroup };
+
+/**
+ * Interleaves reply text with UI-only status/card anchors. Each text piece is rendered as its own
+ * markdown block, so text before and after a tool call can never join into one paragraph.
+ */
+export function buildChatReplyParts(content: string, cards: AnchoredWorkRequest[], tools: AnchoredChatTool[]): ChatReplyPart[] {
+  const anchors = buildReplyAnchorGroups(cards, tools);
+  const segments = splitAtAnchors(content, anchors.map(anchor => anchor.offset));
+  const parts: ChatReplyPart[] = [];
+  segments.forEach((text, index) => {
+    if (text.length > 0) parts.push({ kind: 'text', text });
+    if (anchors[index]) parts.push({ kind: 'anchor', anchor: anchors[index] });
+  });
+  return parts;
+}
+
+export interface ChatToolStatusLabel {
+  label: string;
+  tone: 'running' | 'success' | 'failed' | 'muted';
+}
+
+export function chatToolStatusLabel(tool: ChatToolCall): ChatToolStatusLabel {
+  const history = tool.toolName === 'search_conversation_history';
+  if (tool.state === 'running') return { label: history ? t('正在搜索对话记录…') : t('正在搜索资料…'), tone: 'running' };
+  if (tool.state === 'failed') return { label: history ? t('搜索对话记录失败') : t('搜索失败'), tone: 'failed' };
+  if (tool.state === 'cancelled') return { label: t('已取消搜索'), tone: 'muted' };
+  return { label: history ? t('已搜索对话记录') : t('已搜索资料'), tone: 'success' };
+}
+
+export function searchOperationStatus(tool: ChatToolCall): ChatToolStatusLabel {
+  if (tool.state === 'running') return { label: t('搜索中…'), tone: 'running' };
+  if (tool.state === 'failed') return { label: t('搜索失败'), tone: 'failed' };
+  if (tool.state === 'cancelled') return { label: t('已取消'), tone: 'muted' };
+  return { label: t('已搜索'), tone: 'success' };
+}
+
+export function searchOperationEmptyText(tool: ChatToolCall): string {
+  if (tool.state === 'running') return t('正在搜索…');
+  if (tool.state === 'failed') return tool.errorMessage?.trim() || t('搜索失败');
+  if (tool.state === 'cancelled') return t('已取消搜索');
+  return t('未发现新增资料');
+}
+
+/** Sources introduced by this exact search operation, in stable first-discovery order. */
+export function sourcesForOperation(sources: ConversationSource[], tool: ChatToolCall): ConversationSource[] {
+  const owned = sources.filter(source => source.firstOperationId === tool.id);
+  if (owned.length > 0 || !tool.newSourceIds?.length) return owned.sort((left, right) => left.ordinal - right.ordinal);
+  const ids = new Set(tool.newSourceIds);
+  return sources.filter(source => ids.has(source.id)).sort((left, right) => left.ordinal - right.ordinal);
+}
+
+export interface CitationJump {
+  operationId: string;
+  sourceId: string;
+  ordinal: number;
+  expand: true;
+  scroll: true;
+  focus: true;
+  highlight: true;
+}
+
+/** Resolves an inline citation to the search operation that first discovered the source. */
+export function planCitationJump(
+  sources: ConversationSource[],
+  operations: ChatToolCall[],
+  ordinal: number
+): CitationJump | undefined {
+  const source = sources.find(item => item.ordinal === ordinal);
+  if (!source) return undefined;
+  const operation = operations.find(item => item.toolName === 'web_search' && item.id === source.firstOperationId)
+    ?? operations.find(item => item.toolName === 'web_search' && item.toolCallId === source.firstToolCallId);
+  if (!operation) return undefined;
+  return {
+    operationId: operation.id,
+    sourceId: source.id,
+    ordinal,
+    expand: true,
+    scroll: true,
+    focus: true,
+    highlight: true
+  };
 }
 
 export interface AnchoredWorkRequest { request: WorkRequest; offset: number }

@@ -1,5 +1,5 @@
 import { t } from './i18n';
-import type { BackendEvent, BootstrapState, ConversationDetail, ConversationEvent, DeviceState, WorkRequest } from './shared';
+import type { BackendEvent, BootstrapState, ChatToolCall, ConversationDetail, ConversationEvent, ConversationSource, DeviceState, WorkRequest } from './shared';
 
 export interface UiState {
   bootstrap?: BootstrapState;
@@ -66,8 +66,13 @@ function withoutEndedRun(detail: ConversationDetail | undefined, ended: Readonly
 // Backend persists content before publishing, therefore local content is always an extension of the snapshot.
 function keepAheadOfSnapshot(local: ConversationDetail | undefined, incoming: ConversationDetail | undefined): ConversationDetail | undefined {
   if (!local || !incoming || local.conversation.id !== incoming.conversation.id) return incoming;
+  const chatToolCalls = mergeChatToolCalls(local.chatToolCalls, incoming.chatToolCalls);
+  const conversationSources = mergeConversationSources(local.conversationSources, incoming.conversationSources);
   const streaming = new Map(local.messages.filter(message => message.status === 'streaming').map(message => [message.id, message]));
-  if (streaming.size === 0) return incoming;
+  if (streaming.size === 0)
+    return chatToolCalls === incoming.chatToolCalls && conversationSources === incoming.conversationSources
+      ? incoming
+      : { ...incoming, chatToolCalls, conversationSources };
   let replaced = false;
   const messages = incoming.messages.map(message => {
     const ahead = message.status === 'streaming' ? streaming.get(message.id) : undefined;
@@ -75,7 +80,39 @@ function keepAheadOfSnapshot(local: ConversationDetail | undefined, incoming: Co
     replaced = true;
     return { ...message, content: ahead.content };
   });
-  return replaced ? { ...incoming, messages } : incoming;
+  if (!replaced && chatToolCalls === incoming.chatToolCalls && conversationSources === incoming.conversationSources) return incoming;
+  return { ...incoming, messages: replaced ? messages : incoming.messages, chatToolCalls, conversationSources };
+}
+
+function mergeConversationSources(local: ConversationSource[] | undefined, incoming: ConversationSource[] | undefined): ConversationSource[] | undefined {
+  if (!local?.length) return incoming;
+  if (!incoming?.length) return local;
+  const byId = new Map(incoming.map(source => [source.id, source]));
+  let changed = false;
+  for (const source of local) {
+    const existing = byId.get(source.id);
+    if (!existing) { byId.set(source.id, source); changed = true; continue; }
+    if (Date.parse(source.updatedAt) > Date.parse(existing.updatedAt)) { byId.set(source.id, source); changed = true; }
+  }
+  if (!changed) return incoming;
+  return [...byId.values()].sort((left, right) => left.ordinal - right.ordinal);
+}
+
+// A refresh snapshot can arrive after a live started/completed event, so keep whichever copy
+// has the newer terminal state instead of dropping the status line.
+function mergeChatToolCalls(local: ChatToolCall[] | undefined, incoming: ChatToolCall[] | undefined): ChatToolCall[] | undefined {
+  if (!local?.length) return incoming;
+  if (!incoming?.length) return local;
+  const byId = new Map(incoming.map(tool => [tool.id, tool]));
+  for (const tool of local) {
+    const existing = byId.get(tool.id);
+    if (!existing || (existing.state === 'running' && tool.state !== 'running')) byId.set(tool.id, tool);
+  }
+  if (byId.size === incoming.length && [...byId.values()].every(tool => incoming.some(item => item === tool))) return incoming;
+  return [...byId.values()].sort((left, right) => {
+    const time = Date.parse(left.createdAt) - Date.parse(right.createdAt);
+    return Number.isNaN(time) || time === 0 ? left.id.localeCompare(right.id) : time;
+  });
 }
 
 function reduceConversationEvent(state: UiState, event: ConversationEvent): UiState {
@@ -130,7 +167,29 @@ function reduceConversationEvent(state: UiState, event: ConversationEvent): UiSt
     const workRequests = upsertWorkRequest(detail.workRequests ?? [], event.workRequest);
     return { ...state, bootstrap: { ...bootstrap, activeConversation: { ...detail, workRequests } } };
   }
+  if ((event.type === 'chat.tool.started' || event.type === 'chat.tool.completed') && event.chatTool) {
+    const chatToolCalls = upsertChatToolCall(detail.chatToolCalls ?? [], event.chatTool);
+    const conversationSources = event.chatSources?.length
+      ? upsertConversationSources(detail.conversationSources ?? [], event.chatSources)
+      : detail.conversationSources;
+    return { ...state, bootstrap: { ...bootstrap, activeConversation: { ...detail, chatToolCalls, conversationSources } } };
+  }
   return state;
+}
+
+function upsertConversationSources(sources: ConversationSource[], incoming: ConversationSource[]): ConversationSource[] {
+  const byId = new Map(sources.map(source => [source.id, source]));
+  for (const source of incoming) byId.set(source.id, source);
+  return [...byId.values()].sort((left, right) => left.ordinal - right.ordinal);
+}
+
+function upsertChatToolCall(tools: ChatToolCall[], tool: ChatToolCall): ChatToolCall[] {
+  const index = tools.findIndex(item => item.id === tool.id);
+  if (index < 0) return [...tools, tool];
+  if (tools[index].state !== 'running' && tool.state === 'running') return tools;
+  const next = tools.slice();
+  next[index] = tool;
+  return next;
 }
 
 function upsertWorkRequest(requests: WorkRequest[], request: WorkRequest): WorkRequest[] {
