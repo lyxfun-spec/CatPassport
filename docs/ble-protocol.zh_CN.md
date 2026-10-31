@@ -2,7 +2,7 @@
 
 ## GATT 布局
 
-设备作为 BLE peripheral，只允许一个客户端连接。当前产品客户端为 Windows 桌面端；`android/` 仅保留历史实现。
+设备作为 BLE peripheral，只允许一个客户端连接。当前产品客户端为 Windows 桌面端。
 
 | 特征 | 方向 | 属性 | 用途 |
 | --- | --- | --- | --- |
