@@ -32,7 +32,6 @@ public sealed partial class SqliteRepository
     {
         await using var db = await OpenAsync();
         await using var transaction = await db.BeginTransactionAsync();
-        await PreserveLegacyWorkTablesAsync(db, (SqliteTransaction)transaction);
         var command = db.CreateCommand();
         command.Transaction = (SqliteTransaction)transaction;
         command.CommandText = """
@@ -335,53 +334,6 @@ public sealed partial class SqliteRepository
             // transparently falls back to a bounded LIKE query.
             _ftsAvailable = false;
         }
-    }
-
-    private static async Task PreserveLegacyWorkTablesAsync(SqliteConnection db, SqliteTransaction transaction)
-    {
-        // An earlier, unrelated Work/Codex prototype used these two table names with a
-        // session_id schema. Preserve that data under a legacy name before creating the
-        // current conversation-based tables. CREATE TABLE IF NOT EXISTS alone is unsafe:
-        // its following indexes would reference columns absent from the legacy tables.
-        await PreserveLegacyTableAsync(db, transaction, "work_approvals", "conversation_id");
-        await PreserveLegacyTableAsync(db, transaction, "work_artifacts", "conversation_id");
-    }
-
-    private static async Task PreserveLegacyTableAsync(
-        SqliteConnection db,
-        SqliteTransaction transaction,
-        string tableName,
-        string currentSchemaColumn)
-    {
-        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var inspect = db.CreateCommand();
-        inspect.Transaction = transaction;
-        inspect.CommandText = $"PRAGMA table_info(\"{tableName}\")";
-        await using (var reader = await inspect.ExecuteReaderAsync())
-            while (await reader.ReadAsync()) columns.Add(reader.GetString(1));
-        if (columns.Count == 0 || columns.Contains(currentSchemaColumn)) return;
-
-        var suffix = 1;
-        string legacyName;
-        do
-        {
-            legacyName = suffix == 1 ? $"legacy_{tableName}" : $"legacy_{tableName}_{suffix}";
-            suffix++;
-        } while (await TableExistsAsync(db, transaction, legacyName));
-
-        var rename = db.CreateCommand();
-        rename.Transaction = transaction;
-        rename.CommandText = $"ALTER TABLE \"{tableName}\" RENAME TO \"{legacyName}\"";
-        await rename.ExecuteNonQueryAsync();
-    }
-
-    private static async Task<bool> TableExistsAsync(SqliteConnection db, SqliteTransaction transaction, string tableName)
-    {
-        var command = db.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = "SELECT 1 FROM sqlite_master WHERE type='table' AND name=$name";
-        command.Parameters.AddWithValue("$name", tableName);
-        return await command.ExecuteScalarAsync() is not null;
     }
 
     public async Task<AppSettings> LoadSettingsAsync()
