@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param([switch]$RequireSigned)
 
 $ErrorActionPreference = 'Stop'
@@ -20,7 +20,7 @@ if ($versionPolicyTest.ExitCode -ne 0) { throw '安装版本策略自检失败�
 Write-Host '安装版本策略自检通过。'
 
 Write-Host '==> 验证关键安装配置'
-[xml]$package = Get-Content (Join-Path $scriptRoot 'msi\Package.wxs')
+[xml]$package = Get-Content (Join-Path $scriptRoot 'msi\Package.wxs') -Raw -Encoding UTF8
 $packageNode = $package.Wix.Package
 if ($packageNode.Scope -ne 'perMachine') { throw 'MSI 必须使用 perMachine 范围。' }
 if (-not $packageNode.MajorUpgrade) { throw 'MSI 缺少 MajorUpgrade 配置。' }
