@@ -1,19 +1,18 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package Name="小猫助手"
-           Manufacturer="FoloToy"
+           Manufacturer="CatPassport contributors"
            Version="$(ProductVersion)"
            UpgradeCode="7F1998F1-D743-45B3-BFF9-6B37A0A51A2F"
            Language="2052"
            Scope="perMachine"
            InstallerVersion="500"
            Compressed="yes">
-    <SummaryInformation Description="小猫助手 Windows 桌面客户端" Manufacturer="FoloToy" />
+    <SummaryInformation Description="小猫助手 Windows 桌面客户端" Manufacturer="CatPassport contributors" />
     <MajorUpgrade AllowSameVersionUpgrades="yes"
                   DowngradeErrorMessage="已安装更新版本的小猫助手，无法降级。" />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
     <Icon Id="CatAssistantIcon" SourceFile="$(AppIcon)" />
     <Property Id="ARPPRODUCTICON" Value="CatAssistantIcon" />
-    <Property Id="ARPHELPLINK" Value="https://folotoy.com/" />
     <Property Id="CREATE_DESKTOP_SHORTCUT" Value="1" Secure="yes" />
     <Property Id="CREATE_STARTMENU_SHORTCUT" Value="1" Secure="yes" />
 

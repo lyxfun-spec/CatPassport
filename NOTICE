@@ -1,0 +1,49 @@
+CatPassport
+Copyright (c) 2026 CatPassport contributors
+
+This project is licensed under the MIT License (see LICENSE), except for the
+third-party components listed below.
+
+## Upstream firmware baseline
+
+The firmware in `firmware/` is derived from the FoloToy AI Passport open-source
+firmware, which is licensed under the MIT License:
+
+    MIT License
+
+    Copyright (c) 2026 FoloToy
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+Upstream project: https://github.com/FoloToy/ai-passport
+
+CatPassport is an independent community project and is not affiliated with or
+endorsed by FoloToy.
+
+## Other third-party components
+
+- Generated firmware font (`firmware/main/cat_font_16.c`): derived from Noto
+  Sans SC, SIL Open Font License 1.1. See `docs/third-party-notices.md`.
+- Bundled flasher executable (`flash-tool/tools/esptool.exe`): esptool,
+  GPL-2.0-or-later, distributed as a separate program. See
+  `flash-tool/THIRD_PARTY_NOTICES.md` and `flash-tool/tools/LICENSE.esptool.txt`.
+- ESP-IDF, LVGL and other firmware dependencies are fetched at build time by
+  the ESP-IDF component manager and remain under their own licenses.
+- Windows client and installer dependencies (Electron, React, .NET, WiX, etc.)
+  remain under their own licenses.
