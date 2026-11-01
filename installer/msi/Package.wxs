@@ -13,6 +13,7 @@
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
     <Icon Id="CatAssistantIcon" SourceFile="$(AppIcon)" />
     <Property Id="ARPPRODUCTICON" Value="CatAssistantIcon" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/lyxfun-spec/CatPassport" />
     <Property Id="CREATE_DESKTOP_SHORTCUT" Value="1" Secure="yes" />
     <Property Id="CREATE_STARTMENU_SHORTCUT" Value="1" Secure="yes" />
 
